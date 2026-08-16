@@ -25,8 +25,8 @@ pub fn handler(key: Key, app: &mut App) {
     Key::Char('0') => app.toggle_setting(1),
     Key::Char('m') => app.toggle_setting(4),
     Key::Char('P') => app.toggle_setting(5),
-    Key::Char('c') => app.toggle_setting(10),
-    Key::Char('V') => app.toggle_setting(15),
+    Key::Char('c') => app.toggle_setting(16),
+    Key::Char('V') => app.toggle_visualizer_style(),
     _ => {}
   };
 }

@@ -6,7 +6,7 @@ use crate::app::{
 use crate::event::Key;
 use crate::backend::IoEvent;
 use crate::tui::layout::{
-  build_playbar_controls, build_playbar_title, create_artist_string, gear_click_rect,
+  build_playbar_controls, build_playbar_title, gear_click_rect,
   playbar_artist_row,
   playbar_controls_x, playbar_progress_rect, playbar_song_row, playbar_text_click_range,
   playbar_volume_rect, search_box_rect, settings_section_rect, shortcuts_table_rect,
@@ -14,6 +14,7 @@ use crate::tui::layout::{
   PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, SETTINGS_ROW_COUNT, SMALL_TERMINAL_HEIGHT, VOLUME_BAR_LEN,
   header_height, VOLUME_LABEL_LEN,
 };
+use crate::tui::ColumnId;
 use crate::tui::layout;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -156,7 +157,7 @@ fn handle_left_click(x: u16, y: u16, app: &mut App) -> bool {
       handle_settings_click(x, y, app);
       return false;
     }
-    ActiveBlock::Error | ActiveBlock::SelectDevice | ActiveBlock::Analysis => return false,
+    ActiveBlock::Error | ActiveBlock::SelectDevice => return false,
     ActiveBlock::MusicView => {
       if let Some(PlayableItem::Track(track)) = app
         .current_playback_context
@@ -188,6 +189,9 @@ fn handle_left_click(x: u16, y: u16, app: &mut App) -> bool {
 
   if let Some(input_box) = input_box {
     if y >= input_box.y && y < input_box.y + input_box.height {
+      // Leaving the sidebar for the search box or settings clears the
+      // sidebar highlight latch.
+      app.sidebar_latched_block = None;
       let search_box = search_box_rect(app, input_box);
       if x >= search_box.x && x < search_box.x + search_box.width {
         app.set_current_route_state(Some(ActiveBlock::Input), Some(ActiveBlock::Input));
@@ -265,9 +269,7 @@ fn handle_wheel(up: bool, mouse: MouseEvent, app: &mut App) {
       app.help_scroll_offset = offset as u32;
       return;
     }
-    ActiveBlock::Error
-    | ActiveBlock::SelectDevice
-    | ActiveBlock::Analysis => return,
+    ActiveBlock::Error | ActiveBlock::SelectDevice => return,
     _ => {}
   }
 
@@ -356,6 +358,7 @@ fn content_block_at(app: &App) -> Option<ActiveBlock> {
     RouteId::Podcasts => Some(ActiveBlock::Podcasts),
     RouteId::PodcastEpisodes => Some(ActiveBlock::EpisodeTable),
     RouteId::MadeForYou => Some(ActiveBlock::MadeForYou),
+    RouteId::Search => Some(ActiveBlock::SearchResultBlock),
     _ => None,
   }
 }
@@ -441,6 +444,12 @@ fn handle_scrollbar_down(x: u16, y: u16, app: &mut App) -> bool {
   let Some(block) = content_block_at(app) else {
     return false;
   };
+  // The search songs table sits one row below `right` (the tab bar row), so
+  // its scrollbar drag needs the list rect, not the content rect.
+  if app.get_current_route().id == RouteId::Search {
+    let (_, list_rect) = search_layout_parts(app, right);
+    return arm_scrollbar(x, y, app, block, list_rect);
+  }
   arm_scrollbar(x, y, app, block, right)
 }
 
@@ -523,6 +532,7 @@ fn thumb_geometry(right: Rect, count: usize, viewport: usize, offset: usize) -> 
 }
 
 fn set_selected(app: &mut App, block: ActiveBlock, index: usize) {
+  app.selection_engaged = true;
   match block {
     ActiveBlock::TrackTable => app.track_table.selected_index = index,
     ActiveBlock::AlbumTracks => match app.album_table_context {
@@ -558,7 +568,7 @@ fn toggle_music_view(app: &mut App) {
 }
 
 fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
-  // Title row: the trailing ┌─┐ window toggles the music view fullscreen, any
+  // Title row: the trailing [ ] window toggles the music view fullscreen, any
   // other cell opens the device selector.
   if y == playbar.y {
     if let Some(ctx) = &app.current_playback_context {
@@ -566,7 +576,8 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
         if ctx.is_playing { "Playing" } else { "Paused" },
         &ctx.device.name,
       );
-      if x == playbar.x + 1 + title.width() as u16 - 1 {
+      let glyph_x = playbar.x + 1 + title.width() as u16;
+      if x >= glyph_x.saturating_sub(3) && x < glyph_x {
         toggle_music_view(app);
         return;
       }
@@ -588,16 +599,9 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
     _ => 0,
   };
 
-  let (album_click, artist_click_id, artist_click_name) = match track_item {
-    PlayableItem::Track(track) => (
-      Some(track.album.clone()),
-      track
-        .artists
-        .first()
-        .and_then(|a| a.id.as_ref().map(|id| id.id().to_string())),
-      track.artists.first().map(|a| a.name.clone()),
-    ),
-    _ => (None, None, None),
+  let album_click = match track_item {
+    PlayableItem::Track(track) => Some(track.album.clone()),
+    _ => None,
   };
 
   if playbar.width > 70 {
@@ -675,21 +679,25 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
   }
   if y == playbar_artist_row(playbar).y {
     if let Some(bar) = playbar_progress_rect(playbar) {
-      let artists = match track_item {
-        PlayableItem::Track(track) => create_artist_string(&track.artists),
-        PlayableItem::Episode(episode) => format!("{} - {}", episode.name, episode.show.name),
-        _ => String::new(),
-      };
-      let (start, end) = playbar_text_click_range(
-        playbar_artist_row(playbar),
-        bar.x.saturating_sub(PLAYBAR_TIME_LEN),
-        &artists,
-      );
-      if x >= start && x < end {
-        if let (Some(artist_id), Some(artist_name)) = (&artist_click_id, &artist_click_name) {
-          app.get_artist(artist_id.clone(), artist_name.clone());
-          app.push_navigation_stack(RouteId::Artist, ActiveBlock::ArtistBlock);
-          return;
+      if let PlayableItem::Track(track) = track_item {
+        // Every artist name is its own click zone: a multi-artist track
+        // ("Avicii, Nicky Romero") opens whichever name is clicked.
+        let row = playbar_artist_row(playbar);
+        let limit = (bar.x.saturating_sub(PLAYBAR_TIME_LEN).saturating_sub(row.x + 1)) as usize;
+        let mut offset = 0usize;
+        for artist in &track.artists {
+          let seg = artist.name.chars().count();
+          if offset < limit {
+            let start = row.x + offset as u16;
+            if x >= start && x < (start + seg as u16).min(row.x + limit as u16) {
+              if let Some(artist_id) = artist.id.as_ref().map(|id| id.id().to_string()) {
+                app.get_artist(artist_id, artist.name.clone());
+                app.push_navigation_stack(RouteId::Artist, ActiveBlock::ArtistBlock);
+              }
+              return;
+            }
+          }
+          offset += seg + 2; // ", " separator
         }
       }
     }
@@ -742,6 +750,7 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
           app.library.selected_index,
         ) {
           app.library.selected_index = index;
+          app.sidebar_latched_block = Some(ActiveBlock::Library);
           app.set_current_route_state(Some(ActiveBlock::Library), None);
           return true;
         }
@@ -757,6 +766,7 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
         let selected = app.selected_playlist_index.unwrap_or(0);
         if let Some(index) = list_row_index(y, playlists, count, selected) {
           app.selected_playlist_index = Some(index);
+          app.sidebar_latched_block = Some(ActiveBlock::MyPlaylists);
           app.set_current_route_state(Some(ActiveBlock::MyPlaylists), None);
           return true;
         }
@@ -771,6 +781,7 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
       if y >= chunk.y && y < chunk.y + chunk.height {
         if let Some(index) = list_row_index(y, chunk, count, app.library.selected_index) {
           app.library.selected_index = index;
+          app.sidebar_latched_block = Some(ActiveBlock::Library);
           app.set_current_route_state(Some(ActiveBlock::Library), None);
           return true;
         }
@@ -790,6 +801,7 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
       if y >= chunk.y && y < chunk.y + chunk.height {
         if let Some(index) = list_row_index(y, chunk, count, selected) {
           app.selected_playlist_index = Some(index);
+          app.sidebar_latched_block = Some(ActiveBlock::MyPlaylists);
           app.set_current_route_state(Some(ActiveBlock::MyPlaylists), None);
           return true;
         }
@@ -894,7 +906,12 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
         .as_ref()
         .map(|recently_played| recently_played.items.len())
         .unwrap_or(0);
-      if let Some(index) = table_row_index(y, chunk, count, app.recently_played.index) {
+      // The load-more row is drawn after the items, so count it when mapping.
+      let total_rows = count + usize::from(app.recently_played_has_more());
+      if let Some(index) = table_row_index(y, chunk, total_rows, app.recently_played.index) {
+        if app.recently_played_has_more() && index == count {
+          app.load_more_recently_played();
+        }
         app.recently_played.index = index;
         app.set_current_route_state(Some(ActiveBlock::RecentlyPlayed), None);
         return true;
@@ -1045,14 +1062,16 @@ fn set_search_selected(app: &mut App, block: SearchResultBlock, index: usize) {
 fn handle_search_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
   let (tab_cells, list_rect) = search_layout_parts(app, chunk);
 
-  // Tab click: expand (and lazily load) that block.
+  // Tab click: expand (and lazily load) that block. Returns false so the
+  // click-to-Enter chain is skipped: switching tabs must not play the first
+  // song of the block (like the artist page tabs).
   if let Some((block, _)) = tab_cells.into_iter().find(|(_, rect)| {
     x >= rect.x && x < rect.x + rect.width && y == rect.y
   }) {
     app.load_search_block(&block);
     app.search_results.selected_block = block;
     app.set_current_route_state(Some(ActiveBlock::SearchResultBlock), None);
-    return true;
+    return false;
   }
 
   let block = app.search_results.selected_block.clone();
@@ -1063,9 +1082,14 @@ fn handle_search_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
   let has_more = app.search_block_has_more(&block);
   let (count, selected) = search_block_state(app, block.clone());
   if count + usize::from(has_more) > 0 {
-    if let Some(index) =
+    // The tracks tab renders as a table (header row above the data rows),
+    // the other tabs as plain lists.
+    let index = if block == SearchResultBlock::SongSearch {
+      table_row_index(y, list_rect, count + usize::from(has_more), selected)
+    } else {
       list_row_index(y, list_rect, count + usize::from(has_more), selected)
-    {
+    };
+    if let Some(index) = index {
       if has_more && index == count {
         // The " Load more " row: fetch the next page.
         app.load_more_search_block(&block);
@@ -1124,50 +1148,128 @@ fn handle_search_wheel(up: bool, app: &mut App) {
 }
 
 fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
-  let columns = Layout::default()
-    .direction(Direction::Horizontal)
-    .constraints(
-      [
-        Constraint::Percentage(33),
-        Constraint::Percentage(33),
-        Constraint::Percentage(33),
-      ]
-      .as_ref(),
-    )
-    .split(chunk);
+  if y == chunk.y {
+    let cell_w = chunk.width / 2;
+    let tab = if x < chunk.x + cell_w {
+      ArtistBlock::TopTracks
+    } else {
+      ArtistBlock::Albums
+    };
+    app.artist_select_tab(tab);
+    app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
+    // Return false: a tab click only switches tabs. The caller's
+    // click-to-Enter chain must not fire here, or the freshly selected
+    // top-tracks tab would start playing its first song.
+    return false;
+  }
 
-  let column = if x < columns[0].x + columns[0].width {
-    0
-  } else if x < columns[1].x + columns[1].width {
-    1
+  let list_rect = Rect {
+    x: chunk.x,
+    y: chunk.y + 1,
+    width: chunk.width,
+    height: chunk.height.saturating_sub(1),
+  };
+
+  let (shown, top_has_more, albums_has_more, count, selected) = {
+    let Some(artist) = &app.artist else {
+      return false;
+    };
+    let shown = if artist.artist_selected_block == ArtistBlock::Empty {
+      artist.artist_hovered_block
+    } else {
+      artist.artist_selected_block
+    };
+    let top_has_more = artist.top_tracks_has_more;
+    let albums_has_more = artist.albums.items.len() < artist.albums.total as usize;
+    let (count, selected) = match shown {
+      ArtistBlock::TopTracks => (
+        artist.top_tracks.len() + usize::from(top_has_more),
+        artist.selected_top_track_index,
+      ),
+      ArtistBlock::Albums => (
+        artist.albums.items.len() + usize::from(albums_has_more),
+        artist.selected_album_index,
+      ),
+      ArtistBlock::Empty | ArtistBlock::RelatedArtists => (0, 0),
+    };
+    (shown, top_has_more, albums_has_more, count, selected)
+  };
+  if shown == ArtistBlock::Empty {
+    return false;
+  }
+
+  // The top-tracks tab renders a real table (header row at list_rect.y+1,
+  // rows from list_rect.y+2); the albums tab keeps the plain list.
+  let index = if shown == ArtistBlock::TopTracks {
+    table_row_index(y, list_rect, count, selected)
   } else {
-    2
+    list_row_index(y, list_rect, count, selected)
   };
-
-  let Some(artist) = &app.artist else {
-    return false;
-  };
-  let has_more = artist.albums.items.len() < artist.albums.total as usize;
-  let (count, selected) = match column {
-    0 => (artist.top_tracks.len(), artist.selected_top_track_index),
-    1 => (
-      artist.albums.items.len() + usize::from(has_more),
-      artist.selected_album_index,
-    ),
-    _ => (
-      artist.related_artists.len(),
-      artist.selected_related_artist_index,
-    ),
-  };
-
-  let Some(index) = list_row_index(y, columns[column], count, selected) else {
+  let Some(index) = index else {
     return false;
   };
 
-  if column == 1 && has_more && index == artist.albums.items.len() {
+  // Top-tracks rows are a table: clicking a name of an artist other than
+  // the page artist, inside the Artist column, opens that artist.
+  if shown == ArtistBlock::TopTracks {
+    let nav = app
+      .artist
+      .as_ref()
+      .and_then(|artist| {
+        let track = artist.top_tracks.get(index)?;
+        let b = &app.user_config.behavior;
+        let columns = song_table_columns(
+          list_rect.width,
+          true,
+          b.show_album_column,
+          b.show_artist_column,
+          b.show_length_column,
+          b.show_date_added_column,
+        );
+        let (col_x, col_w) = columns
+          .iter()
+          .find(|(column, _, _)| *column == ColumnId::Artist)
+          .map(|(_, x, w)| (list_rect.x + x, *w))?;
+        if x < col_x || x >= col_x + col_w {
+          return None;
+        }
+        let mut offset = 0usize;
+        for a in &track.artists {
+          let seg = a.name.chars().count() as u16;
+          let start = col_x + offset as u16;
+          if x >= start && x < start + seg.min(col_w) {
+            if let (Some(aid), Some(page_id)) =
+              (a.id.as_ref().map(|id| id.id().to_string()), Some(artist.artist_id.clone()))
+            {
+              if aid != page_id {
+                return Some((aid, a.name.clone()));
+              }
+            }
+            return None;
+          }
+          offset += seg as usize + 2; // ", " separator
+        }
+        None
+      });
+    if let Some((artist_id, artist_name)) = nav {
+      app.get_artist(artist_id, artist_name);
+      app.push_navigation_stack(RouteId::Artist, ActiveBlock::ArtistBlock);
+      return true;
+    }
+  }
+
+  if shown == ArtistBlock::TopTracks && top_has_more && index == count - 1 {
+    app.load_more_artist_top_tracks();
+    if let Some(artist) = &mut app.artist {
+      artist.selected_top_track_index = index;
+    }
+    app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
+    return true;
+  }
+
+  if shown == ArtistBlock::Albums && albums_has_more && index == count - 1 {
     app.load_more_albums();
     if let Some(artist) = &mut app.artist {
-      artist.artist_selected_block = ArtistBlock::Albums;
       artist.selected_album_index = index;
     }
     app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
@@ -1175,20 +1277,11 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
   }
 
   if let Some(artist) = &mut app.artist {
-      match column {
-        0 => {
-          artist.selected_top_track_index = index;
-          artist.artist_selected_block = ArtistBlock::TopTracks;
-        }
-        1 => {
-          artist.selected_album_index = index;
-          artist.artist_selected_block = ArtistBlock::Albums;
-        }
-        _ => {
-          artist.selected_related_artist_index = index;
-          artist.artist_selected_block = ArtistBlock::RelatedArtists;
-        }
-      }
+    match shown {
+      ArtistBlock::TopTracks => artist.selected_top_track_index = index,
+      ArtistBlock::Albums => artist.selected_album_index = index,
+      ArtistBlock::Empty | ArtistBlock::RelatedArtists => return false,
+    }
     app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
     return true;
   }
@@ -1200,6 +1293,9 @@ fn list_row_index(y: u16, chunk: Rect, count: usize, selected: usize) -> Option<
     return None;
   }
   let viewport = chunk.height.saturating_sub(2) as usize;
+  // The drawn window is items[selected - viewport + 1 ..= selected] (ratatui
+  // keeps the selection visible at the bottom row), so clicks must map back
+  // through the same +1 offset.
   let offset = if selected >= viewport {
     selected - viewport + 1
   } else {
@@ -2148,7 +2244,7 @@ mod tests {
     let play_x = play_x.unwrap();
     handle_mouse(click_event(play_x, playbar.y + 1), &mut app);
     assert!(app.is_loading);
-    // The title row is a button: any cell except the ┌─┐ window opens the
+    // The title row is a button: any cell except the [ ] window opens the
     // device selector, the window toggles the music view fullscreen.
     app.is_loading = false;
     handle_mouse(click_event(play_x + 2, playbar.y), &mut app);
@@ -2160,11 +2256,17 @@ mod tests {
       if ctx.is_playing { "Playing" } else { "Paused" },
       &ctx.device.name,
     );
-    let glyph_x = playbar.x + 1 + title.width() as u16 - 1;
-    handle_mouse(click_event(glyph_x, playbar.y), &mut app);
-    assert_eq!(app.get_current_route().id, crate::app::RouteId::MusicView);
-    // Clicking the glyph again pops back.
-    handle_mouse(click_event(glyph_x, playbar.y), &mut app);
-    assert_ne!(app.get_current_route().id, crate::app::RouteId::MusicView);
+    // The [ ] button is three cells: any of them toggles the music view.
+    let glyph_right = playbar.x + 1 + title.width() as u16;
+    for cell in [glyph_right - 1, glyph_right - 2, glyph_right - 3] {
+      handle_mouse(click_event(cell, playbar.y), &mut app);
+      assert_eq!(app.get_current_route().id, crate::app::RouteId::MusicView);
+      handle_mouse(click_event(cell, playbar.y), &mut app);
+      assert_ne!(app.get_current_route().id, crate::app::RouteId::MusicView);
+    }
+    // One cell before the button opens the device selector instead.
+    app.is_loading = false;
+    handle_mouse(click_event(glyph_right - 4, playbar.y), &mut app);
+    assert!(app.is_loading);
   }
 }

@@ -58,8 +58,7 @@ pub(crate) async fn handle_mock_event(&mut self, io_event: IoEvent) {
     match io_event {
       IoEvent::GetPlaylists => {
         let mut app = self.app.lock().await;
-        app.playlists = Some(self.mock_playlist_page());
-        app.selected_playlist_index = Some(0);
+        app.playlists = Some(self.mock_playlist_page(0));
       }
       IoEvent::GetUser => {
         let mut app = self.app.lock().await;
@@ -138,7 +137,6 @@ pub(crate) async fn handle_mock_event(&mut self, io_event: IoEvent) {
             let mut app = self.app.lock().await;
             app.playlist_tracks = Some(page);
             app.playlist_offset = 0;
-            app.selected_playlist_index = Some(0);
             app.track_table.context = Some(TrackTableContext::MyPlaylists);
             app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
             if let Some((name, desc)) = &saved.track_sort {
@@ -222,17 +220,74 @@ pub(crate) async fn handle_mock_event(&mut self, io_event: IoEvent) {
         let mut app = self.app.lock().await;
         app.is_fetching_next_page = false;
         match block {
-          SearchResultBlock::SongSearch => app.search_results.tracks = Some(self.mock_track_page(4)),
+          SearchResultBlock::SongSearch => {
+            let base = app
+              .search_results
+              .tracks
+              .as_ref()
+              .map(|p| p.items.len() as u32)
+              .unwrap_or(0);
+            let page = self.mock_track_page(4, base);
+            if let Some(old) = &mut app.search_results.tracks {
+              old.items.extend(page.items);
+              old.limit = 4;
+              old.offset = base;
+              old.total = old.items.len() as u32;
+            } else {
+              app.search_results.tracks = Some(page);
+            }
+          }
           SearchResultBlock::ArtistSearch => {
-            app.search_results.artists = Some(self.mock_artist_page(3))
+            let base = app
+              .search_results
+              .artists
+              .as_ref()
+              .map(|p| p.items.len() as u32)
+              .unwrap_or(0);
+            let page = self.mock_artist_page(3, base);
+            if let Some(old) = &mut app.search_results.artists {
+              old.items.extend(page.items);
+              old.limit = 3;
+              old.offset = base;
+              old.total = old.items.len() as u32;
+            } else {
+              app.search_results.artists = Some(page);
+            }
           }
           SearchResultBlock::AlbumSearch => {
-            app.search_results.albums = Some(self.mock_album_page(3))
+            let base = app
+              .search_results
+              .albums
+              .as_ref()
+              .map(|p| p.items.len() as u32)
+              .unwrap_or(0);
+            let page = self.mock_album_page(3, base);
+            if let Some(old) = &mut app.search_results.albums {
+              old.items.extend(page.items);
+              old.limit = 3;
+              old.offset = base;
+              old.total = old.items.len() as u32;
+            } else {
+              app.search_results.albums = Some(page);
+            }
           }
           SearchResultBlock::PlaylistSearch => {
-            app.search_results.playlists = Some(self.mock_playlist_page())
+            let base = app
+              .search_results
+              .playlists
+              .as_ref()
+              .map(|p| p.items.len() as u32)
+              .unwrap_or(0);
+            let page = self.mock_playlist_page(base);
+            if let Some(old) = &mut app.search_results.playlists {
+              old.items.extend(page.items);
+              old.offset = base;
+              old.total = old.items.len() as u32;
+            } else {
+              app.search_results.playlists = Some(page);
+            }
           }
-          SearchResultBlock::ShowSearch => app.search_results.shows = Some(self.mock_show_page()),
+          SearchResultBlock::ShowSearch => {}
           SearchResultBlock::Empty => {}
         }
       }
@@ -240,8 +295,26 @@ pub(crate) async fn handle_mock_event(&mut self, io_event: IoEvent) {
         let mut app = self.app.lock().await;
         app.recently_played.result = Some(self.mock_history_page());
       }
+      IoEvent::GetMoreRecentlyPlayed(_before) => {
+        let mut app = self.app.lock().await;
+        if let Some(page) = &mut app.recently_played.result {
+          let base = page.items.len();
+          let more = (0..3)
+            .map(|i| {
+              serde_json::from_value(json!({
+                "track": self.mock_track_json(base + i),
+                "played_at": "2024-01-01T00:00:00Z",
+                "context": null,
+              }))
+              .unwrap()
+            })
+            .collect::<Vec<_>>();
+          page.items.extend(more);
+          page.total = Some(page.items.len() as u32);
+        }
+      }
       IoEvent::GetFollowedArtists(_after) => {
-        let page = self.mock_artist_page(3);
+        let page = self.mock_artist_page(3, 0);
         let mut app = self.app.lock().await;
         app.artists = page.items.clone();
         app.library.saved_artists.add_pages(CursorBasedPage {
@@ -347,46 +420,19 @@ pub(crate) async fn handle_mock_event(&mut self, io_event: IoEvent) {
           tracks,
           selected_index: 0,
         });
-        const MOCK_PLAYCOUNTS: [u64; 6] = [
-          890_000,
-          48_200_000,
-          12_400_000,
-          2_100_000_000,
-          67_000_000,
-          5_400_000,
-        ];
-        for i in 0..count as usize {
-          app
-            .top_track_playcounts
-            .insert(format!("mocktrack{}", i), MOCK_PLAYCOUNTS[i % 6]);
-        }
         app.album_table_context = AlbumTableContext::Simplified;
         app.push_navigation_stack(RouteId::AlbumTracks, ActiveBlock::AlbumTracks);
       }
       IoEvent::GetAlbumTracksMore(_, offset) => {
         let mut app = self.app.lock().await;
         if let Some(album) = &mut app.selected_album_simplified {
-          const MOCK_PLAYCOUNTS: [u64; 6] = [
-            890_000,
-            48_200_000,
-            12_400_000,
-            2_100_000_000,
-            67_000_000,
-            5_400_000,
-          ];
           let total = album.tracks.total as usize;
           let end = (offset as usize + self.large_search_limit as usize).min(total);
           let new_items: Vec<_> = (album.tracks.items.len()..end)
             .map(|i| serde_json::from_value(self.mock_track_json(i)).unwrap())
             .collect();
-          let new_playcounts: Vec<_> = (album.tracks.items.len()..end)
-            .map(|i| (format!("mocktrack{}", i), MOCK_PLAYCOUNTS[i % 6]))
-            .collect();
           album.tracks.items.extend(new_items);
           album.tracks.offset = end as u32;
-          for (track_id, count) in new_playcounts {
-            app.top_track_playcounts.insert(track_id, count);
-          }
         }
       }
       IoEvent::RefreshAuthentication
@@ -401,7 +447,7 @@ pub(crate) async fn handle_mock_event(&mut self, io_event: IoEvent) {
       | IoEvent::UserFollowPlaylist(..)
       | IoEvent::UserUnfollowPlaylist(..)
       | IoEvent::GetAudioAnalysis(_)
-      | IoEvent::GetLyrics(_) => {
+      | IoEvent::GetLyrics => {
         // Real-looking synced lyrics (public-domain "Amazing Grace") so the
         // Music View in mock mode shows how actual scrolled lyrics behave.
         let mut app = self.app.lock().await;
@@ -455,35 +501,6 @@ pub(crate) async fn handle_mock_event(&mut self, io_event: IoEvent) {
       IoEvent::GetArtist(..) => {
         let mut app = self.app.lock().await;
         app.artist = Some(self.mock_artist());
-        app.top_track_playcounts = [
-          ("mocktrack0".to_string(), 890_000u64),
-          ("mocktrack1".to_string(), 48_200_000),
-          ("mocktrack2".to_string(), 12_400_000),
-          ("mocktrack3".to_string(), 2_100_000_000),
-          ("mocktrack4".to_string(), 67_000_000),
-          ("mocktrack5".to_string(), 5_400_000),
-        ]
-        .into_iter()
-        .collect();
-      }
-      IoEvent::GetTrackPlaycounts(album_ids) => {
-        const MOCK_PLAYCOUNTS: [(u32, u64); 6] = [
-          (0, 890_000),
-          (1, 48_200_000),
-          (2, 12_400_000),
-          (3, 2_100_000_000),
-          (4, 67_000_000),
-          (5, 5_400_000),
-        ];
-        let queried: std::collections::HashSet<String> = album_ids.into_iter().collect();
-        let mut app = self.app.lock().await;
-        for (i, count) in MOCK_PLAYCOUNTS {
-          if queried.contains(&format!("mockalbum{}", i % 6)) {
-            app
-              .top_track_playcounts
-              .insert(format!("mocktrack{}", i), count);
-          }
-        }
       }
       IoEvent::GetArtistAlbumsMore(_, offset) => {
         let mut app = self.app.lock().await;
@@ -496,6 +513,16 @@ pub(crate) async fn handle_mock_event(&mut self, io_event: IoEvent) {
               .push(Self::mock_album_json(i));
           }
           artist.albums.offset = end as u32;
+        }
+      }
+      IoEvent::GetArtistTopTracksMore(_, _, offset) => {
+        let mut app = self.app.lock().await;
+        if let Some(artist) = &mut app.artist {
+          let end = ((offset + 10) as usize).min(artist.top_tracks_total);
+          for i in artist.top_tracks.len()..end {
+            artist.top_tracks.push(self.mock_track(i));
+          }
+          artist.top_tracks_has_more = end < artist.top_tracks_total;
         }
       }
       | IoEvent::ToggleSaveTrack(_)
@@ -512,6 +539,7 @@ pub(crate) async fn handle_mock_event(&mut self, io_event: IoEvent) {
       | IoEvent::GetShow(_)
       | IoEvent::GetCurrentShowEpisodes(..)
       | IoEvent::AddItemToQueue(_)
+      | IoEvent::AddTrackToPlaylist(..)
       | IoEvent::CleanCache
       | IoEvent::RefreshPlaylists
       | IoEvent::RefreshSavedTracks
@@ -667,6 +695,8 @@ pub(crate) fn mock_track_json(&self, i: usize) -> serde_json::Value {
       albums: albums_page,
       related_artists,
       top_tracks,
+      top_tracks_total: 26,
+      top_tracks_has_more: true,
       selected_album_index: 0,
       selected_related_artist_index: 0,
       selected_top_track_index: 0,
@@ -675,8 +705,8 @@ pub(crate) fn mock_track_json(&self, i: usize) -> serde_json::Value {
     }
   }
 
-  fn mock_playlist_page(&self) -> Page<SimplifiedPlaylist> {
-    let items = (0..3)
+  fn mock_playlist_page(&self, offset: u32) -> Page<SimplifiedPlaylist> {
+    let items = (offset..offset + 3)
       .map(|i| {
         serde_json::from_value(json!({
           "collaborative": false,
@@ -765,20 +795,20 @@ pub(crate) fn mock_saved_tracks_page(&self, offset: u32) -> Page<SavedTrack> {
     }
   }
 
-  fn mock_track_page(&self, count: u32) -> Page<FullTrack> {
+  fn mock_track_page(&self, count: u32, offset: u32) -> Page<FullTrack> {
     Page {
       href: String::new(),
-      items: (0..count).map(|i| self.mock_track(i as usize)).collect(),
+      items: (offset..offset + count).map(|i| self.mock_track(i as usize)).collect(),
       limit: count,
       next: None,
-      offset: 0,
+      offset,
       previous: None,
       total: count,
     }
   }
 
-  fn mock_artist_page(&self, count: u32) -> Page<FullArtist> {
-    let items = (0..count)
+  fn mock_artist_page(&self, count: u32, offset: u32) -> Page<FullArtist> {
+    let items = (offset..offset + count)
       .map(|i| {
         serde_json::from_value(json!({
           "external_urls": {},
@@ -795,14 +825,14 @@ pub(crate) fn mock_saved_tracks_page(&self, offset: u32) -> Page<SavedTrack> {
       items,
       limit: count,
       next: None,
-      offset: 0,
+      offset,
       previous: None,
       total: count,
     }
   }
 
-  fn mock_album_page(&self, count: u32) -> Page<SimplifiedAlbum> {
-    let items = (0..count)
+  fn mock_album_page(&self, count: u32, offset: u32) -> Page<SimplifiedAlbum> {
+    let items = (offset..offset + count)
       .map(|i| {
         serde_json::from_value(json!({
           "artists": [{ "external_urls": {}, "href": null, "id": "mockartist1", "name": "Mock Artist" }],
@@ -820,21 +850,9 @@ pub(crate) fn mock_saved_tracks_page(&self, offset: u32) -> Page<SavedTrack> {
       items,
       limit: count,
       next: None,
-      offset: 0,
+      offset,
       previous: None,
       total: count,
-    }
-  }
-
-  fn mock_show_page(&self) -> Page<SimplifiedShow> {
-    Page {
-      href: String::new(),
-      items: vec![],
-      limit: 0,
-      next: None,
-      offset: 0,
-      previous: None,
-      total: 0,
     }
   }
 

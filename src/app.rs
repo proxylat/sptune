@@ -69,7 +69,7 @@ pub fn visible_library_options(hidden: &[String]) -> Vec<&'static str> {
 const DEFAULT_ROUTE: Route = Route {
   id: RouteId::MadeForYou,
   active_block: ActiveBlock::Empty,
-  hovered_block: ActiveBlock::Library,
+  hovered_block: ActiveBlock::Empty,
 };
 
 #[derive(Clone, Debug)]
@@ -138,7 +138,14 @@ fn page_len_total<T: serde::de::DeserializeOwned>(page: Option<&Page<T>>) -> Opt
   page.map(|p| (p.items.len(), p.total))
 }
 
-#[derive(PartialEq, Debug, Clone)]
+/// A full last page means more results exist: the search `total`
+/// under-reports for many queries, so gating on it kills the load-more
+/// row early (same disease as the artist top tracks).
+fn page_has_more<T: serde::de::DeserializeOwned>(page: &Page<T>) -> bool {
+  page.limit > 0 && page.items.len() >= page.limit as usize
+}
+
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub enum ArtistBlock {
   TopTracks,
   Albums,
@@ -151,11 +158,11 @@ pub enum DialogContext {
   PlaylistWindow,
   PlaylistSearch,
   SeekTime,
+  AddToPlaylist,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ActiveBlock {
-  Analysis,
   PlayBar,
   AlbumTracks,
   AlbumList,
@@ -181,7 +188,6 @@ pub enum ActiveBlock {
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum RouteId {
-  Analysis,
   AlbumTracks,
   AlbumList,
   Artist,
@@ -302,6 +308,11 @@ pub struct Artist {
   pub albums: Page<SimplifiedAlbum>,
   pub related_artists: Vec<FullArtist>,
   pub top_tracks: Vec<FullTrack>,
+  pub top_tracks_total: usize,
+  // True while a fetch could still return more: set when the last page
+  // arrived full (10 items). The search `total` can under-report, so the
+  // load-more row keys off this instead.
+  pub top_tracks_has_more: bool,
   pub selected_album_index: usize,
   pub selected_related_artist_index: usize,
   pub selected_top_track_index: usize,
@@ -323,7 +334,6 @@ pub struct App {
   pub monthly_listeners: Option<u64>,
   pub track_credits: Option<Vec<String>>,
   pub queue_next: Option<String>,
-  pub top_track_playcounts: HashMap<String, u64>,
   pub user_config: UserConfig,
   pub artists: Vec<FullArtist>,
   pub artist: Option<Artist>,
@@ -342,6 +352,13 @@ pub struct App {
   pub input_idx: usize,
   pub input_cursor_position: u16,
   pub liked_song_ids_set: HashSet<String>,
+  // Rows are only highlighted once the user moves the selection or clicks a
+  // row, so a freshly opened panel never "marks" its first row.
+  pub selection_engaged: bool,
+  // The sidebar block (Library/MyPlaylists) the user last engaged; its row
+  // highlight stays visible while browsing the page opened from it, until
+  // the user engages something outside the sidebar (search box, gear).
+  pub sidebar_latched_block: Option<ActiveBlock>,
   pub followed_artist_ids_set: HashSet<String>,
   pub saved_album_ids_set: HashSet<String>,
   pub saved_show_ids_set: HashSet<String>,
@@ -399,6 +416,13 @@ pub struct App {
   pub spotify_token_expiry: SystemTime,
   pub dialog: Option<String>,
   pub confirm: bool,
+  /// Cached playlist contents mirrored from the backend cache: playlist id ->
+  /// item uris. Drives the "already in playlist" marker without extra requests.
+  pub playlist_uri_map: HashMap<String, HashSet<String>>,
+  /// Track captured when the add-to-playlist picker opens; the picker
+  /// navigation must not change which track gets added.
+  pub pending_track_uri: Option<String>,
+  pub playlist_picker_index: usize,
   pub show_library: bool,
   pub show_playlists: bool,
   pub hidden_library_sections: Vec<String>,
@@ -420,7 +444,6 @@ impl Default for App {
       monthly_listeners: None,
       track_credits: None,
       queue_next: None,
-      top_track_playcounts: HashMap::new(),
       album_table_context: AlbumTableContext::Full,
       album_list_index: 0,
       made_for_you_index: 0,
@@ -444,6 +467,8 @@ impl Default for App {
         selected_index: 0,
       },
       liked_song_ids_set: HashSet::new(),
+      selection_engaged: false,
+      sidebar_latched_block: None,
       followed_artist_ids_set: HashSet::new(),
       saved_album_ids_set: HashSet::new(),
       saved_show_ids_set: HashSet::new(),
@@ -507,6 +532,9 @@ impl Default for App {
       spotify_token_expiry: SystemTime::now(),
       dialog: None,
       confirm: false,
+      playlist_uri_map: HashMap::new(),
+      pending_track_uri: None,
+      playlist_picker_index: 0,
       mock: false,
       show_library: true,
       show_playlists: true,
@@ -553,6 +581,7 @@ impl App {
     let Some((column, desc)) = self.track_table_sort else {
       return;
     };
+    let selected_id = self.selected_track_id();
     let tracks = std::mem::take(&mut self.track_table.tracks);
     let added_at = std::mem::take(&mut self.track_table_added_at);
     let raw_index = std::mem::take(&mut self.track_table_raw_index);
@@ -583,6 +612,29 @@ impl App {
     } else {
       vec![]
     };
+    self.remap_selection_after_reorder(selected_id);
+  }
+
+  // A re-sort moves rows around; make the selection follow the same track
+  // instead of staying at the same position (position-based selection was
+  // highlighting the wrong song after sorting).
+  fn selected_track_id(&self) -> Option<String> {
+    self
+      .track_table
+      .tracks
+      .get(self.track_table.selected_index)
+      .and_then(|t| t.id.as_ref().map(|id| id.to_string()))
+  }
+
+  fn remap_selection_after_reorder(&mut self, selected_id: Option<String>) {
+    let Some(selected_id) = selected_id else {
+      return;
+    };
+    if let Some(pos) = self.track_table.tracks.iter().position(|t| {
+      t.id.as_ref().map(|id| id.to_string()).as_deref() == Some(selected_id.as_str())
+    }) {
+      self.track_table.selected_index = pos;
+    }
   }
 
   // Materialize the Date Added sort: order the display by raw playlist
@@ -597,6 +649,7 @@ impl App {
     if column != TrackSortColumn::DateAdded {
       return;
     }
+    let selected_id = self.selected_track_id();
     let tracks = std::mem::take(&mut self.track_table.tracks);
     let added_at = std::mem::take(&mut self.track_table_added_at);
     let raw_index = std::mem::take(&mut self.track_table_raw_index);
@@ -614,6 +667,7 @@ impl App {
     } else {
       vec![]
     };
+    self.remap_selection_after_reorder(selected_id);
   }
 
   // Send a network event to the network thread
@@ -904,12 +958,20 @@ impl App {
     active_block: Option<ActiveBlock>,
     hovered_block: Option<ActiveBlock>,
   ) {
-    let current_route = self.get_current_route_mut();
     if let Some(active_block) = active_block {
-      current_route.active_block = active_block;
+      // Engaging a sidebar panel latches its highlight: the row stays marked
+      // while browsing the page opened from it, until the user engages
+      // something outside the sidebar (search box, gear, another block).
+      match active_block {
+        ActiveBlock::Library | ActiveBlock::MyPlaylists => {
+          self.sidebar_latched_block = Some(active_block);
+        }
+        _ => {}
+      }
+      self.get_current_route_mut().active_block = active_block;
     }
     if let Some(hovered_block) = hovered_block {
-      current_route.hovered_block = hovered_block;
+      self.get_current_route_mut().hovered_block = hovered_block;
     }
   }
 
@@ -1290,6 +1352,59 @@ impl App {
     }
   }
 
+  /// URI of the track the add-to-playlist picker was opened for: the
+  /// currently selected row of the active song list.
+  pub fn selected_track_uri(&self) -> Option<String> {
+    match self.get_current_route().active_block {
+      ActiveBlock::TrackTable => self
+        .track_table
+        .tracks
+        .get(self.track_table.selected_index)
+        .and_then(|t| t.id.as_ref().map(|id| id.uri())),
+      ActiveBlock::AlbumTracks => {
+        if let Some(simplified) = &self.selected_album_simplified {
+          simplified
+            .tracks
+            .items
+            .get(simplified.selected_index)
+            .and_then(|t| t.id.as_ref().map(|id| id.uri()))
+        } else {
+          self
+            .selected_album_full
+            .as_ref()
+            .and_then(|full| full.album.tracks.items.get(full.selected_index))
+            .and_then(|t| t.id.as_ref().map(|id| id.uri()))
+        }
+      }
+      _ => None,
+    }
+  }
+
+  /// Open the add-to-playlist picker for the selected track (no-op when no
+  /// track is selected or the feature is disabled).
+  pub fn open_add_to_playlist(&mut self) {
+    if !self.user_config.behavior.enable_add_to_playlist {
+      return;
+    }
+    let Some(uri) = self.selected_track_uri() else {
+      return;
+    };
+    self.pending_track_uri = Some(uri);
+    self.playlist_picker_index = 0;
+    self.push_navigation_stack(
+      RouteId::Dialog,
+      ActiveBlock::Dialog(DialogContext::AddToPlaylist),
+    );
+  }
+
+  /// True when the uri appears in any cached playlist other than `exclude`
+  /// (the playlist currently being viewed).
+  pub fn playlist_contains(&self, uri: &str, exclude: Option<&str>) -> bool {
+    self.playlist_uri_map.iter().any(|(id, uris)| {
+      uris.contains(uri) && exclude.map(|e| e != id).unwrap_or(true)
+    })
+  }
+
   pub fn user_unfollow_playlist_search_result(&mut self) {
     if let (Some(playlists), Some(selected_index), Some(user)) = (
       &self.search_results.playlists,
@@ -1385,29 +1500,6 @@ impl App {
     }
   }
 
-  pub fn get_audio_analysis(&mut self) {
-    if let Some(CurrentPlaybackContext {
-      item: Some(item), ..
-    }) = &self.current_playback_context
-    {
-      match item {
-        PlayableItem::Track(track) => {
-          if self.get_current_route().id != RouteId::Analysis {
-            let uri = track.id.as_ref().map(|id| id.uri()).unwrap_or_default();
-            self.dispatch(IoEvent::GetAudioAnalysis(uri));
-            self.push_navigation_stack(RouteId::Analysis, ActiveBlock::Analysis);
-          }
-        }
-        PlayableItem::Episode(_episode) => {
-          // No audio analysis available for podcast uris, so just default to the empty analysis
-          // view to avoid a 400 error code
-          self.push_navigation_stack(RouteId::Analysis, ActiveBlock::Analysis);
-        }
-        _ => {}
-      }
-    }
-  }
-
   pub fn get_panel_data(&mut self) {
     let (track_id, artist_id) = match &self.current_playback_context {
       Some(CurrentPlaybackContext {
@@ -1423,7 +1515,7 @@ impl App {
       _ => (None, None),
     };
     if let Some(id) = track_id {
-      self.dispatch(IoEvent::GetLyrics(id.clone()));
+      self.dispatch(IoEvent::GetLyrics);
       self.dispatch(IoEvent::GetTrackCredits(id));
     }
     if let Some(id) = artist_id {
@@ -1447,6 +1539,24 @@ impl App {
     ));
   }
 
+  /// Activate an artist tab, lazily fetching its data on first use.
+  pub fn artist_select_tab(&mut self, tab: ArtistBlock) {
+    let needs_albums = match &self.artist {
+      Some(artist) => tab == ArtistBlock::Albums && artist.albums.items.is_empty(),
+      None => return,
+    };
+    let artist_id = self.artist.as_ref().map(|artist| artist.artist_id.clone());
+    if let Some(artist) = &mut self.artist {
+      artist.artist_selected_block = tab;
+      artist.artist_hovered_block = tab;
+    }
+    if needs_albums {
+      if let Some(artist_id) = artist_id {
+        self.dispatch(IoEvent::GetArtistAlbumsMore(artist_id, 0));
+      }
+    }
+  }
+
   /// Continuation paging for lists: dispatch `event` (already carrying the
   /// next offset) only when more items exist past what we hold.
   fn load_more_page(&mut self, loaded: usize, total: usize, event: IoEvent) {
@@ -1466,6 +1576,20 @@ impl App {
     }
   }
 
+  pub fn load_more_artist_top_tracks(&mut self) {
+    if let Some(artist) = &self.artist {
+      let loaded = artist.top_tracks.len() as u32;
+      // No total gate: the search `total` under-reports for many artists,
+      // so dispatch whenever the load-more row is visible. A short page on
+      // the next fetch clears top_tracks_has_more and hides the row.
+      self.dispatch(IoEvent::GetArtistTopTracksMore(
+        artist.artist_id.clone(),
+        artist.artist_name.clone(),
+        loaded,
+      ));
+    }
+  }
+
   pub fn load_more_album_tracks(&mut self) {
     if let Some(album) = &self.selected_album_simplified {
       if let Some(album_id) = &album.album.id {
@@ -1477,6 +1601,29 @@ impl App {
         );
       }
     }
+  }
+
+  /// Load the next page of recently-played history (before-cursor paging).
+  pub fn load_more_recently_played(&mut self) {
+    if self.is_fetching_next_page {
+      return;
+    }
+    let before = self
+      .recently_played
+      .result
+      .as_ref()
+      .and_then(|p| p.cursors.as_ref().and_then(|c| c.after.clone()));
+    self.dispatch(IoEvent::GetMoreRecentlyPlayed(before));
+  }
+
+  /// Whether the recently-played list has more pages (full-page rule: the
+  /// endpoint under-reports totals, so a full page means more exist).
+  pub fn recently_played_has_more(&self) -> bool {
+    self
+      .recently_played
+      .result
+      .as_ref()
+      .map_or(false, |p| p.limit > 0 && p.items.len() >= p.limit as usize)
   }
 
   /// Whether the current track-table context has more pages to load
@@ -1505,18 +1652,39 @@ impl App {
     }
   }
 
-  /// Whether the given search block has more pages past what is loaded
-  /// (the page total exceeds the items we hold, so more can be fetched).
+  /// Whether the given search block has more pages past what is loaded.
+  /// A full last page means more can be fetched: the search `total`
+  /// under-reports for many queries, so gating on it kills the load-more
+  /// row early (same disease as the artist top tracks).
   pub fn search_block_has_more(&self, block: &SearchResultBlock) -> bool {
-    let page = match block {
-      SearchResultBlock::AlbumSearch => page_len_total(self.search_results.albums.as_ref()),
-      SearchResultBlock::SongSearch => page_len_total(self.search_results.tracks.as_ref()),
-      SearchResultBlock::ArtistSearch => page_len_total(self.search_results.artists.as_ref()),
-      SearchResultBlock::PlaylistSearch => page_len_total(self.search_results.playlists.as_ref()),
-      SearchResultBlock::ShowSearch => page_len_total(self.search_results.shows.as_ref()),
-      SearchResultBlock::Empty => return false,
-    };
-    page.map(|(items_len, total)| items_len < total as usize).unwrap_or(false)
+    match block {
+      SearchResultBlock::AlbumSearch => self
+        .search_results
+        .albums
+        .as_ref()
+        .map_or(false, page_has_more),
+      SearchResultBlock::SongSearch => self
+        .search_results
+        .tracks
+        .as_ref()
+        .map_or(false, page_has_more),
+      SearchResultBlock::ArtistSearch => self
+        .search_results
+        .artists
+        .as_ref()
+        .map_or(false, page_has_more),
+      SearchResultBlock::PlaylistSearch => self
+        .search_results
+        .playlists
+        .as_ref()
+        .map_or(false, page_has_more),
+      SearchResultBlock::ShowSearch => self
+        .search_results
+        .shows
+        .as_ref()
+        .map_or(false, page_has_more),
+      SearchResultBlock::Empty => false,
+    }
   }
 
   /// Whether the given search block has a page loaded already.
@@ -1696,33 +1864,43 @@ impl App {
       9 => {
         self.dev_view = !self.dev_view;
       }
-      // Clear the on-disk playlist/library caches.
       10 => {
-        self.dispatch(IoEvent::CleanCache);
-      }
-      11 => {
         self.user_config.behavior.show_album_column = !self.user_config.behavior.show_album_column;
       }
-      12 => {
+      11 => {
         self.user_config.behavior.show_artist_column = !self.user_config.behavior.show_artist_column;
       }
-      13 => {
+      12 => {
         self.user_config.behavior.show_length_column = !self.user_config.behavior.show_length_column;
       }
-       14 => {
+      13 => {
         self.user_config.behavior.show_date_added_column =
           !self.user_config.behavior.show_date_added_column;
       }
-      // Visualizer style: CAVA-style bars or an oscilloscope trace.
+      // Add-to-playlist picker on/off.
+      14 => {
+        self.user_config.behavior.enable_add_to_playlist =
+          !self.user_config.behavior.enable_add_to_playlist;
+      }
+      // Liked-heart column on/off.
       15 => {
-        self.user_config.behavior.visualizer_style =
-          self.user_config.behavior.visualizer_style.next();
+        self.user_config.behavior.show_liked_icon = !self.user_config.behavior.show_liked_icon;
+      }
+      // Clear the on-disk playlist/library caches. Danger action: the last
+      // settings row is styled red, so this stays the last arm too.
+      16 => {
+        self.dispatch(IoEvent::CleanCache);
       }
       _ => {}
     }
-    if index <= 15 {
+    if index <= 16 {
       self.dispatch(IoEvent::SaveState);
     }
+  }
+
+  pub fn toggle_visualizer_style(&mut self) {
+    self.user_config.behavior.visualizer_style =
+      self.user_config.behavior.visualizer_style.next();
   }
 
   pub fn clamp_library_selection(&mut self) {
@@ -1833,13 +2011,14 @@ mod tests {
     let mut app = App::default();
     app.search_results.query = "test".to_string();
 
-    // total == loaded -> no more pages
-    app.search_results.tracks = Some(track_page(3, 3));
-    assert!(!app.search_block_has_more(&SearchResultBlock::SongSearch));
-
-    // total > loaded -> more pages available
-    app.search_results.tracks = Some(track_page(3, 20));
+    // Full page (items == limit) -> more pages available, even if the
+    // under-reported total says otherwise.
+    app.search_results.tracks = Some(track_page(10, 20));
     assert!(app.search_block_has_more(&SearchResultBlock::SongSearch));
+
+    // Short page (items < limit) -> no more pages
+    app.search_results.tracks = Some(track_page(9, 20));
+    assert!(!app.search_block_has_more(&SearchResultBlock::SongSearch));
 
     // not yet loaded -> no more
     app.search_results.tracks = None;
@@ -1853,21 +2032,201 @@ mod tests {
   }
 
   #[test]
+  fn load_more_artist_top_tracks_dispatches_past_the_search_total() {
+    let mut app = App::default();
+    app.artist = Some(Artist {
+      artist_id: "mockartist1".to_string(),
+      artist_name: "Mock Artist".to_string(),
+      albums: Page {
+        href: String::new(),
+        items: vec![],
+        limit: 0,
+        next: None,
+        offset: 0,
+        previous: None,
+        total: 0,
+      },
+      related_artists: vec![],
+      top_tracks: (0..10).map(mock_track).collect(),
+      top_tracks_total: 26,
+      top_tracks_has_more: true,
+      selected_album_index: 0,
+      selected_related_artist_index: 0,
+      selected_top_track_index: 0,
+      artist_hovered_block: ArtistBlock::TopTracks,
+      artist_selected_block: ArtistBlock::Empty,
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+
+    app.load_more_artist_top_tracks();
+    let events: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+      events[0],
+      IoEvent::GetArtistTopTracksMore("mockartist1".to_string(), "Mock Artist".to_string(), 10)
+    );
+
+    // The search `total` under-reports for some artists: the dispatch must
+    // still fire when total <= loaded, letting the backend page reveal the
+    // true end (a short page clears top_tracks_has_more).
+    app.artist.as_mut().unwrap().top_tracks_total = 10;
+    app.load_more_artist_top_tracks();
+    assert_eq!(rx.try_iter().count(), 1);
+  }
+
+  #[test]
+  fn artist_select_tab_fetches_albums_and_related_only_on_first_use() {
+    let mut app = App::default();
+    app.artist = Some(Artist {
+      artist_id: "mockartist1".to_string(),
+      artist_name: "Mock Artist".to_string(),
+      albums: Page {
+        href: String::new(),
+        items: vec![],
+        limit: 0,
+        next: None,
+        offset: 0,
+        previous: None,
+        total: 0,
+      },
+      related_artists: vec![],
+      top_tracks: (0..10).map(mock_track).collect(),
+      top_tracks_total: 26,
+      top_tracks_has_more: true,
+      selected_album_index: 0,
+      selected_related_artist_index: 0,
+      selected_top_track_index: 0,
+      artist_hovered_block: ArtistBlock::TopTracks,
+      artist_selected_block: ArtistBlock::TopTracks,
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+
+    app.artist_select_tab(ArtistBlock::Albums);
+    let events: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], IoEvent::GetArtistAlbumsMore(..)));
+
+    // Data already fetched → no refetch on a second visit.
+    app.artist.as_mut().unwrap().albums.items.push(
+      serde_json::from_value(json!({
+        "album_type": "album",
+        "artists": [{ "external_urls": {}, "href": null, "id": "mockartist1", "name": "Mock Artist" }],
+        "external_urls": {},
+        "href": null,
+        "id": "mockalbum0",
+        "images": [],
+        "name": "Mock Album",
+        "release_date": "2020-01-01",
+        "release_date_precision": "day",
+        "total_tracks": 1,
+        "type": "album",
+      }))
+      .unwrap(),
+    );
+    app.artist_select_tab(ArtistBlock::Albums);
+    assert_eq!(rx.try_iter().count(), 0);
+  }
+
+  #[test]
   fn toggle_visualizer_style_cycles_bars_scope() {
     let mut app = App::default();
     assert_eq!(
       app.user_config.behavior.visualizer_style,
       crate::user_config::VisualizerStyle::Bars
     );
-    app.toggle_setting(15);
+    app.toggle_visualizer_style();
     assert_eq!(
       app.user_config.behavior.visualizer_style,
       crate::user_config::VisualizerStyle::Oscilloscope
     );
-    app.toggle_setting(15);
+    app.toggle_visualizer_style();
     assert_eq!(
       app.user_config.behavior.visualizer_style,
       crate::user_config::VisualizerStyle::Bars
+    );
+  }
+
+  #[test]
+  fn playlist_contains_excludes_the_viewed_playlist() {
+    let mut app = App::default();
+    app.playlist_uri_map.insert(
+      "p1".to_string(),
+      HashSet::from(["spotify:track:a".to_string(), "spotify:track:b".to_string()]),
+    );
+    app
+      .playlist_uri_map
+      .insert("p2".to_string(), HashSet::from(["spotify:track:b".to_string()]));
+    assert!(app.playlist_contains("spotify:track:a", None));
+    assert!(app.playlist_contains("spotify:track:a", Some("p2")));
+    assert!(!app.playlist_contains("spotify:track:a", Some("p1")));
+    assert!(!app.playlist_contains("spotify:track:z", None));
+  }
+
+  #[test]
+  fn open_add_to_playlist_captures_the_selected_track() {
+    let mut app = App::default();
+    app.set_current_route_state(Some(ActiveBlock::TrackTable), None);
+    app.track_table.tracks = vec![mock_track(3), mock_track(4)];
+    app.track_table.selected_index = 1;
+    app.open_add_to_playlist();
+    assert_eq!(
+      app.pending_track_uri.as_deref(),
+      Some("spotify:track:mocktrack4")
+    );
+    assert_eq!(
+      app.get_current_route().active_block,
+      ActiveBlock::Dialog(DialogContext::AddToPlaylist)
+    );
+
+    // No track selected (empty table) → nothing opens.
+    let mut app = App::default();
+    app.set_current_route_state(Some(ActiveBlock::TrackTable), None);
+    app.open_add_to_playlist();
+    assert!(app.pending_track_uri.is_none());
+  }
+
+  #[test]
+  fn gear_toggle_14_flips_add_to_playlist() {
+    let mut app = App::default();
+    assert!(app.user_config.behavior.enable_add_to_playlist);
+    app.toggle_setting(14);
+    assert!(!app.user_config.behavior.enable_add_to_playlist);
+    app.toggle_setting(14);
+    assert!(app.user_config.behavior.enable_add_to_playlist);
+  }
+
+  #[test]
+  fn gear_toggle_15_flips_liked_icon() {
+    let mut app = App::default();
+    assert!(app.user_config.behavior.show_liked_icon);
+    app.toggle_setting(15);
+    assert!(!app.user_config.behavior.show_liked_icon);
+    app.toggle_setting(15);
+    assert!(app.user_config.behavior.show_liked_icon);
+  }
+
+  #[test]
+  fn gear_toggle_16_dispatches_clean_cache() {
+    let mut app = App::default();
+    app.toggle_setting(16);
+    assert!(app.is_loading);
+  }
+
+  #[test]
+  fn sort_keeps_the_selection_on_the_same_track() {
+    let mut app = App::default();
+    app.track_table.tracks = vec![mock_track(0), mock_track(1), mock_track(2)];
+    app.track_table_added_at = vec![None; 3];
+    app.track_table.selected_index = 0;
+    app.track_table_sort = Some((TrackSortColumn::Title, true));
+    app.sort_tracks();
+    // Descending: Mock Song 2, 1, 0 — the selected song 0 moved to the end.
+    assert_eq!(app.track_table.selected_index, 2);
+    assert_eq!(
+      app.track_table.tracks[app.track_table.selected_index].name,
+      "Mock Song 0"
     );
   }
 }

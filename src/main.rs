@@ -321,6 +321,12 @@ of the app. Beware that this comes at a CPU cost!",
     if let Some(style) = saved.visualizer_style {
       user_config.behavior.visualizer_style = VisualizerStyle::from_str(&style);
     }
+    if let Some(enable) = saved.enable_add_to_playlist {
+      user_config.behavior.enable_add_to_playlist = enable;
+    }
+    if let Some(show_liked_icon) = saved.show_liked_icon {
+      user_config.behavior.show_liked_icon = show_liked_icon;
+    }
     restored_show_library = saved.show_library;
     restored_show_playlists = saved.show_playlists;
   }
@@ -557,9 +563,6 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>, mock: bool) ->
         }
         ActiveBlock::SelectDevice => {
           tui::draw_device_list(&mut f, &app);
-        }
-        ActiveBlock::Analysis => {
-          tui::audio_analysis::draw(&mut f, &app);
         }
         ActiveBlock::MusicView => {
           tui::draw_music_view(&mut f, &app);
