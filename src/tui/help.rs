@@ -138,11 +138,6 @@ pub fn get_help_docs(key_bindings: &KeyBindings) -> Vec<Vec<String>> {
       String::from("General"),
     ],
     vec![
-      String::from("Go to audio analysis screen"),
-      key_bindings.audio_analysis.to_string(),
-      String::from("General"),
-    ],
-    vec![
       String::from("Open music view (lyrics + visualizer)"),
       key_bindings.music_view.to_string(),
       String::from("General"),
@@ -265,6 +260,11 @@ pub fn get_help_docs(key_bindings: &KeyBindings) -> Vec<Vec<String>> {
     vec![
       String::from("Add track to queue"),
       key_bindings.add_item_to_queue.to_string(),
+      String::from("Hovered over track"),
+    ],
+    vec![
+      String::from("Add track to a playlist"),
+      key_bindings.add_to_playlist.to_string(),
       String::from("Hovered over track"),
     ],
     vec![

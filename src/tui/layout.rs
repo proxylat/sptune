@@ -27,7 +27,7 @@ pub const PLAYBAR_TIME_LEN: u16 = 6;
 // volume ramp bar, mouse interactions, theme preset, seek by typing,
 // resume last song, restore settings, clear cache, dev view, columns,
 // visualizer style
-pub const SETTINGS_ROW_COUNT: u16 = 16;
+pub const SETTINGS_ROW_COUNT: u16 = 17;
 
 // Prefix for list panel titles; clicking the title row refreshes the list.
 pub const REFRESH_GLYPH: &str = "♻ ";
@@ -225,10 +225,10 @@ pub fn get_search_results_highlight_state(
 pub fn get_artist_highlight_state(app: &App, block_to_match: ArtistBlock) -> (bool, bool) {
   let current_route = app.get_current_route();
   if let Some(artist) = &app.artist {
-    let is_hovered = artist.artist_selected_block == block_to_match;
-    let is_selected = current_route.hovered_block == ActiveBlock::ArtistBlock
-      && artist.artist_hovered_block == block_to_match;
-    (is_hovered, is_selected)
+    let is_active = current_route.active_block == ActiveBlock::ArtistBlock
+      && artist.artist_selected_block == block_to_match;
+    let is_hovered = artist.artist_hovered_block == block_to_match;
+    (is_active, is_hovered)
   } else {
     (false, false)
   }
@@ -294,6 +294,52 @@ pub fn search_layout(
   (tab_bar, tab_cells, below)
 }
 
+/// Artist page layout, mirroring the search page: a single-row tab bar
+/// (Top tracks / Albums) and the active tab's list below.
+/// Shared with the mouse hit-testing so the two never drift.
+/// Returns (tab_bar_rect, tab_cells, list_rect).
+pub fn artist_layout(
+  chunk: Rect,
+  expanded: ArtistBlock,
+) -> (Rect, Vec<(ArtistBlock, Rect)>, Rect) {
+  let tab_bar = Rect {
+    x: chunk.x,
+    y: chunk.y,
+    width: chunk.width,
+    height: 1,
+  };
+  let cell_w = chunk.width / 2;
+  let tabs = [
+    (ArtistBlock::TopTracks, "Top tracks"),
+    (ArtistBlock::Albums, "Albums"),
+  ];
+  let tab_cells = tabs
+    .iter()
+    .enumerate()
+    .map(|(i, (block, _))| {
+      (
+        block.clone(),
+        Rect {
+          x: chunk.x + (i as u16) * cell_w,
+          y: chunk.y,
+          width: cell_w,
+          height: 1,
+        },
+      )
+    })
+    .collect::<Vec<_>>();
+  let below = Rect {
+    x: chunk.x,
+    y: chunk.y + 1,
+    width: chunk.width,
+    height: chunk.height.saturating_sub(1),
+  };
+  if expanded == ArtistBlock::Empty {
+    return (tab_bar, tab_cells, below);
+  }
+  (tab_bar, tab_cells, below)
+}
+
 pub fn create_artist_string(artists: &[SimplifiedArtist]) -> String {
   artists
     .iter()
@@ -315,6 +361,20 @@ pub fn millis_to_minutes(millis: u128) -> String {
     format!("{}:00", minutes + 1)
   } else {
     format!("{}:{}", minutes, seconds_display)
+  }
+}
+
+pub fn format_playlist_duration(total_ms: i64) -> String {
+  // Sum in ms, round once to the nearest minute (Spotify's header rounds)
+  let total_minutes = (total_ms + 30_000) / 60_000;
+  let hours = total_minutes / 60;
+  let mins = total_minutes % 60;
+  if hours > 0 && mins > 0 {
+    format!("{}h {}m", hours, mins)
+  } else if hours > 0 {
+    format!("{}h", hours)
+  } else {
+    format!("{}m", mins)
   }
 }
 
@@ -490,6 +550,13 @@ pub fn list_scroll(app: &App, block: ActiveBlock, rect: Rect) -> Option<ListScro
       selection(app.episode_list_index, episodes.items.len())
     }
     ActiveBlock::MadeForYou => selection(app.made_for_you_index, 5),
+    ActiveBlock::SearchResultBlock => {
+      let tracks = app.search_results.tracks.as_ref()?;
+      selection(
+        app.search_results.selected_tracks_index.unwrap_or(0),
+        tracks.items.len() + usize::from(app.search_block_has_more(&SearchResultBlock::SongSearch)),
+      )
+    }
     _ => return None,
   })
 }
@@ -561,10 +628,9 @@ pub fn repeat_label(repeat: RepeatState) -> Option<String> {
 
 // Builds the playbar title string.
 // Playbar title: the trailing cells of the title text are the fullscreen
-// toggle (see handle_playbar_click). Box-drawing characters so every terminal
-// font renders it, three cells wide so it reads as a window.
+// toggle (see handle_playbar_click). ASCII so every terminal renders it.
 pub fn build_playbar_title(play_title: &str, device_name: &str) -> String {
-  format!("{:-7} ({}) - ┌─┐", play_title, device_name)
+  format!("{:-7} ({}) - [ ]", play_title, device_name)
 }
 
 // Which track-table contexts have a Date Added column (they carry added_at).
@@ -663,6 +729,20 @@ mod tests {
     assert_eq!(millis_to_minutes(1900), "0:01");
     assert_eq!(millis_to_minutes(60 * 1000), "1:00");
     assert_eq!(millis_to_minutes(60 * 1500), "1:30");
+  }
+
+  #[test]
+  fn format_playlist_duration_test() {
+    assert_eq!(format_playlist_duration(0), "0m");
+    assert_eq!(format_playlist_duration(29_999), "0m");
+    assert_eq!(format_playlist_duration(30_000), "1m");
+    assert_eq!(format_playlist_duration(60_000), "1m");
+    assert_eq!(format_playlist_duration(3_599_000), "1h");
+    assert_eq!(format_playlist_duration(7_200_000), "2h");
+    assert_eq!(format_playlist_duration(8_100_000), "2h 15m");
+    assert_eq!(format_playlist_duration(21_570_000), "6h");
+    assert_eq!(format_playlist_duration(21_569_999), "5h 59m");
+    assert_eq!(format_playlist_duration(21_570_001), "6h");
   }
 
   #[test]

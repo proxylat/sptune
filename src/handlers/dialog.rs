@@ -13,6 +13,11 @@ pub fn handler(key: Key, app: &mut App) {
     return;
   }
 
+  if context == DialogContext::AddToPlaylist {
+    handle_add_to_playlist_dialog(key, app);
+    return;
+  }
+
   match key {
     Key::Enter => {
       if let Some(route) = app.pop_navigation_stack() {
@@ -22,6 +27,7 @@ pub fn handler(key: Key, app: &mut App) {
               DialogContext::PlaylistWindow => handle_playlist_dialog(app),
               DialogContext::PlaylistSearch => handle_playlist_search_dialog(app),
               DialogContext::SeekTime => {}
+              DialogContext::AddToPlaylist => {}
             }
           }
         }
@@ -127,6 +133,43 @@ fn seek_dialog_delta(app: &mut App, delta: i64) {
 
 fn handle_playlist_dialog(app: &mut App) {
   app.user_unfollow_playlist()
+}
+
+// Pick a playlist for the captured track; Enter adds it, arrows move the
+// selection, q/Esc closes without adding.
+fn handle_add_to_playlist_dialog(key: Key, app: &mut App) {
+  let count = app.playlists.as_ref().map_or(0, |p| p.items.len());
+  match key {
+    Key::Down | Key::Char('j') => {
+      if count > 0 {
+        app.playlist_picker_index = (app.playlist_picker_index + 1) % count;
+      }
+    }
+    Key::Up | Key::Char('k') => {
+      if count > 0 {
+        app.playlist_picker_index = (app.playlist_picker_index + count - 1) % count;
+      }
+    }
+    Key::Enter => {
+      let Some(uri) = app.pending_track_uri.take() else {
+        app.pop_navigation_stack();
+        return;
+      };
+      let playlist_id = app
+        .playlists
+        .as_ref()
+        .and_then(|p| p.items.get(app.playlist_picker_index))
+        .map(|playlist| playlist.id.to_string());
+      app.pop_navigation_stack();
+      if let Some(playlist_id) = playlist_id {
+        app.dispatch(crate::backend::IoEvent::AddTrackToPlaylist(uri, playlist_id));
+      }
+    }
+    Key::Char('q') | Key::Esc => {
+      app.pop_navigation_stack();
+    }
+    _ => {}
+  }
 }
 
 fn handle_playlist_search_dialog(app: &mut App) {

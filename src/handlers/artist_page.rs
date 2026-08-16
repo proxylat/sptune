@@ -8,11 +8,13 @@ fn handle_down_press_on_selected_block(app: &mut App) {
   if let Some(artist) = &mut app.artist {
     match artist.artist_selected_block {
       ArtistBlock::TopTracks => {
-        let next_index = common_key_events::on_down_press_handler(
-          &artist.top_tracks,
-          Some(artist.selected_top_track_index),
-        );
-        artist.selected_top_track_index = next_index;
+        let max = if artist.top_tracks_has_more {
+          artist.top_tracks.len()
+        } else {
+          artist.top_tracks.len().saturating_sub(1)
+        };
+        artist.selected_top_track_index =
+          (artist.selected_top_track_index + 1).min(max);
       }
       ArtistBlock::Albums => {
         let max_selectable = if artist.albums.items.len() < artist.albums.total as usize {
@@ -22,14 +24,7 @@ fn handle_down_press_on_selected_block(app: &mut App) {
         };
         artist.selected_album_index = (artist.selected_album_index + 1).min(max_selectable);
       }
-      ArtistBlock::RelatedArtists => {
-        let next_index = common_key_events::on_down_press_handler(
-          &artist.related_artists,
-          Some(artist.selected_related_artist_index),
-        );
-        artist.selected_related_artist_index = next_index;
-      }
-      ArtistBlock::Empty => {}
+      _ => {}
     }
   }
 }
@@ -41,12 +36,12 @@ fn handle_down_press_on_hovered_block(app: &mut App) {
         artist.artist_hovered_block = ArtistBlock::Albums;
       }
       ArtistBlock::Albums => {
-        artist.artist_hovered_block = ArtistBlock::RelatedArtists;
-      }
-      ArtistBlock::RelatedArtists => {
         artist.artist_hovered_block = ArtistBlock::TopTracks;
       }
-      ArtistBlock::Empty => {}
+      ArtistBlock::TopTracks => {
+        artist.artist_hovered_block = ArtistBlock::Albums;
+      }
+      _ => {}
     }
   }
 }
@@ -59,7 +54,12 @@ fn handle_up_press_on_selected_block(app: &mut App) {
           &artist.top_tracks,
           Some(artist.selected_top_track_index),
         );
-        artist.selected_top_track_index = next_index;
+        let max = if artist.top_tracks_has_more {
+          artist.top_tracks.len()
+        } else {
+          artist.top_tracks.len().saturating_sub(1)
+        };
+        artist.selected_top_track_index = next_index.min(max);
       }
       ArtistBlock::Albums => {
         let next_index = artist.selected_album_index.saturating_sub(1);
@@ -69,14 +69,7 @@ fn handle_up_press_on_selected_block(app: &mut App) {
           next_index
         };
       }
-      ArtistBlock::RelatedArtists => {
-        let next_index = common_key_events::on_up_press_handler(
-          &artist.related_artists,
-          Some(artist.selected_related_artist_index),
-        );
-        artist.selected_related_artist_index = next_index;
-      }
-      ArtistBlock::Empty => {}
+      _ => {}
     }
   }
 }
@@ -85,15 +78,12 @@ fn handle_up_press_on_hovered_block(app: &mut App) {
   if let Some(artist) = &mut app.artist {
     match artist.artist_hovered_block {
       ArtistBlock::TopTracks => {
-        artist.artist_hovered_block = ArtistBlock::RelatedArtists;
+        artist.artist_hovered_block = ArtistBlock::Albums;
       }
       ArtistBlock::Albums => {
         artist.artist_hovered_block = ArtistBlock::TopTracks;
       }
-      ArtistBlock::RelatedArtists => {
-        artist.artist_hovered_block = ArtistBlock::Albums;
-      }
-      ArtistBlock::Empty => {}
+      _ => {}
     }
   }
 }
@@ -109,11 +99,7 @@ fn handle_high_press_on_selected_block(app: &mut App) {
         let next_index = common_key_events::on_high_press_handler();
         artist.selected_album_index = next_index;
       }
-      ArtistBlock::RelatedArtists => {
-        let next_index = common_key_events::on_high_press_handler();
-        artist.selected_related_artist_index = next_index;
-      }
-      ArtistBlock::Empty => {}
+      _ => {}
     }
   }
 }
@@ -129,11 +115,7 @@ fn handle_middle_press_on_selected_block(app: &mut App) {
         let next_index = common_key_events::on_middle_press_handler(&artist.albums.items);
         artist.selected_album_index = next_index;
       }
-      ArtistBlock::RelatedArtists => {
-        let next_index = common_key_events::on_middle_press_handler(&artist.related_artists);
-        artist.selected_related_artist_index = next_index;
-      }
-      ArtistBlock::Empty => {}
+      _ => {}
     }
   }
 }
@@ -149,11 +131,7 @@ fn handle_low_press_on_selected_block(app: &mut App) {
         let next_index = common_key_events::on_low_press_handler(&artist.albums.items);
         artist.selected_album_index = next_index;
       }
-      ArtistBlock::RelatedArtists => {
-        let next_index = common_key_events::on_low_press_handler(&artist.related_artists);
-        artist.selected_related_artist_index = next_index;
-      }
-      ArtistBlock::Empty => {}
+      _ => {}
     }
   }
 }
@@ -171,16 +149,6 @@ fn handle_recommend_event_on_selected_block(app: &mut App) {
           app.get_recommendations_for_seed(None, track_id_list, Some(track.clone()));
         }
       }
-      ArtistBlock::RelatedArtists => {
-        let selected_index = artist.selected_related_artist_index;
-        let artist_id = artist.related_artists[selected_index].id.clone();
-        let artist_name = &artist.related_artists[selected_index].name;
-        let artist_id_list: Option<Vec<String>> = Some(vec![artist_id.to_string()]);
-
-        app.recommendations_context = Some(RecommendationsContext::Artist);
-        app.recommendations_seed = artist_name.clone();
-        app.get_recommendations_for_seed(artist_id_list, None, None);
-      }
       _ => {}
     }
   }
@@ -190,6 +158,10 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
   if let Some(artist) = &mut app.artist.clone() {
     match artist.artist_selected_block {
       ArtistBlock::TopTracks => {
+        if artist.selected_top_track_index == artist.top_tracks.len() {
+          app.load_more_artist_top_tracks();
+          return;
+        }
         let selected_index = artist.selected_top_track_index;
         let top_tracks = artist
           .top_tracks
@@ -215,13 +187,7 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
           app.dispatch(IoEvent::GetAlbumTracks(Box::new(selected_album)));
         }
       }
-      ArtistBlock::RelatedArtists => {
-        let selected_index = artist.selected_related_artist_index;
-        let artist_id = artist.related_artists[selected_index].id.clone();
-        let artist_name = artist.related_artists[selected_index].name.clone();
-        app.get_artist(artist_id.to_string(), artist_name);
-      }
-      ArtistBlock::Empty => {}
+      _ => {}
     }
   }
 }
@@ -229,10 +195,9 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
 fn handle_enter_event_on_hovered_block(app: &mut App) {
   if let Some(artist) = &mut app.artist {
     match artist.artist_hovered_block {
-      ArtistBlock::TopTracks => artist.artist_selected_block = ArtistBlock::TopTracks,
-      ArtistBlock::Albums => artist.artist_selected_block = ArtistBlock::Albums,
-      ArtistBlock::RelatedArtists => artist.artist_selected_block = ArtistBlock::RelatedArtists,
-      ArtistBlock::Empty => {}
+      ArtistBlock::TopTracks => app.artist_select_tab(ArtistBlock::TopTracks),
+      ArtistBlock::Albums => app.artist_select_tab(ArtistBlock::Albums),
+      _ => {}
     }
   }
 }
@@ -246,6 +211,14 @@ pub fn handler(key: Key, app: &mut App) {
       k if common_key_events::down_event(k) => {
         if artist.artist_selected_block != ArtistBlock::Empty {
           handle_down_press_on_selected_block(app);
+        } else if artist.artist_hovered_block == ArtistBlock::TopTracks {
+          let max = if artist.top_tracks_has_more {
+            artist.top_tracks.len()
+          } else {
+            artist.top_tracks.len().saturating_sub(1)
+          };
+          artist.selected_top_track_index =
+            (artist.selected_top_track_index + 1).min(max);
         } else {
           handle_down_press_on_hovered_block(app);
         }
@@ -253,6 +226,16 @@ pub fn handler(key: Key, app: &mut App) {
       k if common_key_events::up_event(k) => {
         if artist.artist_selected_block != ArtistBlock::Empty {
           handle_up_press_on_selected_block(app);
+        } else if artist.artist_hovered_block == ArtistBlock::TopTracks {
+          let max = if artist.top_tracks_has_more {
+            artist.top_tracks.len()
+          } else {
+            artist.top_tracks.len().saturating_sub(1)
+          };
+          artist.selected_top_track_index = artist
+            .selected_top_track_index
+            .saturating_sub(1)
+            .min(max);
         } else {
           handle_up_press_on_hovered_block(app);
         }
@@ -264,10 +247,7 @@ pub fn handler(key: Key, app: &mut App) {
           ArtistBlock::Albums => {
             artist.artist_hovered_block = ArtistBlock::TopTracks;
           }
-          ArtistBlock::RelatedArtists => {
-            artist.artist_hovered_block = ArtistBlock::Albums;
-          }
-          ArtistBlock::Empty => {}
+          _ => {}
         }
       }
       k if common_key_events::right_event(k) => {
@@ -303,12 +283,10 @@ pub fn handler(key: Key, app: &mut App) {
       }
       Key::Char('w') => match artist.artist_selected_block {
         ArtistBlock::Albums => app.current_user_saved_album_add(ActiveBlock::ArtistBlock),
-        ArtistBlock::RelatedArtists => app.user_follow_artists(ActiveBlock::ArtistBlock),
         _ => (),
       },
       Key::Char('D') => match artist.artist_selected_block {
         ArtistBlock::Albums => app.current_user_saved_album_delete(ActiveBlock::ArtistBlock),
-        ArtistBlock::RelatedArtists => app.user_unfollow_artists(ActiveBlock::ArtistBlock),
         _ => (),
       },
       _ if key == app.user_config.keys.add_item_to_queue => {

@@ -87,9 +87,6 @@ pub fn handle_app(key: Key, app: &mut App) {
     _ if key == app.user_config.keys.copy_album_url => {
       app.copy_album_url();
     }
-    _ if key == app.user_config.keys.audio_analysis => {
-      app.get_audio_analysis();
-    }
     _ if key == app.user_config.keys.music_view => {
       app.get_panel_data();
       app.push_navigation_stack(RouteId::MusicView, ActiveBlock::MusicView);
@@ -146,7 +143,7 @@ fn handle_block_events(key: Key, app: &mut App) {
     ActiveBlock::HelpMenu => {
       help_keys::handler(key, app);
     }
-    ActiveBlock::Analysis | ActiveBlock::Error => {}
+    ActiveBlock::Error => {}
     ActiveBlock::SelectDevice => {
       select_device::handler(key, app);
     }
@@ -209,7 +206,7 @@ fn handle_escape(app: &mut App) {
       app.pop_navigation_stack();
     }
     // These are global views that have no active/inactive distinction so do nothing
-    ActiveBlock::SelectDevice | ActiveBlock::Analysis => {}
+    ActiveBlock::SelectDevice => {}
     _ => {
       app.set_current_route_state(Some(ActiveBlock::Empty), None);
     }

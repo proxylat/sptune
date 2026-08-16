@@ -3,6 +3,14 @@ use crate::{app::RecommendationsContext, event::Key, backend::IoEvent};
 use rspotify::model::Id;
 
 pub fn handler(key: Key, app: &mut App) {
+  if common_key_events::down_event(key)
+    || common_key_events::up_event(key)
+    || common_key_events::high_event(key)
+    || common_key_events::middle_event(key)
+    || common_key_events::low_event(key)
+  {
+    app.selection_engaged = true;
+  }
   match key {
     k if common_key_events::left_event(k) => common_key_events::handle_left_event(app),
     k if common_key_events::down_event(k) => {
@@ -52,8 +60,12 @@ pub fn handler(key: Key, app: &mut App) {
     }
     Key::Enter => {
       if let Some(recently_played_result) = &app.recently_played.result.clone() {
-        let track_uris: Vec<String> = recently_played_result
-          .items
+        let items = &recently_played_result.items;
+        if app.recently_played_has_more() && app.recently_played.index == items.len() {
+          app.load_more_recently_played();
+          return;
+        }
+        let track_uris: Vec<String> = items
           .iter()
           .map(|item| {
             item

@@ -7,7 +7,18 @@ use crate::{
 use rspotify::model::Id;
 
 pub fn handler(key: Key, app: &mut App) {
+  if common_key_events::down_event(key)
+    || common_key_events::up_event(key)
+    || common_key_events::high_event(key)
+    || common_key_events::middle_event(key)
+    || common_key_events::low_event(key)
+  {
+    app.selection_engaged = true;
+  }
   match key {
+    k if k == app.user_config.keys.add_to_playlist => {
+      app.open_add_to_playlist();
+    }
     k if common_key_events::left_event(k) => common_key_events::handle_left_event(app),
     k if common_key_events::down_event(k) => match app.album_table_context {
       AlbumTableContext::Full => {

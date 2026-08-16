@@ -88,7 +88,7 @@ pub fn theme_presets() -> [(&'static str, Theme); 2] {
         hovered: Color::Rgb(30, 215, 96),
         playbar_progress: Color::Rgb(29, 185, 84),
         playbar_progress_text: Color::Rgb(29, 185, 84),
-        selected: Color::Rgb(29, 185, 84),
+        selected: Color::White,
         header: Color::Rgb(29, 185, 84),
         hint: Color::Rgb(155, 240, 180),
         background: Color::Rgb(18, 18, 18),
@@ -104,7 +104,7 @@ pub fn theme_presets() -> [(&'static str, Theme); 2] {
         hovered: Color::Rgb(255, 121, 198),
         playbar_progress: Color::Rgb(80, 250, 123),
         playbar_progress_text: Color::Rgb(80, 250, 123),
-        selected: Color::Rgb(189, 147, 249),
+        selected: Color::White,
         header: Color::Rgb(139, 233, 253),
         hint: Color::Rgb(255, 184, 108),
         background: Color::Rgb(40, 42, 54),
@@ -213,9 +213,9 @@ pub struct KeyBindingsString {
   submit: Option<String>,
   copy_song_url: Option<String>,
   copy_album_url: Option<String>,
-  audio_analysis: Option<String>,
   music_view: Option<String>,
   add_item_to_queue: Option<String>,
+  add_to_playlist: Option<String>,
 }
 
 #[derive(Clone)]
@@ -243,9 +243,9 @@ pub struct KeyBindings {
   pub submit: Key,
   pub copy_song_url: Key,
   pub copy_album_url: Key,
-  pub audio_analysis: Key,
   pub music_view: Key,
   pub add_item_to_queue: Key,
+  pub add_to_playlist: Key,
 }
 
 /// How the MusicView visualizer draws the loudness data.
@@ -303,6 +303,9 @@ pub struct BehaviorConfigString {
   pub show_length_column: Option<bool>,
   pub show_date_added_column: Option<bool>,
   pub visualizer_style: Option<String>,
+  pub enable_add_to_playlist: Option<bool>,
+  pub in_playlist_icon: Option<String>,
+  pub show_liked_icon: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -329,6 +332,9 @@ pub struct BehaviorConfig {
   pub show_length_column: bool,
   pub show_date_added_column: bool,
   pub visualizer_style: VisualizerStyle,
+  pub enable_add_to_playlist: bool,
+  pub in_playlist_icon: String,
+  pub show_liked_icon: bool,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -374,9 +380,9 @@ impl UserConfig {
         submit: Key::Enter,
         copy_song_url: Key::Char('c'),
         copy_album_url: Key::Char('C'),
-        audio_analysis: Key::Char('v'),
         music_view: Key::Tab,
         add_item_to_queue: Key::Char('z'),
+        add_to_playlist: Key::Char('a'),
       },
       behavior: BehaviorConfig {
         seek_milliseconds: 1000,
@@ -401,6 +407,9 @@ impl UserConfig {
         show_length_column: true,
         show_date_added_column: true,
         visualizer_style: VisualizerStyle::Bars,
+        enable_add_to_playlist: true,
+        in_playlist_icon: "✓".to_string(),
+        show_liked_icon: true,
       },
       path_to_config: None,
     }
@@ -466,9 +475,9 @@ impl UserConfig {
     to_keys!(submit);
     to_keys!(copy_song_url);
     to_keys!(copy_album_url);
-    to_keys!(audio_analysis);
     to_keys!(music_view);
     to_keys!(add_item_to_queue);
+    to_keys!(add_to_playlist);
 
     Ok(())
   }
@@ -549,6 +558,18 @@ impl UserConfig {
 
     if let Some(liked_icon) = behavior_config.liked_icon {
       self.behavior.liked_icon = liked_icon;
+    }
+
+    if let Some(in_playlist_icon) = behavior_config.in_playlist_icon {
+      self.behavior.in_playlist_icon = in_playlist_icon;
+    }
+
+    if let Some(enable_add_to_playlist) = behavior_config.enable_add_to_playlist {
+      self.behavior.enable_add_to_playlist = enable_add_to_playlist;
+    }
+
+    if let Some(show_liked_icon) = behavior_config.show_liked_icon {
+      self.behavior.show_liked_icon = show_liked_icon;
     }
 
     if let Some(paused_icon) = behavior_config.paused_icon {
@@ -634,6 +655,10 @@ impl UserConfig {
   pub fn padded_liked_icon(&self) -> String {
     format!("{} ", &self.behavior.liked_icon)
   }
+
+  pub fn padded_in_playlist_icon(&self) -> String {
+    format!("{} ", &self.behavior.in_playlist_icon)
+  }
 }
 
 fn parse_theme_item(theme_item: &str) -> Result<Color> {
@@ -675,6 +700,18 @@ fn parse_theme_item(theme_item: &str) -> Result<Color> {
 
 #[cfg(test)]
 mod tests {
+  use super::theme_presets;
+
+  #[test]
+  fn preset_selected_differs_from_active() {
+    // The selected row is rendered with theme.selected + BOLD and the playing
+    // row with theme.active + BOLD; equal colors would make row 0 look like it
+    // is playing even when nothing is.
+    for (_, theme) in theme_presets() {
+      assert_ne!(theme.selected, theme.active);
+    }
+  }
+
   #[test]
   fn test_parse_key() {
     use super::parse_key;

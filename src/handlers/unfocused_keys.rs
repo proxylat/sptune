@@ -27,6 +27,12 @@ pub fn handler(key: Key, app: &mut App) {
       | ActiveBlock::TrackTable => {
         app.set_current_route_state(None, Some(ActiveBlock::PlayBar));
       }
+      // Nothing focused yet (startup): the first arrow enters the library
+      // panel, so its selection stays highlighted until the user leaves.
+      ActiveBlock::Empty => {
+        app.sidebar_latched_block = Some(ActiveBlock::Library);
+        app.set_current_route_state(Some(ActiveBlock::Library), Some(ActiveBlock::Library));
+      }
       _ => {}
     },
     k if common_key_events::up_event(k) => match app.get_current_route().hovered_block {
@@ -35,6 +41,10 @@ pub fn handler(key: Key, app: &mut App) {
       }
       ActiveBlock::PlayBar => {
         app.set_current_route_state(None, Some(ActiveBlock::MyPlaylists));
+      }
+      ActiveBlock::Empty => {
+        app.sidebar_latched_block = Some(ActiveBlock::Library);
+        app.set_current_route_state(Some(ActiveBlock::Library), Some(ActiveBlock::Library));
       }
       _ => {}
     },
