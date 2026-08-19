@@ -1,8 +1,8 @@
 use super::common_key_events;
 use crate::{
   app::{AlbumTableContext, App, RecommendationsContext},
-  event::Key,
   backend::IoEvent,
+  event::Key,
 };
 use rspotify::model::Id;
 
@@ -39,7 +39,8 @@ pub fn handler(key: Key, app: &mut App) {
             Some(selected_album_simplified.selected_index),
           );
           selected_album_simplified.selected_index = if has_more
-            && selected_album_simplified.selected_index == selected_album_simplified.tracks.items.len()
+            && selected_album_simplified.selected_index
+              == selected_album_simplified.tracks.items.len()
           {
             // stay on the "Load more songs..." row
             selected_album_simplified.tracks.items.len()
@@ -93,11 +94,12 @@ pub fn handler(key: Key, app: &mut App) {
         if let Some(selected_album_simplified) = &app.selected_album_simplified.clone() {
           let has_more = selected_album_simplified.tracks.items.len()
             < selected_album_simplified.tracks.total as usize;
-          if has_more
-            && selected_album_simplified.selected_index
-              == selected_album_simplified.tracks.items.len()
+          if selected_album_simplified.selected_index
+            >= selected_album_simplified.tracks.items.len()
           {
-            app.load_more_album_tracks();
+            if has_more {
+              app.load_more_album_tracks();
+            }
           } else {
             app.dispatch(IoEvent::StartPlayback(
               Some(

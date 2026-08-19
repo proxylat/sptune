@@ -2,8 +2,8 @@ use super::{
   super::app::{ActiveBlock, App},
   common_key_events,
 };
-use crate::event::Key;
 use crate::backend::IoEvent;
+use crate::event::Key;
 use rspotify::model::{context::CurrentPlaybackContext, PlayableItem};
 
 pub fn handler(key: Key, app: &mut App) {

@@ -27,7 +27,7 @@ pub const PLAYBAR_TIME_LEN: u16 = 6;
 // volume ramp bar, mouse interactions, theme preset, seek by typing,
 // resume last song, restore settings, clear cache, dev view, columns,
 // visualizer style
-pub const SETTINGS_ROW_COUNT: u16 = 17;
+pub const SETTINGS_ROW_COUNT: u16 = 18;
 
 // Prefix for list panel titles; clicking the title row refreshes the list.
 pub const REFRESH_GLYPH: &str = "♻ ";
@@ -207,7 +207,12 @@ pub fn gear_click_rect(app: &App, input_box: Rect) -> Rect {
   let glyph_x = zone.x + zone.width.saturating_sub(3) - 1;
   let start = glyph_x.saturating_sub(1).max(zone.x);
   let row_y = input_box.y + (input_box.height.saturating_sub(1)) / 2;
-  Rect::new(start, row_y, (glyph_x + 2).min(zone.x + zone.width) - start, 1)
+  Rect::new(
+    start,
+    row_y,
+    (glyph_x + 2).min(zone.x + zone.width) - start,
+    1,
+  )
 }
 
 pub fn get_search_results_highlight_state(
@@ -298,10 +303,7 @@ pub fn search_layout(
 /// (Top tracks / Albums) and the active tab's list below.
 /// Shared with the mouse hit-testing so the two never drift.
 /// Returns (tab_bar_rect, tab_cells, list_rect).
-pub fn artist_layout(
-  chunk: Rect,
-  expanded: ArtistBlock,
-) -> (Rect, Vec<(ArtistBlock, Rect)>, Rect) {
+pub fn artist_layout(chunk: Rect, expanded: ArtistBlock) -> (Rect, Vec<(ArtistBlock, Rect)>, Rect) {
   let tab_bar = Rect {
     x: chunk.x,
     y: chunk.y,
@@ -549,7 +551,7 @@ pub fn list_scroll(app: &App, block: ActiveBlock, rect: Rect) -> Option<ListScro
       let episodes = app.library.show_episodes.get_results(None)?;
       selection(app.episode_list_index, episodes.items.len())
     }
-    ActiveBlock::MadeForYou => selection(app.made_for_you_index, 5),
+    ActiveBlock::MadeForYou => selection(app.made_for_you_index, app.made_for_you_len()),
     ActiveBlock::SearchResultBlock => {
       let tracks = app.search_results.tracks.as_ref()?;
       selection(
@@ -652,6 +654,7 @@ pub fn song_table_columns(
   show_artist: bool,
   show_length: bool,
   show_date_added: bool,
+  show_remove: bool,
 ) -> Vec<(ColumnId, u16, u16)> {
   // The non-title columns keep their fixed percentage widths; the title
   // column absorbs whatever the visible columns leave over, so hiding a
@@ -674,7 +677,10 @@ pub fn song_table_columns(
     tail.push((ColumnId::Length, get_percentage_width(width, 0.1)));
   }
   let fixed: u16 = tail.iter().map(|(_, w)| w).sum();
-  let title = width.saturating_sub(2 + fixed).max(1);
+  // The remove ✕ column reserves the rightmost 2 cells; the title absorbs the
+  // loss so the other columns keep their fixed widths.
+  let remove = if show_remove { 2 } else { 0 };
+  let title = width.saturating_sub(2 + remove + fixed).max(1);
 
   let mut columns = vec![(ColumnId::Liked, 0, 2)];
   let mut x = 2;
@@ -683,6 +689,9 @@ pub fn song_table_columns(
   for (column, w) in tail {
     columns.push((column, x, w));
     x += w;
+  }
+  if show_remove {
+    columns.push((ColumnId::None, x, 2));
   }
   columns
 }
@@ -763,12 +772,7 @@ mod tests {
     // Header is 5 rows (banner): the gear is drawn vertically centered on
     // the FULL input_box row (h-1)/2 = 2 — not the inset zone row (1).
     // 35% of 200 = 70 → gear zone x 130..200, glyph at 196.
-    let mut app = App::default();
-    app.mock = true;
-    let rect = gear_click_rect(&app, Rect::new(0, 0, 200, 5));
-    assert_eq!((rect.x, rect.y, rect.width), (195, 2, 3));
-    // Real mode keeps the same 5-row banner geometry.
-    app.mock = false;
+    let app = App::default();
     let rect = gear_click_rect(&app, Rect::new(0, 0, 200, 5));
     assert_eq!((rect.x, rect.y, rect.width), (195, 2, 3));
     // A shifted header keeps the same relative geometry.

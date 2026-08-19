@@ -83,6 +83,11 @@ pub fn get_help_docs(key_bindings: &KeyBindings) -> Vec<Vec<String>> {
       String::from("General"),
     ],
     vec![
+      String::from("Copy the last error to clipboard"),
+      key_bindings.copy_error.to_string(),
+      String::from("General"),
+    ],
+    vec![
       String::from("Cycle repeat mode"),
       key_bindings.repeat.to_string(),
       String::from("General"),
@@ -170,6 +175,15 @@ pub fn get_help_docs(key_bindings: &KeyBindings) -> Vec<Vec<String>> {
     vec![
       String::from("Play recommendations for song/artist"),
       String::from("r"),
+      String::from("Selected block"),
+    ],
+    vec![
+      String::from("Refresh current list (configurable, no default)"),
+      key_bindings
+        .refresh
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "none".to_string()),
       String::from("Selected block"),
     ],
     vec![
@@ -280,6 +294,15 @@ pub fn get_help_docs(key_bindings: &KeyBindings) -> Vec<Vec<String>> {
     vec![
       String::from("Hide/show a library section (1=For you, 2=Recently Played, 3=Liked Songs, 4=Albums, 5=Artists, 6=Podcasts)"),
       String::from("1-6"),
+      String::from("Settings menu"),
+    ],
+    vec![
+      String::from("Clear cache (configurable, no default)"),
+      key_bindings
+        .clear_cache
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "none".to_string()),
       String::from("Settings menu"),
     ],
   ]

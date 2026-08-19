@@ -3,19 +3,18 @@ use crate::app::{
   visible_library_options, ActiveBlock, AlbumTableContext, App, ArtistBlock, RouteId,
   SearchResultBlock, TrackSortColumn, TrackTableContext,
 };
-use crate::event::Key;
 use crate::backend::IoEvent;
+use crate::event::Key;
+use crate::tui::layout;
 use crate::tui::layout::{
-  build_playbar_controls, build_playbar_title, gear_click_rect,
-  playbar_artist_row,
+  build_playbar_controls, build_playbar_title, gear_click_rect, header_height, playbar_artist_row,
   playbar_controls_x, playbar_progress_rect, playbar_song_row, playbar_text_click_range,
   playbar_volume_rect, search_box_rect, settings_section_rect, shortcuts_table_rect,
   song_table_columns, song_table_viewport, sort_column_for, track_table_with_date, PlaybarButton,
   PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, SETTINGS_ROW_COUNT, SMALL_TERMINAL_HEIGHT, VOLUME_BAR_LEN,
-  header_height, VOLUME_LABEL_LEN,
+  VOLUME_LABEL_LEN,
 };
 use crate::tui::ColumnId;
-use crate::tui::layout;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use rspotify::model::PlayableItem;
@@ -86,8 +85,7 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
             );
             // The last cell maps to the full duration (same as click-to-seek),
             // so a drag to the right edge reaches the end of the track.
-            let fraction = if clamped_x == (drag.bar_x + drag.bar_w.saturating_sub(1)) as f32
-            {
+            let fraction = if clamped_x == (drag.bar_x + drag.bar_w.saturating_sub(1)) as f32 {
               1.0
             } else {
               (clamped_x - drag.bar_x as f32) / drag.bar_w as f32
@@ -194,6 +192,12 @@ fn handle_left_click(x: u16, y: u16, app: &mut App) -> bool {
       app.sidebar_latched_block = None;
       let search_box = search_box_rect(app, input_box);
       if x >= search_box.x && x < search_box.x + search_box.width {
+        // Clicking the clear button wipes the search input.
+        if x >= search_box.x + search_box.width.saturating_sub(4) && !app.input.is_empty() {
+          app.input = vec![];
+          app.input_idx = 0;
+          app.input_cursor_position = 0;
+        }
         app.set_current_route_state(Some(ActiveBlock::Input), Some(ActiveBlock::Input));
         return false;
       }
@@ -214,7 +218,10 @@ fn handle_left_click(x: u16, y: u16, app: &mut App) -> bool {
   } else if app.dev_view && x >= dev_panel_rect(right).x {
     // The dev request-log panel overlays the table; only the title row is
     // clickable and it clears the log.
-    if y == dev_panel_rect(right).y {
+    let panel = dev_panel_rect(right);
+    // The title row is below the 4-row throttle info header inside draw_request_log.
+    let title_y = panel.y.saturating_add(4);
+    if y == title_y {
       app.request_log.clear();
       app.request_log_index = None;
     }
@@ -426,7 +433,11 @@ fn handle_scrollbar_down(x: u16, y: u16, app: &mut App) -> bool {
   if x < left.x + left.width {
     if let Some(block) = user_block_at(y, left, app) {
       let (library, playlists) = crate::tui::layout::library_playlists_split(app, left);
-      let rect = if block == ActiveBlock::Library { library } else { playlists };
+      let rect = if block == ActiveBlock::Library {
+        library
+      } else {
+        playlists
+      };
       return arm_scrollbar(x, y, app, block, rect);
     }
     return false;
@@ -472,7 +483,8 @@ fn arm_scrollbar(x: u16, y: u16, app: &mut App, block: ActiveBlock, rect: Rect) 
   // The thumb position the drawer renders, so the grabbable thumb is the
   // drawn thumb.
   let thumb_offset = scroll.thumb_offset();
-  let (top, thumb_top, thumb_len) = thumb_geometry(rect, scroll.count, scroll.viewport, thumb_offset);
+  let (top, thumb_top, thumb_len) =
+    thumb_geometry(rect, scroll.count, scroll.viewport, thumb_offset);
   let thumb_top = top + thumb_top;
   // Pressing anywhere on the scrollbar column starts a drag; the thumb jumps
   // to the cursor. Big lists draw a thumb only a couple of rows tall, so a
@@ -501,7 +513,8 @@ fn handle_scrollbar_drag(y: u16, app: &mut App) {
   };
   let track_h = drag.right.height.saturating_sub(2) as usize;
   let max_offset = drag.count - drag.viewport;
-  let (_, thumb_len) = crate::tui::layout::scrollbar_geometry(track_h, drag.count, drag.viewport, 0);
+  let (_, thumb_len) =
+    crate::tui::layout::scrollbar_geometry(track_h, drag.count, drag.viewport, 0);
   let travel = track_h - thumb_len;
   // Where the thumb's top edge should sit, keeping the grab offset
   let y_thumb_top = y as i32 - drag.grab_offset as i32 - drag.right.y as i32 - 1;
@@ -554,13 +567,13 @@ fn set_selected(app: &mut App, block: ActiveBlock, index: usize) {
     ActiveBlock::RequestLog => app.request_log_index = Some(index),
     _ => {}
   }
-
 }
 
 fn toggle_music_view(app: &mut App) {
   if app.get_current_route().id == RouteId::MusicView {
+    // Pop restores the previous route and its active block, so the
+    // dashboard is exactly as it was before the overlay opened.
     app.pop_navigation_stack();
-    app.set_current_route_state(Some(ActiveBlock::Empty), None);
   } else {
     app.get_panel_data();
     app.push_navigation_stack(RouteId::MusicView, ActiveBlock::MusicView);
@@ -683,7 +696,10 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
         // Every artist name is its own click zone: a multi-artist track
         // ("Avicii, Nicky Romero") opens whichever name is clicked.
         let row = playbar_artist_row(playbar);
-        let limit = (bar.x.saturating_sub(PLAYBAR_TIME_LEN).saturating_sub(row.x + 1)) as usize;
+        let limit = (bar
+          .x
+          .saturating_sub(PLAYBAR_TIME_LEN)
+          .saturating_sub(row.x + 1)) as usize;
         let mut offset = 0usize;
         for artist in &track.artists {
           let seg = artist.name.chars().count();
@@ -822,19 +838,38 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
         return false;
       }
       if y == chunk.y {
-        match app.track_table.context {
-          Some(TrackTableContext::SavedTracks) => app.dispatch(IoEvent::RefreshSavedTracks),
-          Some(TrackTableContext::MyPlaylists) => {
-            if let (Some(playlists), Some(index)) = (
-              &app.playlists,
-              &app.active_playlist_index.or(app.selected_playlist_index),
-            ) {
-              if let Some(selected_playlist) = playlists.items.get(*index) {
-                app.dispatch(IoEvent::RefreshPlaylistTracks(selected_playlist.id.to_string()));
+        // Title-row click: split into refresh zone (♻ glyph, leftmost) and
+        // search zone (rest of the title row). The refresh glyph sits at
+        // block position x+1 (2 chars wide), so x < chunk.x+3 = refresh.
+        if x < chunk.x + 3 {
+          match app.track_table.context {
+            Some(TrackTableContext::SavedTracks) => {
+              app.dispatch(IoEvent::RefreshSavedTracks);
+            }
+            Some(TrackTableContext::MyPlaylists) => {
+              if let (Some(playlists), Some(index)) = (
+                &app.playlists,
+                &app.active_playlist_index.or(app.selected_playlist_index),
+              ) {
+                if let Some(selected_playlist) = playlists.items.get(*index) {
+                  app.dispatch(IoEvent::RefreshPlaylistTracks(
+                    selected_playlist.id.to_string(),
+                  ));
+                }
               }
             }
+            _ => {}
           }
-          _ => {}
+          return true;
+        }
+        // Search zone: focus the search box on playlist pages.
+        if matches!(
+          app.track_table.context,
+          Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
+        ) {
+          app.playlist_filter = Some(String::new());
+          app.set_current_route_state(Some(ActiveBlock::TrackTable), None);
+          return false;
         }
         return true;
       }
@@ -848,12 +883,112 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
         .track_table
         .scroll_offset
         .min(count.saturating_sub(viewport));
-      let index = offset + (y - (chunk.y + 2)) as usize;
-      if index < count {
+      let raw_index = offset + (y - (chunk.y + 2)) as usize;
+
+      // When the in-playlist search filter is active, the rendered rows are a
+      // subset of app.track_table.tracks. Map the display index back to the
+      // original track index so the correct track plays / is removed.
+      let (display_count, index) = if app.playlist_search_active() {
+        let filtered: Vec<usize> = app
+          .track_table
+          .tracks
+          .iter()
+          .enumerate()
+          .filter(|(_, t)| app.playlist_filter_matches(t))
+          .map(|(i, _)| i)
+          .collect();
+        let display_count = filtered.len();
+        if raw_index < display_count {
+          (display_count, filtered[raw_index])
+        } else {
+          (display_count, raw_index)
+        }
+      } else {
+        (count, raw_index)
+      };
+
+      if raw_index < display_count {
+        // The remove ✕ column (rightmost 2 cells) only exists on playlist
+        // pages when the feature flag is on; clicking it removes the track.
+        let show_remove = app.user_config.behavior.enable_remove_from_playlist
+          && matches!(
+            app.track_table.context,
+            Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
+          );
+        if show_remove
+          && index < app.track_table.tracks.len()
+          && x >= chunk.x + chunk.width.saturating_sub(2)
+        {
+          app.track_table.selected_index = index;
+          app.set_current_route_state(Some(ActiveBlock::TrackTable), None);
+          app.remove_selected_track_from_playlist();
+          return false;
+        }
         app.track_table.selected_index = index;
+        // Clicking a track row while the in-playlist search is active must
+        // dismiss the filter so the subsequent Enter can trigger playback.
+        // (handle_app captures ALL keys when playlist_search_active.)
+        app.playlist_filter = None;
         app.set_current_route_state(Some(ActiveBlock::TrackTable), None);
         if has_more && index == app.track_table.tracks.len() {
           app.load_more_tracks();
+          // The load-more click already fetches; swallowing Enter prevents the
+          // handler from re-fetching or falling through to playback.
+          return false;
+        }
+        // By default a row click plays the song. Check for Artist/Album
+        // columns first: clicking those navigates instead. Everything else
+        // (Title, Liked, Length, Date Added, unknown) plays.
+        if index < app.track_table.tracks.len() {
+          let with_date =
+            track_table_with_date(app.track_table.context.as_ref());
+          let b = &app.user_config.behavior;
+          let show_remove = b.enable_remove_from_playlist
+            && matches!(
+              app.track_table.context,
+              Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
+            );
+          let columns = song_table_columns(
+            chunk.width,
+            with_date,
+            b.show_album_column,
+            b.show_artist_column,
+            b.show_length_column,
+            b.show_date_added_column,
+            show_remove,
+          );
+          if let Some(x_in) = x.checked_sub(chunk.x + 1) {
+            if let Some((column, _, _)) = columns
+              .iter()
+              .find(|(_, col_x, col_width)| *col_x <= x_in && x_in < col_x + col_width)
+            {
+              let track = &app.track_table.tracks[index];
+              match column {
+                ColumnId::Artist => {
+                  if let Some(artist) = track.artists.first() {
+                    if let Some(artist_id) = artist.id.as_ref() {
+                      app.get_artist(
+                        artist_id.to_string(),
+                        artist.name.clone(),
+                      );
+                      app.push_navigation_stack(
+                        RouteId::Artist,
+                        ActiveBlock::ArtistBlock,
+                      );
+                    }
+                  }
+                  return false;
+                }
+                ColumnId::Album => {
+                  app.dispatch(IoEvent::GetAlbumTracks(
+                    Box::new(track.album.clone()),
+                  ));
+                  return false;
+                }
+                _ => {} // Title, Liked, Length, DateAdded, None → play
+              }
+            }
+          }
         }
         return true;
       }
@@ -864,8 +999,7 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           .selected_album_simplified
           .as_ref()
           .map(|album| {
-            let has_more =
-              album.tracks.items.len() < album.tracks.total as usize;
+            let has_more = album.tracks.items.len() < album.tracks.total as usize;
             (
               album.tracks.items.len() + usize::from(has_more),
               album.selected_index,
@@ -879,9 +1013,10 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           .unwrap_or((0, 0)),
       };
       if let Some(index) = table_row_index(y, chunk, count, selected) {
+        let mut is_load_more = false;
         match app.album_table_context {
           AlbumTableContext::Simplified => {
-            let is_load_more = app
+            is_load_more = app
               .selected_album_simplified
               .as_ref()
               .map(|album| index == album.tracks.items.len())
@@ -896,7 +1031,7 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           AlbumTableContext::Full => app.saved_album_tracks_index = index,
         }
         app.set_current_route_state(Some(ActiveBlock::AlbumTracks), None);
-        return true;
+        return !is_load_more;
       }
     }
     RouteId::RecentlyPlayed => {
@@ -909,12 +1044,15 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       // The load-more row is drawn after the items, so count it when mapping.
       let total_rows = count + usize::from(app.recently_played_has_more());
       if let Some(index) = table_row_index(y, chunk, total_rows, app.recently_played.index) {
-        if app.recently_played_has_more() && index == count {
+        let is_load_more = app.recently_played_has_more() && index == count;
+        if is_load_more {
           app.load_more_recently_played();
         }
         app.recently_played.index = index;
         app.set_current_route_state(Some(ActiveBlock::RecentlyPlayed), None);
-        return true;
+        // Load-more clicks swallow Enter so the handler cannot fall through to
+        // playback with an out-of-range index.
+        return !is_load_more;
       }
     }
     RouteId::AlbumList => {
@@ -973,9 +1111,17 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       }
     }
     RouteId::MadeForYou => {
-      if let Some(index) = table_row_index(y, chunk, 5, app.made_for_you_index) {
-        app.made_for_you_index = index;
-        app.set_current_route_state(Some(ActiveBlock::MadeForYou), None);
+      // List widget (items start at chunk.y+1); clicking the trailing ✕
+      // removes the playlist from For you.
+      if let Some(index) =
+        list_row_index(y, chunk, app.made_for_you_len(), app.made_for_you_index)
+      {
+        if x >= chunk.x + chunk.width.saturating_sub(2) {
+          app.remove_pasted_playlist_from_for_you(index);
+        } else {
+          app.made_for_you_index = index;
+          app.set_current_route_state(Some(ActiveBlock::MadeForYou), None);
+        }
         return true;
       }
     }
@@ -1051,9 +1197,7 @@ fn set_search_selected(app: &mut App, block: SearchResultBlock, index: usize) {
     SearchResultBlock::SongSearch => app.search_results.selected_tracks_index = Some(index),
     SearchResultBlock::ArtistSearch => app.search_results.selected_artists_index = Some(index),
     SearchResultBlock::AlbumSearch => app.search_results.selected_album_index = Some(index),
-    SearchResultBlock::PlaylistSearch => {
-      app.search_results.selected_playlists_index = Some(index)
-    }
+    SearchResultBlock::PlaylistSearch => app.search_results.selected_playlists_index = Some(index),
     SearchResultBlock::ShowSearch => app.search_results.selected_shows_index = Some(index),
     SearchResultBlock::Empty => {}
   }
@@ -1065,9 +1209,10 @@ fn handle_search_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
   // Tab click: expand (and lazily load) that block. Returns false so the
   // click-to-Enter chain is skipped: switching tabs must not play the first
   // song of the block (like the artist page tabs).
-  if let Some((block, _)) = tab_cells.into_iter().find(|(_, rect)| {
-    x >= rect.x && x < rect.x + rect.width && y == rect.y
-  }) {
+  if let Some((block, _)) = tab_cells
+    .into_iter()
+    .find(|(_, rect)| x >= rect.x && x < rect.x + rect.width && y == rect.y)
+  {
     app.load_search_block(&block);
     app.search_results.selected_block = block;
     app.set_current_route_state(Some(ActiveBlock::SearchResultBlock), None);
@@ -1091,11 +1236,15 @@ fn handle_search_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
     };
     if let Some(index) = index {
       if has_more && index == count {
-        // The " Load more " row: fetch the next page.
+        // The " Load more " row: fetch the next page and swallow Enter so the
+        // handler cannot fall through to playback with an out-of-range index.
+        // Anchor the selection on the row so the draw window keeps the button
+        // visible for the next click.
+        set_search_selected(app, block.clone(), count);
         app.load_more_search_block(&block);
         app.search_results.selected_block = block;
         app.set_current_route_state(Some(ActiveBlock::SearchResultBlock), None);
-        return true;
+        return false;
       }
       set_search_selected(app, block.clone(), index);
       // Clicking an artist result opens the profile, like Enter does.
@@ -1138,7 +1287,10 @@ fn handle_search_wheel(up: bool, app: &mut App) {
     }
     set_search_selected(app, block.clone(), selected - 1);
   } else {
-    if selected + 1 >= count {
+    // The load-more row lives one past the last result (index == count), so
+    // allow the selection to land on it when another page could arrive.
+    let has_more = app.search_block_has_more(&block);
+    if selected + 1 >= count + usize::from(has_more) {
       return;
     }
     set_search_selected(app, block.clone(), selected + 1);
@@ -1190,7 +1342,7 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
         artist.albums.items.len() + usize::from(albums_has_more),
         artist.selected_album_index,
       ),
-      ArtistBlock::Empty | ArtistBlock::RelatedArtists => (0, 0),
+      ArtistBlock::Empty => (0, 0),
     };
     (shown, top_has_more, albums_has_more, count, selected)
   };
@@ -1212,45 +1364,44 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
   // Top-tracks rows are a table: clicking a name of an artist other than
   // the page artist, inside the Artist column, opens that artist.
   if shown == ArtistBlock::TopTracks {
-    let nav = app
-      .artist
-      .as_ref()
-      .and_then(|artist| {
-        let track = artist.top_tracks.get(index)?;
-        let b = &app.user_config.behavior;
-        let columns = song_table_columns(
-          list_rect.width,
-          true,
-          b.show_album_column,
-          b.show_artist_column,
-          b.show_length_column,
-          b.show_date_added_column,
-        );
-        let (col_x, col_w) = columns
-          .iter()
-          .find(|(column, _, _)| *column == ColumnId::Artist)
-          .map(|(_, x, w)| (list_rect.x + x, *w))?;
-        if x < col_x || x >= col_x + col_w {
+    let nav = app.artist.as_ref().and_then(|artist| {
+      let track = artist.top_tracks.get(index)?;
+      let b = &app.user_config.behavior;
+      let columns = song_table_columns(
+        list_rect.width,
+        true,
+        b.show_album_column,
+        b.show_artist_column,
+        b.show_length_column,
+        b.show_date_added_column,
+        false,
+      );
+      let (col_x, col_w) = columns
+        .iter()
+        .find(|(column, _, _)| *column == ColumnId::Artist)
+        .map(|(_, x, w)| (list_rect.x + x, *w))?;
+      if x < col_x || x >= col_x + col_w {
+        return None;
+      }
+      let mut offset = 0usize;
+      for a in &track.artists {
+        let seg = a.name.chars().count() as u16;
+        let start = col_x + offset as u16;
+        if x >= start && x < start + seg.min(col_w) {
+          if let (Some(aid), Some(page_id)) = (
+            a.id.as_ref().map(|id| id.id().to_string()),
+            Some(artist.artist_id.clone()),
+          ) {
+            if aid != page_id {
+              return Some((aid, a.name.clone()));
+            }
+          }
           return None;
         }
-        let mut offset = 0usize;
-        for a in &track.artists {
-          let seg = a.name.chars().count() as u16;
-          let start = col_x + offset as u16;
-          if x >= start && x < start + seg.min(col_w) {
-            if let (Some(aid), Some(page_id)) =
-              (a.id.as_ref().map(|id| id.id().to_string()), Some(artist.artist_id.clone()))
-            {
-              if aid != page_id {
-                return Some((aid, a.name.clone()));
-              }
-            }
-            return None;
-          }
-          offset += seg as usize + 2; // ", " separator
-        }
-        None
-      });
+        offset += seg as usize + 2; // ", " separator
+      }
+      None
+    });
     if let Some((artist_id, artist_name)) = nav {
       app.get_artist(artist_id, artist_name);
       app.push_navigation_stack(RouteId::Artist, ActiveBlock::ArtistBlock);
@@ -1264,7 +1415,7 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       artist.selected_top_track_index = index;
     }
     app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
-    return true;
+    return false;
   }
 
   if shown == ArtistBlock::Albums && albums_has_more && index == count - 1 {
@@ -1273,14 +1424,14 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       artist.selected_album_index = index;
     }
     app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
-    return true;
+    return false;
   }
 
   if let Some(artist) = &mut app.artist {
     match shown {
       ArtistBlock::TopTracks => artist.selected_top_track_index = index,
       ArtistBlock::Albums => artist.selected_album_index = index,
-      ArtistBlock::Empty | ArtistBlock::RelatedArtists => return false,
+      ArtistBlock::Empty => return false,
     }
     app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
     return true;
@@ -1314,8 +1465,11 @@ fn table_row_index(y: u16, chunk: Rect, count: usize, selected: usize) -> Option
     return None;
   }
   let visible = chunk.height.saturating_sub(5) as usize;
+  // The drawn window is items[selected - visible + 1 ..= selected] (see
+  // draw_table), so clicks must map back through the same +1 offset. With the
+  // selection on the load-more row, the last visible row maps to index == count.
   let offset = if selected >= visible {
-    selected - visible
+    selected - visible + 1
   } else {
     0
   };
@@ -1330,6 +1484,11 @@ fn table_row_index(y: u16, chunk: Rect, count: usize, selected: usize) -> Option
 fn handle_table_header_click(x: u16, chunk: Rect, app: &mut App) {
   let with_date = track_table_with_date(app.track_table.context.as_ref());
   let b = &app.user_config.behavior;
+  let show_remove = b.enable_remove_from_playlist
+    && matches!(
+      app.track_table.context,
+      Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
+    );
   let columns = song_table_columns(
     chunk.width,
     with_date,
@@ -1337,6 +1496,7 @@ fn handle_table_header_click(x: u16, chunk: Rect, app: &mut App) {
     b.show_artist_column,
     b.show_length_column,
     b.show_date_added_column,
+    show_remove,
   );
   let Some(x_in) = x.checked_sub(chunk.x + 1) else {
     return;
@@ -1442,6 +1602,63 @@ mod tests {
     handle_mouse(wheel_event(up, 150, 10), app);
   }
 
+  fn search_app(n_items: usize, total: u32) -> App {
+    SCROLLBAR_DRAG.with(|d| *d.borrow_mut() = None);
+    PLAYBAR_DRAG.with(|d| *d.borrow_mut() = None);
+    let mut app = App::default();
+    app.size = Rect::new(0, 0, 200, 50);
+    app.push_navigation_stack(RouteId::Search, ActiveBlock::SearchResultBlock);
+    app.search_results.selected_block = SearchResultBlock::SongSearch;
+    app.search_results.tracks = Some(rspotify::model::Page {
+      href: String::new(),
+      items: (0..n_items).map(mock_track).collect(),
+      limit: 10,
+      next: None,
+      offset: 0,
+      previous: None,
+      total,
+    });
+    app
+  }
+
+  #[test]
+  fn search_wheel_down_stops_on_load_more_row() {
+    // Full page (10 songs): the " Load more " row (index == count) must be
+    // reachable by scrolling down so the button can be clicked repeatedly,
+    // then clamp on it.
+    let mut app = search_app(10, 20);
+    app.search_results.selected_tracks_index = Some(9);
+    handle_search_wheel(false, &mut app);
+    assert_eq!(app.search_results.selected_tracks_index, Some(10));
+    handle_search_wheel(false, &mut app);
+    assert_eq!(app.search_results.selected_tracks_index, Some(10));
+  }
+
+  #[test]
+  fn search_wheel_down_clamps_at_last_result_without_more() {
+    // Short page (9 < limit): no load-more row, the selection stops at the end.
+    let mut app = search_app(9, 20);
+    app.search_results.selected_tracks_index = Some(8);
+    handle_search_wheel(false, &mut app);
+    assert_eq!(app.search_results.selected_tracks_index, Some(8));
+  }
+
+  #[test]
+  fn search_keyboard_down_moves_onto_load_more_row() {
+    let mut app = search_app(10, 20);
+    app.search_results.selected_tracks_index = Some(9);
+    handle_app(Key::Down, &mut app);
+    assert_eq!(app.search_results.selected_tracks_index, Some(10));
+  }
+
+  #[test]
+  fn search_keyboard_down_wraps_to_top_without_more() {
+    let mut app = search_app(9, 20);
+    app.search_results.selected_tracks_index = Some(8);
+    handle_app(Key::Down, &mut app);
+    assert_eq!(app.search_results.selected_tracks_index, Some(0));
+  }
+
   #[test]
   fn wheel_scrolls_one_row() {
     let mut app = track_table_app(40);
@@ -1478,7 +1695,10 @@ mod tests {
     app.track_table.scroll_offset = 6;
     wheel_over_track_table(true, &mut app);
     assert_eq!(app.track_table.scroll_offset, 5);
-    assert_eq!(app.track_table.selected_index, 39, "wheel keeps selection put");
+    assert_eq!(
+      app.track_table.selected_index, 39,
+      "wheel keeps selection put"
+    );
   }
 
   #[test]
@@ -1617,7 +1837,10 @@ mod tests {
     // map to that row: index = y - (chunk.y + 1) = y - 15.
     handle_mouse(click_event(5, 20), &mut app);
     assert_eq!(app.selected_playlist_index, Some(5));
-    assert_eq!(app.get_current_route().active_block, ActiveBlock::MyPlaylists);
+    assert_eq!(
+      app.get_current_route().active_block,
+      ActiveBlock::MyPlaylists
+    );
     // Row straddling the old split boundary is a normal playlist row too.
     handle_mouse(click_event(5, 19), &mut app);
     assert_eq!(app.selected_playlist_index, Some(4));
@@ -1674,7 +1897,10 @@ mod tests {
     handle_mouse(click_event(39, 40), &mut app);
     handle_mouse(drag_event(39, 40), &mut app);
     assert_eq!(app.selected_playlist_index, Some(35));
-    assert_eq!(app.get_current_route().active_block, ActiveBlock::MyPlaylists);
+    assert_eq!(
+      app.get_current_route().active_block,
+      ActiveBlock::MyPlaylists
+    );
     handle_mouse(up_event(39, 40), &mut app);
   }
 
@@ -1725,9 +1951,10 @@ mod tests {
     app.dev_view = true;
     app.request_log.clear();
     for i in 0..80 {
-      app
-        .request_log
-        .push_back(crate::app::RequestLogEntry { text: format!("request {}", i), count: 1 });
+      app.request_log.push_back(crate::app::RequestLogEntry {
+        text: format!("request {}", i),
+        count: 1,
+      });
     }
     // Dev panel = right column's right quarter; derive the rects the exact
     // same way the handlers do (20/80 columns, 75/25 dev split), so the
@@ -1741,7 +1968,10 @@ mod tests {
     handle_mouse(click_event(scrollbar_x, 7), &mut app);
     handle_mouse(drag_event(scrollbar_x, 44), &mut app);
     assert_eq!(app.request_log_index, Some(79));
-    assert_eq!(app.get_current_route().active_block, ActiveBlock::RequestLog);
+    assert_eq!(
+      app.get_current_route().active_block,
+      ActiveBlock::RequestLog
+    );
     // Wheel over the dev panel: at the bottom the generic list path refuses
     // to scroll past the end, wheel up moves one row.
     handle_mouse(wheel_event(false, dev.x + 2, 10), &mut app);
@@ -1765,7 +1995,8 @@ mod tests {
     let (routes, _, _) = main_layout(&app).unwrap();
     let (_, right) = content_columns(routes);
     let dev = dev_panel_rect(right);
-    handle_mouse(click_event(dev.x + 2, dev.y), &mut app);
+    // Title row is 4 rows below dev rect (below throttle info header).
+    handle_mouse(click_event(dev.x + 2, dev.y + 4), &mut app);
     assert!(app.request_log.is_empty());
     assert_eq!(app.request_log_index, None);
     // A click on a log row must not clear or select anything.
@@ -1813,7 +2044,9 @@ mod tests {
     let dispatched: Vec<IoEvent> = rx.try_iter().collect();
     assert_eq!(
       dispatched,
-      vec![IoEvent::LoadAllPlaylistItems("spotify:playlist:mockplaylist0".to_string())]
+      vec![IoEvent::LoadAllPlaylistItems(
+        "spotify:playlist:mockplaylist0".to_string()
+      )]
     );
     // Fully loaded playlists sort in place without paging.
     app.playlist_tracks.as_mut().unwrap().total = 57;
@@ -1845,20 +2078,19 @@ mod tests {
     });
     let (tx, rx) = std::sync::mpsc::channel();
     app.io_tx = Some(tx);
-    // Row 0 of the sorted table = mocktrack9 (newest); its raw playlist
-    // index is 9, so StartPlayback must get offset 9, not the sorted 0.
+    // Row 0 of the sorted table = mocktrack9 (newest); StartPlaybackAt must
+    // carry the URI of the displayed track, not a raw offset.
     app.track_table.selected_index = 0;
     crate::handlers::handle_app(Key::Enter, &mut app);
     let dispatched: Vec<IoEvent> = rx.try_iter().collect();
     assert_eq!(
       dispatched,
-      vec![IoEvent::StartPlayback(
+      vec![IoEvent::StartPlaybackAt(
         Some("spotify:playlist:mockplaylist0".to_string()),
-        None,
-        Some(9)
+        Some("spotify:track:mocktrack9".to_string())
       )]
     );
-    // Unsorted tables display the raw order, so row 0 maps to raw index 0.
+    // Unsorted tables display the raw order, so row 0 is mocktrack0.
     app.track_table_sort = None;
     app.track_table.tracks = raw.clone();
     app.track_table_raw_index = (0..10).collect();
@@ -1868,10 +2100,9 @@ mod tests {
     let dispatched: Vec<IoEvent> = rx2.try_iter().collect();
     assert_eq!(
       dispatched,
-      vec![IoEvent::StartPlayback(
+      vec![IoEvent::StartPlaybackAt(
         Some("spotify:playlist:mockplaylist0".to_string()),
-        None,
-        Some(0)
+        Some("spotify:track:mocktrack0".to_string())
       )]
     );
   }
@@ -1895,10 +2126,10 @@ mod tests {
   }
 
   #[test]
-  fn search_opened_playlist_enter_uses_raw_index() {
+  fn search_opened_playlist_enter_uses_displayed_track() {
     // A playlist opened from search results (PlaylistSearch context) must
     // resolve the context uri from the search results, not the sidebar, and
-    // the raw_index must drive the context offset after a Date Added sort.
+    // start playback at the URI of the displayed track after a sort.
     let mut app = track_table_app(20);
     app.track_table.context = Some(TrackTableContext::PlaylistSearch);
     app.search_results.selected_playlists_index = Some(1);
@@ -1924,10 +2155,9 @@ mod tests {
     let dispatched: Vec<IoEvent> = rx.try_iter().collect();
     assert_eq!(
       dispatched,
-      vec![IoEvent::StartPlayback(
+      vec![IoEvent::StartPlaybackAt(
         Some("spotify:playlist:mockplaylist1".to_string()),
-        None,
-        Some(9)
+        Some("spotify:track:mocktrack9".to_string())
       )]
     );
   }
@@ -1961,25 +2191,27 @@ mod tests {
 
     // 1. Click the Date Added header (chunk.y+1 = 7; column x 160..184).
     handle_mouse(click_event(170, 7), &mut app);
-    assert_eq!(app.track_table_sort, Some((TrackSortColumn::DateAdded, true)));
+    assert_eq!(
+      app.track_table_sort,
+      Some((TrackSortColumn::DateAdded, true))
+    );
     assert_eq!(app.track_table.tracks[0].name, "Mock Song 516");
     assert_eq!(app.track_table_raw_index[0], 516);
     assert_eq!(app.track_table_raw_index.len(), n);
 
-    // 2. Click song row 8 (first data row is chunk.y+2 = 8, so row 8 → y 15).
-    //    The click itself selects AND fires Enter.
-    handle_mouse(click_event(150, 15), &mut app);
+    // 2. Click song row 8 in the Title column area (x=50 is safely inside
+    //    the name column of a 158-wide table) so it triggers playback.
+    handle_mouse(click_event(50, 15), &mut app);
     assert_eq!(app.track_table.selected_index, 7);
 
-    // 3. The click must have dispatched StartPlayback for the song displayed
-    //    at row 8 = raw index 509 (the 8th newest).
+    // 3. The click must have dispatched StartPlaybackAt for the song displayed
+    //    at row 8 = raw index 509 (the 8th newest), resolved by URI.
     let dispatched: Vec<IoEvent> = rx.try_iter().collect();
     assert_eq!(
       dispatched,
-      vec![IoEvent::StartPlayback(
+      vec![IoEvent::StartPlaybackAt(
         Some("spotify:playlist:mockplaylist0".to_string()),
-        None,
-        Some(509)
+        Some("spotify:track:mocktrack509".to_string())
       )]
     );
   }
@@ -2008,6 +2240,230 @@ mod tests {
     assert_eq!(app.track_table.selected_index, 0);
     handle_mouse(click_event(150, 13), &mut app);
     assert_eq!(app.track_table.selected_index, 5);
+  }
+
+  #[test]
+  fn playlist_title_row_click_activates_search_and_captures_typing() {
+    // Clicking the title row of a playlist page must activate the in-playlist
+    // search (set the filter) instead of selecting a song, and every key
+    // pressed afterwards must feed the query rather than move/activate.
+    let mut app = track_table_app(20);
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.playlists = Some(mock_playlist_page(3));
+    app.active_playlist_index = Some(0);
+    assert!(app.playlist_filter.is_none());
+    // chunk.y=6 is the title row for size 200x50.
+    handle_mouse(click_event(150, 6), &mut app);
+    assert_eq!(app.playlist_filter, Some(String::new()));
+    // Typing must land in the query, not move the selection.
+    crate::handlers::handle_app(Key::Char('h'), &mut app);
+    crate::handlers::handle_app(Key::Char('i'), &mut app);
+    assert_eq!(app.playlist_filter, Some("hi".to_string()));
+    assert_eq!(app.track_table.selected_index, 0);
+    // The search_in_playlist toggle key closes the filter.
+    let toggle = app.user_config.keys.search_in_playlist.unwrap();
+    crate::handlers::handle_app(toggle, &mut app);
+    assert!(app.playlist_filter.is_none());
+  }
+
+  #[test]
+  fn playlist_search_loses_focus_when_navigating_away() {
+    // The in-playlist search must drop focus when the user switches to another
+    // playlist, clicks another panel, or opens another view.
+    let mut app = track_table_app(20);
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.playlists = Some(mock_playlist_page(3));
+    app.active_playlist_index = Some(0);
+    app.playlist_filter = Some("hello".to_string());
+
+    // Clicking another playlist in the sidebar switches the active block and
+    // must drop the search focus. Playlist rows start at y=15 with this mock.
+    handle_mouse(click_event(5, 16), &mut app);
+    assert_eq!(app.get_current_route().active_block, ActiveBlock::MyPlaylists);
+    assert!(app.playlist_filter.is_none());
+
+    app.playlist_filter = Some("hello".to_string());
+    // Opening another view pushes a route.
+    app.push_navigation_stack(RouteId::Search, ActiveBlock::Empty);
+    assert!(app.playlist_filter.is_none());
+  }
+
+  #[test]
+  fn made_for_you_row_click_dispatches_expand() {
+    // MadeForYou renders as a List widget (items start at chunk.y+1); chunk.y=6
+    // here → the first playlist is y=7.
+    SCROLLBAR_DRAG.with(|d| *d.borrow_mut() = None);
+    PLAYBAR_DRAG.with(|d| *d.borrow_mut() = None);
+    let mut app = App::default();
+    app.made_for_you_custom.push(("My Mix".to_string(), "mix1".to_string()));
+    app.size = Rect::new(0, 0, 200, 50);
+    app.push_navigation_stack(RouteId::MadeForYou, ActiveBlock::MadeForYou);
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+
+    handle_mouse(click_event(150, 7), &mut app);
+    assert_eq!(app.made_for_you_index, 0);
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(
+      dispatched,
+      vec![IoEvent::GetMadeForYouPlaylistItems("mix1".into(), 0)]
+    );
+  }
+
+  fn recently_played_app(n: usize, has_more: bool) -> (App, std::sync::mpsc::Receiver<IoEvent>) {
+    // Clear shared mouse state: tests run in parallel and share the thread-local statics.
+    SCROLLBAR_DRAG.with(|d| *d.borrow_mut() = None);
+    PLAYBAR_DRAG.with(|d| *d.borrow_mut() = None);
+    let mut app = App::default();
+    app.size = Rect::new(0, 0, 200, 50);
+    app.push_navigation_stack(RouteId::RecentlyPlayed, ActiveBlock::RecentlyPlayed);
+    let items: Vec<rspotify::model::PlayHistory> = (0..n)
+      .map(|i| {
+        serde_json::from_value(json!({
+          "track": {
+            "album": {
+              "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "Mock Artist" }],
+              "external_urls": {},
+              "href": null,
+              "id": null,
+              "images": [],
+              "name": "Mock Album",
+            },
+            "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "Mock Artist" }],
+            "disc_number": 1,
+            "duration_ms": 180_000,
+            "explicit": false,
+            "external_ids": {},
+            "external_urls": {},
+            "href": null,
+            "id": format!("mocktrack{}", i),
+            "is_local": false,
+            "name": format!("Mock Song {}", i),
+            "preview_url": null,
+            "track_number": 1,
+            "type": "track",
+          },
+          "played_at": "2024-01-01T00:00:00Z",
+          "context": null,
+        }))
+        .unwrap()
+      })
+      .collect();
+    app.recently_played.result = Some(rspotify::model::CursorBasedPage {
+      href: String::new(),
+      items,
+      limit: if has_more { n as u32 } else { 0 },
+      next: if has_more {
+        Some("mock-cursor".to_string())
+      } else {
+        None
+      },
+      cursors: None,
+      total: Some(n as u32),
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+    (app, rx)
+  }
+
+  #[test]
+  fn recently_played_load_more_click_loads_more_and_does_not_play() {
+    // 40 items fill a full page (limit 40 → has_more), selection sits on the
+    // load-more row (index 40). The button is the last visible row: clicking
+    // it must fetch the next page, NOT fire Enter and play the song behind it.
+    let (mut app, rx) = recently_played_app(40, true);
+    app.recently_played.index = 40;
+    handle_mouse(click_event(150, 41), &mut app);
+    assert_eq!(app.recently_played.index, 40);
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(dispatched, vec![IoEvent::GetMoreRecentlyPlayed(None)]);
+  }
+
+  #[test]
+  fn recently_played_row_click_plays_that_song() {
+    let (mut app, rx) = recently_played_app(3, false);
+    // Row 8 is the first data row of the content area (routes start at y=6,
+    // right column x=150). A single click selects AND fires Enter.
+    handle_mouse(click_event(150, 8), &mut app);
+    assert_eq!(app.recently_played.index, 0);
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(
+      dispatched,
+      vec![IoEvent::StartPlayback(
+        None,
+        Some(vec![
+          "spotify:track:mocktrack0".to_string(),
+          "spotify:track:mocktrack1".to_string(),
+          "spotify:track:mocktrack2".to_string(),
+        ]),
+        Some(0)
+      )]
+    );
+  }
+
+  #[test]
+  fn recently_played_enter_on_load_more_row_never_plays_when_list_exhausted() {
+    // After the last page loads, has_more flips false while the selection can
+    // still sit on the (now gone) button row. Enter must not dispatch playback.
+    let (mut app, rx) = recently_played_app(3, false);
+    app.recently_played.index = 3;
+    handle_app(Key::Enter, &mut app);
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert!(dispatched.is_empty(), "dispatched: {:?}", dispatched);
+  }
+
+  #[test]
+  fn track_table_enter_on_missing_row_never_plays() {
+    // Selection on a row past the end of the list (the load-more slot after
+    // the last page loaded): Enter must not dispatch playback.
+    let mut app = track_table_app(20);
+    app.track_table.context = Some(TrackTableContext::SavedTracks);
+    let page = rspotify::model::Page {
+      href: String::new(),
+      items: (0..20)
+        .map(|i| {
+          serde_json::from_value(json!({
+            "added_at": "2024-01-01T00:00:00Z",
+            "track": {
+              "album": {
+                "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "Mock Artist" }],
+                "external_urls": {},
+                "href": null,
+                "id": null,
+                "images": [],
+                "name": "Mock Album",
+              },
+              "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "Mock Artist" }],
+              "disc_number": 1,
+              "duration_ms": 180_000,
+              "explicit": false,
+              "external_ids": {},
+              "external_urls": {},
+              "href": null,
+              "id": format!("mocktrack{}", i),
+              "is_local": false,
+              "name": format!("Mock Song {}", i),
+              "preview_url": null,
+              "track_number": 1,
+              "type": "track",
+            },
+          }))
+          .unwrap()
+        })
+        .collect(),
+      limit: 50,
+      next: None,
+      offset: 0,
+      previous: None,
+      total: 20,
+    };
+    app.library.saved_tracks.add_pages(page);
+    app.track_table.selected_index = 20;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+    handle_app(Key::Enter, &mut app);
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert!(dispatched.is_empty(), "dispatched: {:?}", dispatched);
   }
 
   fn playback_app() -> App {
@@ -2113,7 +2569,10 @@ mod tests {
     assert_eq!(app.user_config.theme.background, presets[1].1.background);
     handle_mouse(click_event(10, 8), &mut app);
     assert_eq!(app.theme_preset_index, None);
-    assert_eq!(app.user_config.theme.background, app.config_theme.background);
+    assert_eq!(
+      app.user_config.theme.background,
+      app.config_theme.background
+    );
   }
 
   #[test]
@@ -2268,5 +2727,55 @@ mod tests {
     app.is_loading = false;
     handle_mouse(click_event(glyph_right - 4, playbar.y), &mut app);
     assert!(app.is_loading);
+  }
+
+  #[test]
+  fn playlist_filter_click_maps_to_correct_track() {
+    // When the in-playlist search filter is active, clicking a displayed row
+    // must set selected_index to the ORIGINAL track index, not the display row.
+    let mut app = track_table_app(6);
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    // Rename tracks so the filter picks a non-contiguous subset.
+    // Only tracks 2 and 4 contain "x" → filter "x" shows 2 rows.
+    app.track_table.tracks[0].name = "one".to_string();
+    app.track_table.tracks[1].name = "two".to_string();
+    app.track_table.tracks[2].name = "xenon".to_string();
+    app.track_table.tracks[3].name = "three".to_string();
+    app.track_table.tracks[4].name = "x-ray".to_string();
+    app.track_table.tracks[5].name = "five".to_string();
+
+    // Activate the filter: only tracks 2,4 match "x".
+    app.playlist_filter = Some("x".to_string());
+    assert!(app.playlist_search_active());
+    // Filtered display: row 0 = track 2 (xenon), row 1 = track 4 (x-ray).
+    // chunk.y=6, first data row is chunk.y+2=8; display row 0 is y=8.
+    handle_mouse(click_event(150, 8), &mut app);
+    assert_eq!(app.track_table.selected_index, 2);
+    // After click the filter is cleared (to let Enter play the song), so
+    // re-activate it for the second click.
+    app.playlist_filter = Some("x".to_string());
+    // Click display row 1 → should select track 4 (x-ray).
+    handle_mouse(click_event(150, 9), &mut app);
+    assert_eq!(app.track_table.selected_index, 4);
+  }
+
+  #[test]
+  fn escape_from_music_view_restores_the_previous_route() {
+    let mut app = track_table_app(5);
+    let before = app.get_current_route().active_block;
+    app.push_navigation_stack(
+      crate::app::RouteId::MusicView,
+      crate::app::ActiveBlock::MusicView,
+    );
+    assert_eq!(app.get_current_route().id, crate::app::RouteId::MusicView);
+    handle_app(Key::Esc, &mut app);
+    // ESC pops the overlay, restoring the exact route (and active block)
+    // that was on top before the tab view opened — not a black Empty state.
+    assert_eq!(app.get_current_route().id, crate::app::RouteId::TrackTable);
+    assert_eq!(app.get_current_route().active_block, before);
+    assert_ne!(
+      app.get_current_route().active_block,
+      crate::app::ActiveBlock::Empty
+    );
   }
 }

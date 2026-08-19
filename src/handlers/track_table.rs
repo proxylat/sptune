@@ -2,13 +2,37 @@ use super::{
   super::app::{App, RecommendationsContext, TrackTable, TrackTableContext},
   common_key_events,
 };
-use crate::event::Key;
 use crate::backend::IoEvent;
-use crate::tui::layout::song_table_viewport;
+use crate::event::Key;
 use crate::lcg::rand_idx;
+use crate::tui::layout::song_table_viewport;
 use rspotify::model::Id;
 
 pub fn handler(key: Key, app: &mut App) {
+  // When the in-playlist search bar is active, capture ALL keys here so
+  // typing doesn't move the cursor, play songs, or trigger other actions.
+  if app.playlist_filter.is_some() {
+    match key {
+      k if Some(k) == app.user_config.keys.search_in_playlist => {
+        app.playlist_filter = None;
+      }
+      Key::Char(c) => {
+        if let Some(query) = app.playlist_filter.as_mut() {
+          query.push(c);
+        }
+      }
+      Key::Backspace => {
+        if let Some(query) = app.playlist_filter.as_mut() {
+          query.pop();
+        }
+      }
+      Key::Esc => {
+        app.playlist_filter = None;
+      }
+      _ => {}
+    }
+    return;
+  }
   if common_key_events::down_event(key)
     || common_key_events::up_event(key)
     || common_key_events::high_event(key)
@@ -20,6 +44,9 @@ pub fn handler(key: Key, app: &mut App) {
   match key {
     k if k == app.user_config.keys.add_to_playlist => {
       app.open_add_to_playlist();
+    }
+    k if Some(k) == app.user_config.keys.remove_from_playlist => {
+      app.remove_selected_track_from_playlist();
     }
     k if common_key_events::left_event(k) => common_key_events::handle_left_event(app),
     k if common_key_events::down_event(k) => {
@@ -54,13 +81,15 @@ pub fn handler(key: Key, app: &mut App) {
       app.track_table.selected_index = next_index;
     }
     Key::Enter => {
-      if app.track_table_has_more() && app.track_table.selected_index == app.track_table.tracks.len() {
-        app.load_more_tracks();
+      if app.track_table.selected_index >= app.track_table.tracks.len() {
+        if app.track_table_has_more() {
+          app.load_more_tracks();
+        }
       } else {
         on_enter(app);
       }
     }
-    Key::Char('r') => match app.track_table.context {
+    k if Some(k) == app.user_config.keys.refresh => match app.track_table.context {
       Some(TrackTableContext::SavedTracks) => app.dispatch(IoEvent::RefreshSavedTracks),
       Some(TrackTableContext::MyPlaylists) => {
         if let (Some(playlists), Some(index)) = (
@@ -68,12 +97,23 @@ pub fn handler(key: Key, app: &mut App) {
           &app.active_playlist_index.or(app.selected_playlist_index),
         ) {
           if let Some(selected_playlist) = playlists.items.get(*index) {
-            app.dispatch(IoEvent::RefreshPlaylistTracks(selected_playlist.id.to_string()));
+            app.dispatch(IoEvent::RefreshPlaylistTracks(
+              selected_playlist.id.to_string(),
+            ));
           }
         }
       }
       _ => {}
     },
+    k if Some(k) == app.user_config.keys.search_in_playlist => {
+      // Toggle the in-playlist search bar. Only valid on a playlist page.
+      if matches!(
+        app.track_table.context,
+        Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
+      ) {
+        app.playlist_filter = Some(String::new());
+      }
+    }
     // Scroll down
     k if k == app.user_config.keys.next_page => {
       match &app.track_table.context {
@@ -104,9 +144,8 @@ pub fn handler(key: Key, app: &mut App) {
           TrackTableContext::MadeForYou => {
             if let (Some(selected_playlist_id), Some(playlist_tracks)) = (
               app
-                .made_for_you_ids
-                .get(app.made_for_you_index)
-                .and_then(|ids| ids.as_deref()),
+                .made_for_you_playlist_id(app.made_for_you_index)
+                .as_deref(),
               &app.made_for_you_tracks,
             ) {
               if app.made_for_you_offset + app.large_search_limit < playlist_tracks.total {
@@ -152,9 +191,8 @@ pub fn handler(key: Key, app: &mut App) {
               app.made_for_you_offset -= app.large_search_limit;
             }
             if let Some(selected_playlist_id) = app
-              .made_for_you_ids
-              .get(app.made_for_you_index)
-              .and_then(|ids| ids.as_deref())
+              .made_for_you_playlist_id(app.made_for_you_index)
+              .as_deref()
             {
               app.dispatch(IoEvent::GetMadeForYouPlaylistItems(
                 selected_playlist_id.to_string(),
@@ -237,11 +275,7 @@ fn play_random_song(app: &mut App) {
             })
             .collect();
           let pick = rand_idx(track_uris.len());
-          app.dispatch(IoEvent::StartPlayback(
-            None,
-            Some(track_uris),
-            Some(pick),
-          ))
+          app.dispatch(IoEvent::StartPlayback(None, Some(track_uris), Some(pick)))
         }
       }
       TrackTableContext::AlbumSearch => {}
@@ -276,9 +310,8 @@ fn play_random_song(app: &mut App) {
       TrackTableContext::MadeForYou => {
         if let (Some(selected_playlist_id), Some(playlist_tracks)) = (
           app
-            .made_for_you_ids
-            .get(app.made_for_you_index)
-            .and_then(|ids| ids.as_deref()),
+            .made_for_you_playlist_id(app.made_for_you_index)
+            .as_deref(),
           &app.made_for_you_tracks,
         ) {
           let num_tracks = playlist_tracks.total;
@@ -354,24 +387,10 @@ fn on_enter(app: &mut App) {
   match &context {
     Some(context) => match context {
       TrackTableContext::MyPlaylists => {
-        if tracks.get(*selected_index).is_some() {
+        if let Some(track) = tracks.get(*selected_index) {
           let context_uri = app.track_table_playlist_uri();
-
-          // selected_index is absolute into the full track list. When the
-          // table is sorted the displayed order differs from the raw
-          // playlist order; the raw_index vec tracks each displayed row's
-          // position in the raw playlist so the context offset starts the
-          // clicked song, not the one at the same index pre-sort.
-          let raw_offset = app
-            .track_table_raw_index
-            .get(app.track_table.selected_index)
-            .copied()
-            .unwrap_or(app.track_table.selected_index);
-          app.dispatch(IoEvent::StartPlayback(
-            context_uri,
-            None,
-            Some(raw_offset),
-          ));
+          let track_uri = track.id.as_ref().map(|id| id.uri());
+          app.dispatch(IoEvent::StartPlaybackAt(context_uri, track_uri));
         };
       }
       TrackTableContext::RecommendedTracks => {
@@ -416,39 +435,19 @@ fn on_enter(app: &mut App) {
           tracks,
           ..
         } = &app.track_table;
-        if let Some(_track) = tracks.get(*selected_index) {
+        if let Some(track) = tracks.get(*selected_index) {
           let context_uri = app.track_table_playlist_uri();
-
-          let raw_offset = app
-            .track_table_raw_index
-            .get(app.track_table.selected_index)
-            .copied()
-            .unwrap_or(app.track_table.selected_index);
-          app.dispatch(IoEvent::StartPlayback(
-            context_uri,
-            None,
-            Some(raw_offset),
-          ));
+          let track_uri = track.id.as_ref().map(|id| id.uri());
+          app.dispatch(IoEvent::StartPlaybackAt(context_uri, track_uri));
         };
       }
       TrackTableContext::MadeForYou => {
-        if let Some(_track) = tracks.get(*selected_index) {
+        if let Some(track) = tracks.get(*selected_index) {
           let context_uri = app
-            .made_for_you_ids
-            .get(app.made_for_you_index)
-            .and_then(|ids| ids.as_deref())
+            .made_for_you_playlist_id(app.made_for_you_index)
             .map(|id| format!("spotify:playlist:{}", id));
-
-          let raw_offset = app
-            .track_table_raw_index
-            .get(app.track_table.selected_index)
-            .copied()
-            .unwrap_or(app.track_table.selected_index);
-          app.dispatch(IoEvent::StartPlayback(
-            context_uri,
-            None,
-            Some(raw_offset),
-          ));
+          let track_uri = track.id.as_ref().map(|id| id.uri());
+          app.dispatch(IoEvent::StartPlaybackAt(context_uri, track_uri));
         }
       }
     },
@@ -569,9 +568,8 @@ fn try_load_next_page(app: &mut App) {
       }
       TrackTableContext::MadeForYou => {
         if let Some(playlist_id) = app
-          .made_for_you_ids
-          .get(app.made_for_you_index)
-          .and_then(|ids| ids.as_deref())
+          .made_for_you_playlist_id(app.made_for_you_index)
+          .as_deref()
         {
           if let Some(playlist_tracks) = &app.made_for_you_tracks {
             if app.made_for_you_offset + app.large_search_limit < playlist_tracks.total {

@@ -1,8 +1,8 @@
 use super::common_key_events;
 use crate::{
   app::{ActiveBlock, App},
-  event::Key,
   backend::IoEvent,
+  event::Key,
 };
 
 pub fn handler(key: Key, app: &mut App) {
@@ -40,7 +40,7 @@ pub fn handler(key: Key, app: &mut App) {
         app.shows_list_index = next_index;
       }
     }
-    Key::Char('r') => app.dispatch(IoEvent::RefreshSavedShows),
+    k if Some(k) == app.user_config.keys.refresh => app.dispatch(IoEvent::RefreshSavedShows),
     Key::Enter => {
       if let Some(shows) = app.library.saved_shows.get_results(None) {
         if let Some(selected_show) = shows.items.get(app.shows_list_index).cloned() {

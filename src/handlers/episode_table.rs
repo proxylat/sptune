@@ -3,8 +3,8 @@ use super::{
   common_key_events,
 };
 use crate::app::ActiveBlock;
-use crate::event::Key;
 use crate::backend::IoEvent;
+use crate::event::Key;
 use rspotify::model::Id;
 
 pub fn handler(key: Key, app: &mut App) {

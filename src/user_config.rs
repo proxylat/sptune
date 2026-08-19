@@ -20,6 +20,7 @@ pub struct UserTheme {
   pub hint: Option<String>,
   pub hovered: Option<String>,
   pub inactive: Option<String>,
+  pub load_more: Option<String>,
   pub playbar_background: Option<String>,
   pub playbar_progress: Option<String>,
   pub playbar_progress_text: Option<String>,
@@ -32,8 +33,6 @@ pub struct UserTheme {
 
 #[derive(Copy, Clone, Debug)]
 pub struct Theme {
-  pub analysis_bar: Color,
-  pub analysis_bar_text: Color,
   pub active: Color,
   pub banner: Color,
   pub error_border: Color,
@@ -41,6 +40,7 @@ pub struct Theme {
   pub hint: Color,
   pub hovered: Color,
   pub inactive: Color,
+  pub load_more: Color,
   pub playbar_background: Color,
   pub playbar_progress: Color,
   pub playbar_progress_text: Color,
@@ -54,8 +54,6 @@ pub struct Theme {
 impl Default for Theme {
   fn default() -> Self {
     Theme {
-      analysis_bar: Color::LightCyan,
-      analysis_bar_text: Color::Reset,
       active: Color::Cyan,
       banner: Color::LightCyan,
       error_border: Color::Red,
@@ -63,6 +61,7 @@ impl Default for Theme {
       hint: Color::Yellow,
       hovered: Color::Magenta,
       inactive: Color::Gray,
+      load_more: Color::Yellow,
       playbar_background: Color::Black,
       playbar_progress: Color::LightCyan,
       playbar_progress_text: Color::LightCyan,
@@ -82,10 +81,10 @@ pub fn theme_presets() -> [(&'static str, Theme); 2] {
     (
       "Spotify",
       Theme {
-        analysis_bar: Color::Rgb(29, 185, 84),
         active: Color::Rgb(29, 185, 84),
         banner: Color::Rgb(30, 215, 96),
         hovered: Color::Rgb(30, 215, 96),
+        load_more: Color::Rgb(155, 240, 180),
         playbar_progress: Color::Rgb(29, 185, 84),
         playbar_progress_text: Color::Rgb(29, 185, 84),
         selected: Color::White,
@@ -98,10 +97,10 @@ pub fn theme_presets() -> [(&'static str, Theme); 2] {
     (
       "Dracula",
       Theme {
-        analysis_bar: Color::Rgb(80, 250, 123),
         active: Color::Rgb(189, 147, 249),
         banner: Color::Rgb(189, 147, 249),
         hovered: Color::Rgb(255, 121, 198),
+        load_more: Color::Rgb(255, 184, 108),
         playbar_progress: Color::Rgb(80, 250, 123),
         playbar_progress_text: Color::Rgb(80, 250, 123),
         selected: Color::White,
@@ -213,9 +212,14 @@ pub struct KeyBindingsString {
   submit: Option<String>,
   copy_song_url: Option<String>,
   copy_album_url: Option<String>,
+  copy_error: Option<String>,
   music_view: Option<String>,
   add_item_to_queue: Option<String>,
   add_to_playlist: Option<String>,
+  refresh: Option<String>,
+  clear_cache: Option<String>,
+  search_in_playlist: Option<String>,
+  remove_from_playlist: Option<String>,
 }
 
 #[derive(Clone)]
@@ -243,40 +247,14 @@ pub struct KeyBindings {
   pub submit: Key,
   pub copy_song_url: Key,
   pub copy_album_url: Key,
+  pub copy_error: Key,
   pub music_view: Key,
   pub add_item_to_queue: Key,
   pub add_to_playlist: Key,
-}
-
-/// How the MusicView visualizer draws the loudness data.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum VisualizerStyle {
-  #[default]
-  Bars,
-  Oscilloscope,
-}
-
-impl VisualizerStyle {
-  pub fn as_str(self) -> &'static str {
-    match self {
-      VisualizerStyle::Bars => "bars",
-      VisualizerStyle::Oscilloscope => "scope",
-    }
-  }
-
-  pub fn from_str(s: &str) -> VisualizerStyle {
-    match s {
-      "scope" => VisualizerStyle::Oscilloscope,
-      _ => VisualizerStyle::Bars,
-    }
-  }
-
-  pub fn next(self) -> VisualizerStyle {
-    match self {
-      VisualizerStyle::Bars => VisualizerStyle::Oscilloscope,
-      VisualizerStyle::Oscilloscope => VisualizerStyle::Bars,
-    }
-  }
+  pub refresh: Option<Key>,
+  pub clear_cache: Option<Key>,
+  pub search_in_playlist: Option<Key>,
+  pub remove_from_playlist: Option<Key>,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -302,10 +280,10 @@ pub struct BehaviorConfigString {
   pub show_artist_column: Option<bool>,
   pub show_length_column: Option<bool>,
   pub show_date_added_column: Option<bool>,
-  pub visualizer_style: Option<String>,
   pub enable_add_to_playlist: Option<bool>,
   pub in_playlist_icon: Option<String>,
   pub show_liked_icon: Option<bool>,
+  pub enable_remove_from_playlist: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -331,10 +309,10 @@ pub struct BehaviorConfig {
   pub show_artist_column: bool,
   pub show_length_column: bool,
   pub show_date_added_column: bool,
-  pub visualizer_style: VisualizerStyle,
   pub enable_add_to_playlist: bool,
   pub in_playlist_icon: String,
   pub show_liked_icon: bool,
+  pub enable_remove_from_playlist: bool,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -380,9 +358,14 @@ impl UserConfig {
         submit: Key::Enter,
         copy_song_url: Key::Char('c'),
         copy_album_url: Key::Char('C'),
+        copy_error: Key::Char('y'),
         music_view: Key::Tab,
         add_item_to_queue: Key::Char('z'),
         add_to_playlist: Key::Char('a'),
+        refresh: None,
+        clear_cache: None,
+        search_in_playlist: Some(Key::Char('f')),
+        remove_from_playlist: None,
       },
       behavior: BehaviorConfig {
         seek_milliseconds: 1000,
@@ -406,10 +389,10 @@ impl UserConfig {
         show_artist_column: true,
         show_length_column: true,
         show_date_added_column: true,
-        visualizer_style: VisualizerStyle::Bars,
         enable_add_to_playlist: true,
         in_playlist_icon: "✓".to_string(),
         show_liked_icon: true,
+        enable_remove_from_playlist: false,
       },
       path_to_config: None,
     }
@@ -475,9 +458,25 @@ impl UserConfig {
     to_keys!(submit);
     to_keys!(copy_song_url);
     to_keys!(copy_album_url);
+    to_keys!(copy_error);
     to_keys!(music_view);
     to_keys!(add_item_to_queue);
     to_keys!(add_to_playlist);
+
+    macro_rules! to_optional_keys {
+      ($name: ident) => {
+        if let Some(key_string) = keybindings.$name {
+          let key = parse_key(key_string)?;
+          check_reserved_keys(key)?;
+          self.keys.$name = Some(key);
+        }
+      };
+    }
+
+    to_optional_keys!(refresh);
+    to_optional_keys!(clear_cache);
+    to_optional_keys!(search_in_playlist);
+    to_optional_keys!(remove_from_playlist);
 
     Ok(())
   }
@@ -498,6 +497,7 @@ impl UserConfig {
     to_theme_item!(hint);
     to_theme_item!(hovered);
     to_theme_item!(inactive);
+    to_theme_item!(load_more);
     to_theme_item!(playbar_background);
     to_theme_item!(playbar_progress);
     to_theme_item!(playbar_progress_text);
@@ -572,6 +572,10 @@ impl UserConfig {
       self.behavior.show_liked_icon = show_liked_icon;
     }
 
+    if let Some(enable_remove_from_playlist) = behavior_config.enable_remove_from_playlist {
+      self.behavior.enable_remove_from_playlist = enable_remove_from_playlist;
+    }
+
     if let Some(paused_icon) = behavior_config.paused_icon {
       self.behavior.paused_icon = paused_icon;
     }
@@ -610,9 +614,6 @@ impl UserConfig {
     }
     if let Some(show_date) = behavior_config.show_date_added_column {
       self.behavior.show_date_added_column = show_date;
-    }
-    if let Some(style) = behavior_config.visualizer_style {
-      self.behavior.visualizer_style = VisualizerStyle::from_str(&style);
     }
 
     Ok(())
