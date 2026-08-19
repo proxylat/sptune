@@ -1,5 +1,6 @@
 use super::{super::app::App, common_key_events};
-use crate::{app::RecommendationsContext, event::Key, backend::IoEvent};
+use crate::{app::RecommendationsContext, backend::IoEvent, event::Key};
+use anyhow::anyhow;
 use rspotify::model::Id;
 
 pub fn handler(key: Key, app: &mut App) {
@@ -61,27 +62,30 @@ pub fn handler(key: Key, app: &mut App) {
     Key::Enter => {
       if let Some(recently_played_result) = &app.recently_played.result.clone() {
         let items = &recently_played_result.items;
-        if app.recently_played_has_more() && app.recently_played.index == items.len() {
-          app.load_more_recently_played();
+        if app.recently_played.index >= items.len() {
+          if app.recently_played_has_more() {
+            app.load_more_recently_played();
+          }
           return;
         }
         let track_uris: Vec<String> = items
           .iter()
-          .map(|item| {
-            item
-              .track
-              .id
-              .as_ref()
-              .map(|id| id.uri())
-              .unwrap_or_default()
-          })
+          .filter_map(|item| item.track.id.as_ref().map(|id| id.uri()))
           .collect();
+        if track_uris.is_empty() {
+          app.handle_error(anyhow!(
+            "Nothing playable in recently played history (all episodes or local tracks)"
+          ));
+          return;
+        }
+        // Episode/local tracks carry no playable uri, so keep the queue offset
+        // aligned with the playable subset.
+        let offset = items[..app.recently_played.index]
+          .iter()
+          .filter(|item| item.track.id.is_some())
+          .count();
 
-        app.dispatch(IoEvent::StartPlayback(
-          None,
-          Some(track_uris),
-          Some(app.recently_played.index),
-        ));
+        app.dispatch(IoEvent::StartPlayback(None, Some(track_uris), Some(offset)));
       };
     }
     Key::Char('r') => {

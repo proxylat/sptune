@@ -13,7 +13,9 @@ use std::sync::atomic::Ordering;
 
 const CONFIG_DIR: &str = ".config";
 const APP_CONFIG_DIR: &str = "sptune";
-const CACHE_FILE: &str = "playlist_cache.json";
+// v2: entries written before the added_at parse fix have no dates; bumping
+// the filename drops them so every playlist refetches with dates.
+const CACHE_FILE: &str = "playlist_cache_v2.json";
 
 /// Stable identity of a playlist item (track or episode uri).
 pub fn playlist_item_uri(item: &PlaylistItem) -> Option<String> {
@@ -86,13 +88,7 @@ impl PlaylistCache {
   }
 
   /// Accumulate a fetched page. `append` is true for load-more/delta pages.
-  pub fn update(
-    &mut self,
-    playlist_id: &str,
-    items: Vec<PlaylistItem>,
-    total: u32,
-    append: bool,
-) {
+  pub fn update(&mut self, playlist_id: &str, items: Vec<PlaylistItem>, total: u32, append: bool) {
     if !CACHE_ENABLED.load(Ordering::Relaxed) {
       return;
     }
@@ -131,6 +127,24 @@ impl PlaylistCache {
     self.ensure_loaded();
     self.map.remove(playlist_id);
     self.save();
+  }
+
+  /// Drop a single item (by uri) from a cached playlist and record the new
+  /// snapshot id. Used after a successful remove-from-playlist so the local
+  /// view updates without a full refetch.
+  pub fn remove_item(&mut self, playlist_id: &str, uri: &str, snapshot: String) {
+    if !CACHE_ENABLED.load(Ordering::Relaxed) {
+      return;
+    }
+    self.ensure_loaded();
+    if let Some(entry) = self.map.get_mut(playlist_id) {
+      entry.snapshot = snapshot;
+      entry.total = entry.total.saturating_sub(1);
+      entry
+        .items
+        .retain(|item| playlist_item_uri(item).as_deref() != Some(uri));
+      self.save();
+    }
   }
 
   /// A cache entry is polluted when the same track/episode appears more than

@@ -1,8 +1,8 @@
 use super::common_key_events;
 use crate::{
   app::{ActiveBlock, AlbumTableContext, App, RouteId, SelectedFullAlbum},
-  event::Key,
   backend::IoEvent,
+  event::Key,
 };
 
 pub fn handler(key: Key, app: &mut App) {
@@ -34,13 +34,13 @@ pub fn handler(key: Key, app: &mut App) {
         app.album_list_index = next_index;
       }
     }
-k if common_key_events::low_event(k) => {
+    k if common_key_events::low_event(k) => {
       if let Some(albums) = &mut app.library.saved_albums.get_results(None) {
         let next_index = common_key_events::on_low_press_handler(&albums.items);
         app.album_list_index = next_index;
       }
     }
-    Key::Char('r') => app.dispatch(IoEvent::RefreshSavedAlbums),
+    k if Some(k) == app.user_config.keys.refresh => app.dispatch(IoEvent::RefreshSavedAlbums),
     Key::Enter => {
       if let Some(albums) = app.library.saved_albums.get_results(None) {
         if let Some(selected_album) = albums.items.get(app.album_list_index) {

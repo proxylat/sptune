@@ -1,7 +1,7 @@
 use super::common_key_events;
 use crate::app::{ActiveBlock, App, ArtistBlock, RecommendationsContext, TrackTableContext};
-use crate::event::Key;
 use crate::backend::IoEvent;
+use crate::event::Key;
 use rspotify::model::Id;
 
 fn handle_down_press_on_selected_block(app: &mut App) {
@@ -13,8 +13,7 @@ fn handle_down_press_on_selected_block(app: &mut App) {
         } else {
           artist.top_tracks.len().saturating_sub(1)
         };
-        artist.selected_top_track_index =
-          (artist.selected_top_track_index + 1).min(max);
+        artist.selected_top_track_index = (artist.selected_top_track_index + 1).min(max);
       }
       ArtistBlock::Albums => {
         let max_selectable = if artist.albums.items.len() < artist.albums.total as usize {
@@ -37,9 +36,6 @@ fn handle_down_press_on_hovered_block(app: &mut App) {
       }
       ArtistBlock::Albums => {
         artist.artist_hovered_block = ArtistBlock::TopTracks;
-      }
-      ArtistBlock::TopTracks => {
-        artist.artist_hovered_block = ArtistBlock::Albums;
       }
       _ => {}
     }
@@ -158,7 +154,7 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
   if let Some(artist) = &mut app.artist.clone() {
     match artist.artist_selected_block {
       ArtistBlock::TopTracks => {
-        if artist.selected_top_track_index == artist.top_tracks.len() {
+        if artist.selected_top_track_index >= artist.top_tracks.len() {
           app.load_more_artist_top_tracks();
           return;
         }
@@ -175,7 +171,7 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
         ));
       }
       ArtistBlock::Albums => {
-        if artist.selected_album_index == artist.albums.items.len() {
+        if artist.selected_album_index >= artist.albums.items.len() {
           app.load_more_albums();
         } else if let Some(selected_album) = artist
           .albums
@@ -217,8 +213,7 @@ pub fn handler(key: Key, app: &mut App) {
           } else {
             artist.top_tracks.len().saturating_sub(1)
           };
-          artist.selected_top_track_index =
-            (artist.selected_top_track_index + 1).min(max);
+          artist.selected_top_track_index = (artist.selected_top_track_index + 1).min(max);
         } else {
           handle_down_press_on_hovered_block(app);
         }
@@ -232,10 +227,8 @@ pub fn handler(key: Key, app: &mut App) {
           } else {
             artist.top_tracks.len().saturating_sub(1)
           };
-          artist.selected_top_track_index = artist
-            .selected_top_track_index
-            .saturating_sub(1)
-            .min(max);
+          artist.selected_top_track_index =
+            artist.selected_top_track_index.saturating_sub(1).min(max);
         } else {
           handle_up_press_on_hovered_block(app);
         }

@@ -1,8 +1,8 @@
 extern crate unicode_width;
 
 use super::super::app::{ActiveBlock, App, RouteId};
-use crate::event::Key;
 use crate::backend::IoEvent;
+use crate::event::Key;
 use std::convert::TryInto;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -149,6 +149,8 @@ fn attempt_process_uri(app: &mut App, input: &str, base: &str, sep: &str) -> boo
 
   let (playlist_id, matched) = spotify_resource_id(base, input, sep, "playlist");
   if matched {
+    // The opened playlist is added to "For you" once its name is known.
+    app.pending_for_you_add = Some(playlist_id.clone());
     app.dispatch(IoEvent::GetPlaylistItems(playlist_id, 0));
     return true;
   }

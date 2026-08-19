@@ -1,8 +1,8 @@
 use super::common_key_events;
 use crate::{
   app::{ActiveBlock, App, RecommendationsContext, RouteId},
-  event::Key,
   backend::IoEvent,
+  event::Key,
 };
 use rspotify::model::Id;
 

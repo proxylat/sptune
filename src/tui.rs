@@ -1,36 +1,33 @@
 pub mod help;
 pub mod layout;
-use super::{
-  app::{
-    visible_library_options, ActiveBlock, AlbumTableContext, App, ArtistBlock, DialogContext,
-    EpisodeTableContext, MADE_FOR_YOU_NAMES, RecommendationsContext, RouteId, SearchResultBlock,
-    TrackSortColumn, TrackTableContext,
-  },
+use std::time::Instant;
+use super::app::{
+  visible_library_options, ActiveBlock, AlbumTableContext, App, ArtistBlock, DialogContext,
+  EpisodeTableContext, RecommendationsContext, RouteId, SearchResultBlock, TrackSortColumn,
+  TrackTableContext,
 };
+use crate::user_config::theme_presets;
 use help::get_help_docs;
+use layout::{
+  build_playbar_controls, build_playbar_title, create_artist_string, format_playlist_duration,
+  get_artist_highlight_state, get_color, get_percentage_width, get_search_results_highlight_state,
+  millis_to_minutes, repeat_label, song_table_columns, track_table_with_date, PlaybarButton,
+  PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, REFRESH_GLYPH, VOLUME_BAR_LEN,
+};
 use ratatui::{
   layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
   style::{Color, Modifier, Style},
-  symbols::Marker,
   text::{Line, Span, Text},
   widgets::{
-    canvas::{Canvas, Line as CanvasLine},
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
   },
   Frame,
 };
-use crate::user_config::{theme_presets, VisualizerStyle};
 use rspotify::model::show::ResumePoint;
 use rspotify::model::PlayableItem;
 use rspotify::model::RepeatState;
 use rspotify::prelude::Id;
-use layout::{
-  build_playbar_controls, build_playbar_title, create_artist_string, format_playlist_duration,
-  get_artist_highlight_state, get_color, get_percentage_width, get_search_results_highlight_state,
-  millis_to_minutes, repeat_label, song_table_columns,
-  track_table_with_date, PlaybarButton, PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, REFRESH_GLYPH,
-  VOLUME_BAR_LEN,
-};
+use unicode_width::UnicodeWidthStr;
 
 pub enum TableId {
   Album,
@@ -80,6 +77,26 @@ pub struct TableHeaderItem<'a> {
 pub struct TableItem {
   id: String,
   format: Vec<String>,
+}
+
+fn load_more_label(base: &str, remaining: Option<usize>) -> String {
+  match remaining.filter(|n| *n > 0) {
+    Some(n) => format!("{base} ({n} more)"),
+    None => base.to_string(),
+  }
+}
+
+/// Truncate a long search input for the header box, keeping the END of the
+/// text (a pasted playlist link's id) visible.
+fn ellipsize(input: &str, max_width: usize) -> String {
+  let count = input.chars().count();
+  if count <= max_width {
+    return input.to_string();
+  }
+  let keep = max_width.saturating_sub(3);
+  let mut out: String = input.chars().take(keep).collect();
+  out.push_str("...");
+  out
 }
 
 pub fn draw_help_menu(f: &mut Frame, app: &App) {
@@ -139,7 +156,14 @@ pub fn draw_help_menu(f: &mut Frame, app: &App) {
   // `count` overflows `viewport`; geometry shared with the mouse drag arm
   // (src/handlers/mouse.rs arm_scrollbar).
   let viewport = shortcuts_rect.height.saturating_sub(3) as usize;
-  draw_scrollbar(f, app, shortcuts_rect, app.help_docs_size as usize, viewport, app.help_scroll_offset as usize);
+  draw_scrollbar(
+    f,
+    app,
+    shortcuts_rect,
+    app.help_docs_size as usize,
+    viewport,
+    app.help_scroll_offset as usize,
+  );
 }
 
 fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'a>> {
@@ -201,8 +225,15 @@ fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'a>> {
       "Liked icon: {}",
       on_off(app.user_config.behavior.show_liked_icon)
     ),
+    format!(
+      "Remove from playlist: {}",
+      on_off(app.user_config.behavior.enable_remove_from_playlist)
+    ),
     // Danger action: styled red and always last in the block.
-    "Clear cache (c)".to_string(),
+    match app.user_config.keys.clear_cache {
+      Some(key) => format!("Clear cache ({})", key),
+      None => "Clear cache".to_string(),
+    },
   ];
   let total = rows.len();
   rows
@@ -250,9 +281,9 @@ pub fn draw_input_and_help_box(f: &mut Frame, app: &App, layout_chunk: Rect) {
     "    |_|",
   ];
   let stops = [
-    (0x1D, 0xB9, 0x54), // Spotify green
-    (0x16, 0xA3, 0x8A), // teal
-    (0x0E, 0x8C, 0xC2), // blue
+    (0x0A, 0x3A, 0x4A), // dark teal
+    (0x40, 0xC0, 0xE0), // ice blue
+    (0xE0, 0xF8, 0xFF), // white
   ];
   let color_at = |t: f64| {
     let t = t.clamp(0.0, 1.0) * (stops.len() - 1) as f64;
@@ -274,7 +305,10 @@ pub fn draw_input_and_help_box(f: &mut Frame, app: &App, layout_chunk: Rect) {
     for c in line.chars() {
       let t = idx as f64 / total.max(1) as f64;
       idx += 1;
-      spans.push(Span::styled(c.to_string(), Style::default().fg(color_at(t))));
+      spans.push(Span::styled(
+        c.to_string(),
+        Style::default().fg(color_at(t)),
+      ));
     }
     idx += 1; // line break consumes gradient position
     title_lines.push(Line::from(spans));
@@ -291,7 +325,13 @@ pub fn draw_input_and_help_box(f: &mut Frame, app: &App, layout_chunk: Rect) {
   );
 
   let input_string: String = app.input.iter().collect();
-  let lines = Text::from((&input_string).as_str());
+  // Keep the tail of a long input (e.g. a pasted playlist link) visible;
+  // reserve 3 cells for the clear button when there is input.
+  let input_string = ellipsize(
+    &input_string,
+    chunks[1].width.saturating_sub(if app.input.is_empty() { 2 } else { 5 }) as usize,
+  );
+  let lines = Text::from(input_string);
   let input = Paragraph::new(lines).block(
     Block::default()
       .borders(Borders::ALL)
@@ -310,15 +350,33 @@ pub fn draw_input_and_help_box(f: &mut Frame, app: &App, layout_chunk: Rect) {
       3,
     ),
   );
+  if !app.input.is_empty() {
+    // Clear button: a bare ✕ pinned near the right edge of the search box.
+    let clear_style = Style::default().fg(app.user_config.theme.active);
+    f.render_widget(
+      Paragraph::new(Line::from(vec![Span::styled(
+        "✕",
+        clear_style.add_modifier(Modifier::BOLD),
+      )]))
+      .alignment(Alignment::Right),
+      Rect::new(
+        chunks[1].x + chunks[1].width.saturating_sub(4),
+        chunks[1].y + (chunks[1].height.saturating_sub(1)) / 2,
+        3,
+        1,
+      ),
+    );
+  }
 
   // Settings hint: a bare gear pinned near the right of the header row,
   // inset a few cells so it never clips at the terminal edge. The right 40%
   // is still the click zone that opens the settings menu.
   let gear_style = Style::default().fg(app.user_config.theme.active);
   f.render_widget(
-    Paragraph::new(Line::from(vec![
-      Span::styled("⚙\u{FE0F}", gear_style.add_modifier(Modifier::BOLD)),
-    ]))
+    Paragraph::new(Line::from(vec![Span::styled(
+      "⚙\u{FE0F}",
+      gear_style.add_modifier(Modifier::BOLD),
+    )]))
     .alignment(Alignment::Right),
     Rect::new(
       chunks[2].x,
@@ -499,12 +557,49 @@ pub fn draw_user_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
 }
 
 fn draw_request_log(f: &mut Frame, app: &App, layout_chunk: Rect) {
+  let theme = app.user_config.theme;
+  let inactive = Style::default().fg(theme.inactive);
+
+  // Throttle info header (top 4 rows).
+  let chunks = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([Constraint::Length(4), Constraint::Min(0)].as_ref())
+    .split(layout_chunk);
+
+  let backoff_line = match app.api_backoff_until {
+    Some(until) => {
+      let remaining = until.saturating_duration_since(Instant::now());
+      format!("Backoff: {}s", remaining.as_secs())
+    }
+    None => "Backoff: none".to_string(),
+  };
+  let load_more_line = match app.last_load_more {
+    Some(t) => {
+      let elapsed = t.elapsed().as_secs();
+      if elapsed < 2 {
+        format!("Load-more: {}s left", 2 - elapsed)
+      } else {
+        "Load-more: ready".to_string()
+      }
+    }
+    None => "Load-more: idle".to_string(),
+  };
+  let throttle_text = format!(
+    "Tokens: {:.1} / 5\n{}\n{}",
+    app.api_tokens, backoff_line, load_more_line
+  );
+  f.render_widget(
+    Paragraph::new(throttle_text).style(inactive),
+    chunks[0],
+  );
+
+  // Request log list.
   let items: Vec<String> = app
     .request_log
     .iter()
     .map(|e| {
       if e.count > 1 {
-        format!("{} ({})", e.text, e.count)
+        format!("{}({})", e.text, e.count)
       } else {
         e.text.clone()
       }
@@ -513,7 +608,7 @@ fn draw_request_log(f: &mut Frame, app: &App, layout_chunk: Rect) {
   draw_selectable_list(
     f,
     app,
-    layout_chunk,
+    chunks[1],
     "Requests (Dev) - Clear",
     &items,
     (false, false),
@@ -527,7 +622,8 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
   let theme = app.user_config.theme;
   let expanded = app.search_results.selected_block.clone();
   let has_more = app.search_block_has_more(&expanded);
-  let (tab_bar, tab_cells, list_rect) = layout::search_layout(layout_chunk, expanded.clone(), has_more);
+  let (tab_bar, tab_cells, list_rect) =
+    layout::search_layout(layout_chunk, expanded.clone(), has_more);
 
   // Tab bar: the collapsed tabs along the top. The expanded one is selected.
   for (block, rect) in tab_cells {
@@ -539,7 +635,10 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
       SearchResultBlock::ShowSearch => " Podcasts ",
       SearchResultBlock::Empty => "",
     };
-    let mut style = get_color(get_search_results_highlight_state(app, block.clone()), theme);
+    let mut style = get_color(
+      get_search_results_highlight_state(app, block.clone()),
+      theme,
+    );
     if block == expanded {
       style = style.add_modifier(Modifier::BOLD);
     }
@@ -553,14 +652,15 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
     }
     SearchResultBlock::SongSearch => {
       let b = &app.user_config.behavior;
-  let columns = song_table_columns(
-    layout_chunk.width,
-    false,
-    b.show_album_column,
-    b.show_artist_column,
-    b.show_length_column,
-    b.show_date_added_column,
-  );
+      let columns = song_table_columns(
+        layout_chunk.width,
+        false,
+        b.show_album_column,
+        b.show_artist_column,
+        b.show_length_column,
+        b.show_date_added_column,
+        false,
+      );
       let header = TableHeader {
         id: TableId::Song,
         items: columns
@@ -612,7 +712,13 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
         None => vec![],
       };
       if has_more {
-        let mut load_more_format = vec!["".to_string(), " Load more ".to_string()];
+        let remaining = app
+          .search_results
+          .tracks
+          .as_ref()
+          .map(|t| (t.total as usize > t.items.len()).then(|| t.total as usize - t.items.len()))
+          .flatten();
+        let mut load_more_format = vec!["".to_string(), load_more_label(" Load more ", remaining)];
         if b.show_artist_column {
           load_more_format.push(String::new());
         }
@@ -646,7 +752,11 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
         list_rect,
         count,
         viewport,
-        selected.checked_sub(viewport).unwrap_or(0),
+        selected
+          .checked_sub(viewport)
+          .map(|o| o + 1)
+          .unwrap_or(0)
+          .min(count.saturating_sub(viewport)),
       );
     }
     _ => {
@@ -724,7 +834,11 @@ fn search_block_items(
           .collect(),
         None => vec![],
       };
-      (items, "Playlists", app.search_results.selected_playlists_index)
+      (
+        items,
+        "Playlists",
+        app.search_results.selected_playlists_index,
+      )
     }
     SearchResultBlock::ShowSearch => {
       let items = match &app.search_results.shows {
@@ -747,7 +861,33 @@ fn search_block_items(
     SearchResultBlock::Empty => (vec![], "", None),
   };
   if app.search_block_has_more(&block) {
-    items.push(" Load more ".to_string());
+    let remaining = match block {
+      SearchResultBlock::ArtistSearch => app
+        .search_results
+        .artists
+        .as_ref()
+        .map(|p| p.total.saturating_sub(p.items.len() as u32)),
+      SearchResultBlock::AlbumSearch => app
+        .search_results
+        .albums
+        .as_ref()
+        .map(|p| p.total.saturating_sub(p.items.len() as u32)),
+      SearchResultBlock::PlaylistSearch => app
+        .search_results
+        .playlists
+        .as_ref()
+        .map(|p| p.total.saturating_sub(p.items.len() as u32)),
+      SearchResultBlock::ShowSearch => app
+        .search_results
+        .shows
+        .as_ref()
+        .map(|p| p.total.saturating_sub(p.items.len() as u32)),
+      _ => None,
+    };
+    items.push(load_more_label(
+      " Load more ",
+      remaining.map(|r| r as usize),
+    ));
   }
   (items, title, selected)
 }
@@ -850,6 +990,7 @@ pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
     b.show_artist_column,
     b.show_length_column,
     b.show_date_added_column,
+    false,
   );
   let header = TableHeader {
     id: TableId::Album,
@@ -920,10 +1061,14 @@ pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
               .collect::<Vec<TableItem>>();
 
             if items.len() < selected_album_simplified.tracks.total as usize {
+              let remaining = selected_album_simplified.tracks.total as usize - items.len();
               items.push(TableItem {
                 id: String::new(),
                 format: {
-                  let mut load_more_format = vec!["".to_string(), "Load more songs...".to_string()];
+                  let mut load_more_format = vec![
+                    "".to_string(),
+                    load_more_label("Load more songs...", Some(remaining)),
+                  ];
                   if b.show_artist_column {
                     load_more_format.push(String::new());
                   }
@@ -1019,6 +1164,7 @@ pub fn draw_recommendations_table(f: &mut Frame, app: &App, layout_chunk: Rect) 
     b.show_artist_column,
     b.show_length_column,
     b.show_date_added_column,
+    false,
   );
   let header = TableHeader {
     id: TableId::Song,
@@ -1118,27 +1264,33 @@ fn song_row_cells(
   cells
 }
 
-// The playlist currently being viewed, so its own rows are not all marked
-// "already in playlist" (every row is in it by definition).
-fn current_playlist_id(app: &App) -> Option<String> {
-  match app.track_table.context {
-    Some(TrackTableContext::MyPlaylists) => app.playlists.as_ref().and_then(|playlists| {
-      playlists
-        .items
-        .get(app.active_playlist_index.or(app.selected_playlist_index).unwrap_or(0))
-        .map(|playlist| playlist.id.to_string())
-    }),
-    Some(TrackTableContext::MadeForYou) => app
-      .made_for_you_ids
-      .get(app.made_for_you_index)
-      .and_then(|id| id.clone()),
-    _ => None,
+// Relative "Xm/Xh/Xd ago" for recent adds (a track added hours ago should read
+// "3h ago", not the bare date); absolute date once it's more than a week old.
+fn relative_date(added_at: chrono::DateTime<chrono::Utc>) -> String {
+  let now = chrono::Utc::now();
+  let minutes = (now - added_at).num_minutes().max(1);
+  if minutes < 60 {
+    return format!("{minutes}m ago");
   }
+  let hours = (now - added_at).num_hours();
+  if hours < 24 {
+    return format!("{hours}h ago");
+  }
+  let days = (now - added_at).num_days();
+  if days < 7 {
+    return format!("{days}d ago");
+  }
+  added_at.format("%Y-%m-%d").to_string()
 }
 
 pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
   let with_date = track_table_with_date(app.track_table.context.as_ref());
   let b = &app.user_config.behavior;
+  let show_remove = b.enable_remove_from_playlist
+    && matches!(
+      app.track_table.context,
+      Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
+    );
   let columns = song_table_columns(
     layout_chunk.width,
     with_date,
@@ -1146,6 +1298,7 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
     b.show_artist_column,
     b.show_length_column,
     b.show_date_added_column,
+    show_remove,
   );
 
   let header_texts: Vec<String> = columns
@@ -1197,7 +1350,7 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
     current_route.hovered_block == ActiveBlock::TrackTable,
   );
 
-  let items = app
+  let mut items = app
     .track_table
     .tracks
     .iter()
@@ -1209,7 +1362,7 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
           app
             .track_table_added_at
             .get(index)
-            .and_then(|added_at| added_at.map(|date| date.format("%Y-%m-%d").to_string()))
+            .and_then(|added_at| added_at.map(relative_date))
             .unwrap_or_default()
         } else {
           String::new()
@@ -1223,12 +1376,21 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
           with_date,
           b,
         );
-        let in_playlist = app.track_table.context != Some(TrackTableContext::MyPlaylists)
-          && item
-            .id
-            .as_ref()
-            .map(|id| app.playlist_contains(&id.uri(), current_playlist_id(app).as_deref()))
-            .unwrap_or(false);
+        // The in-playlist icon marks songs that also live in one of your
+        // playlists. It stays off only on your own playlist pages
+        // (MyPlaylists, PlaylistSearch), where the row is the playlist being
+        // viewed; For-you mixes and every other song page (SavedTracks,
+        // albums, artist top tracks, search results) show it.
+        let in_playlist = !matches!(
+          app.track_table.context,
+          Some(
+            TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch
+          )
+        ) && item
+          .id
+          .as_ref()
+          .map(|id| app.playlist_contains(&id.uri(), None))
+          .unwrap_or(false);
         let liked = app.user_config.behavior.show_liked_icon
           && item
             .id
@@ -1242,17 +1404,29 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
         } else {
           "  ".to_string()
         };
+        if show_remove {
+          cells.push(" ✕".to_string());
+        }
         cells
       },
     })
     .collect::<Vec<TableItem>>();
 
-  let mut items = items;
+  // In-playlist search filters the visible rows in place; the search box is
+  // shown in the title row (see below), so the table body stays unshifted.
+  if app.playlist_search_active() {
+    items.retain(|item| {
+      app.track_table.tracks.iter().any(|t| {
+        t.id.as_ref().map(|id| id.to_string()).unwrap_or_default() == item.id
+          && app.playlist_filter_matches(t)
+      })
+    });
+  }
   if app.track_table_has_more() || app.date_added_pending {
     let label = if app.date_added_pending {
       "Loading full playlist...".to_string()
     } else {
-      "Load more songs...".to_string()
+      load_more_label("Load more songs...", app.track_table_remaining())
     };
     let mut load_more_format = vec!["".to_string(), label];
     if b.show_artist_column {
@@ -1271,13 +1445,16 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
     if b.show_length_column {
       load_more_format.push(String::new());
     }
+    if show_remove {
+      load_more_format.push(String::new());
+    }
     items.push(TableItem {
       id: String::new(),
       format: load_more_format,
     });
   }
 
-  let title = match app.track_table.context {
+   let title = match app.track_table.context {
     Some(TrackTableContext::MyPlaylists) => {
       let playlist = app.playlists.as_ref().and_then(|playlists| {
         playlists
@@ -1314,10 +1491,17 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
         })
         .unwrap_or_else(|| "Songs".to_string())
     }
-    _ => "Songs".to_string(),
-  };
+    _ => app
+      .playlist_view
+      .as_ref()
+      .filter(|(name, _)| !name.is_empty())
+      .map(|(name, _)| name.clone())
+      .unwrap_or_else(|| "Songs".to_string()),
+   };
+  // In-playlist search box — rendered as a boxed widget on the title row (see
+  // draw_playlist_search_box), so it is visibly clickable.
   let title = format!("{}{}", REFRESH_GLYPH, title);
-  draw_table(
+   draw_table(
     f,
     app,
     layout_chunk,
@@ -1326,8 +1510,64 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
     app.track_table.selected_index,
     highlight_state,
     Some(app.track_table.scroll_offset),
-  )
+  );
+  draw_playlist_search_box(f, app, layout_chunk, &title);
 }
+
+/// A bordered search input on the table title row, positioned right after
+/// the playlist name text. The box hugs its content so the title border
+/// continues after it (`│ Search playlist │────`).
+fn draw_playlist_search_box(f: &mut Frame, app: &App, layout_chunk: Rect, title: &str) {
+  if !matches!(
+    app.track_table.context,
+    Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
+  ) {
+    return;
+  }
+  let highlight_state = (
+    app.get_current_route().active_block == ActiveBlock::TrackTable,
+    app.get_current_route().hovered_block == ActiveBlock::TrackTable,
+  );
+  let theme = app.user_config.theme;
+  let query = app.playlist_filter.as_deref().unwrap_or("");
+  let focused = app.playlist_search_active();
+  let cursor = Span::styled("│", Style::default().fg(theme.active));
+  let clear_style = Style::default().fg(theme.active).add_modifier(Modifier::BOLD);
+  let (spans, content_w): (Vec<Span>, u16) = if focused {
+    if query.is_empty() {
+      (vec![cursor], 1)
+    } else {
+      let clear = Span::styled(" ✕", clear_style);
+      (vec![Span::raw(query), cursor, clear], query.chars().count() as u16 + 3)
+    }
+  } else if query.is_empty() {
+    let placeholder = Span::styled("", Style::default().fg(theme.inactive));
+    let w = placeholder.content.width() as u16;
+    (vec![placeholder], w)
+  } else {
+    (vec![Span::raw(query)], query.chars().count() as u16)
+  };
+  let box_width = content_w.saturating_add(2);
+  let title_chars = title.chars().count() as u16;
+  let x = layout_chunk
+    .x
+    .saturating_add(1)
+    .saturating_add(title_chars)
+    .saturating_add(2);
+  if x + box_width > layout_chunk.x + layout_chunk.width {
+    return;
+  }
+  let rect = Rect::new(x, layout_chunk.y, box_width, 1);
+  let box_widget = Paragraph::new(Line::from(spans))
+    .style(Style::default().fg(theme.text))
+    .block(
+      Block::default()
+        .borders(Borders::LEFT | Borders::RIGHT)
+        .border_style(get_color(highlight_state, theme)),
+    );
+  f.render_widget(box_widget, rect);
+}
+
 
 pub fn draw_music_view(f: &mut Frame, app: &App) {
   let layout = Layout::default()
@@ -1362,164 +1602,96 @@ fn draw_music_lyrics(f: &mut Frame, app: &App, area: Rect) {
     (start, (start + window).min(lyrics.len()))
   };
 
-  let lines: Vec<Line> = lyrics[start..end]
-    .iter()
-    .enumerate()
-    .map(|(i, (_ms, words))| {
-      if start + i == current {
-        Line::from(vec![Span::styled(
-          format!("▶ {}", words),
-          Style::default().fg(app.user_config.theme.selected),
-        )])
-      } else {
-        Line::from(vec![Span::styled(
-          format!("  {}", words),
-          Style::default().fg(app.user_config.theme.active),
-        )])
-      }
-    })
-    .collect();
-
-  let text = if lyrics.is_empty() {
-    Paragraph::new(Line::from(Span::styled(
+  let mut lines: Vec<Line> = if lyrics.is_empty() {
+    vec![Line::from(Span::styled(
       "No lyrics available for this track",
       Style::default().fg(app.user_config.theme.inactive),
-    )))
+    ))]
   } else {
-    Paragraph::new(lines)
+    lyrics[start..end]
+      .iter()
+      .enumerate()
+      .map(|(i, (_ms, words))| {
+        if start + i == current {
+          Line::from(vec![Span::styled(
+            format!("▶ {}", words),
+            Style::default()
+              .fg(app.user_config.theme.selected)
+              .add_modifier(Modifier::BOLD),
+          )])
+        } else {
+          Line::from(vec![Span::styled(
+            format!("  {}", words),
+            Style::default()
+              .fg(app.user_config.theme.active)
+              .add_modifier(Modifier::BOLD),
+          )])
+        }
+      })
+      .collect()
   };
+  if !lyrics.is_empty() {
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+      // Two-space indent to align with the lyric words; DIM renders the
+      // attribution smaller/lighter than the bold lyric lines.
+      "  Lyrics by: LRCLIB",
+      Style::default()
+        .fg(app.user_config.theme.inactive)
+        .add_modifier(Modifier::DIM),
+    )));
+  }
+
+  // The empty state stays at the top of the block, as before. Real lyrics
+  // are centered as a unit, vertically and horizontally: blank rows pad the
+  // top, and a uniform left pad moves the whole text block to the middle.
+  // Each line keeps its own structure — no per-line Alignment::Center.
+  if !lyrics.is_empty() {
+    let inner_h = vertical[0].height.saturating_sub(2);
+    let pad = inner_h.saturating_sub(lines.len() as u16) / 2;
+    if pad > 0 {
+      lines.splice(
+        0..0,
+        std::iter::repeat_with(|| Line::from("")).take(pad as usize),
+      );
+    }
+    // The pad is computed from the full lyrics set, not the visible window,
+    // so the text block never shifts as the current line moves.
+    let inner_w = vertical[0].width.saturating_sub(2) as usize;
+    let text_w = lyrics
+      .iter()
+      .map(|(_, words)| UnicodeWidthStr::width(words.as_str()) + 2)
+      .max()
+      .unwrap_or(0)
+      .max(UnicodeWidthStr::width("Lyrics by: LRCLIB") + 2);
+    let pad_l = inner_w.saturating_sub(text_w) / 2;
+    if pad_l > 0 {
+      let pad_str = " ".repeat(pad_l);
+      for line in &mut lines {
+        line.spans.insert(0, Span::raw(pad_str.clone()));
+      }
+    }
+  }
+
+  // The block spans the full panel width (its original space); the lyrics
+  // text stays vertically centered and left-aligned inside it.
   let block = Block::default()
     .borders(Borders::ALL)
     .title("Lyrics")
     .style(Style::default().fg(app.user_config.theme.inactive));
+
+  let text = Paragraph::new(lines);
   f.render_widget(text.block(block), vertical[0]);
 
   draw_music_visualizer(f, app, vertical[1]);
 }
 
-/// Normalized 0..1 loudness per column for the MusicView visualizer.
-/// Tier 1 is the real loudness envelope — used only when it belongs to the
-/// currently playing track, so a stale envelope from a previous song never
-/// wins. Tier 2 is a beat-synced wave from the audio features; tier 3 is a
-/// simulated pattern so the panel is never empty.
-fn visualizer_columns(app: &App, width: usize) -> Vec<f32> {
-  if let Some((env_uri, env)) = &app.audio_envelope {
-    let current = match &app.current_playback_context {
-      Some(ctx) => match &ctx.item {
-        Some(PlayableItem::Track(t)) => t.id.as_ref().map(|id| id.to_string()),
-        _ => None,
-      },
-      None => None,
-    };
-    if current.as_deref() == Some(env_uri.as_str()) && !env.is_empty() {
-      let fraction = match &app.current_playback_context {
-        Some(ctx) => match &ctx.item {
-          Some(PlayableItem::Track(t)) => t.duration.num_milliseconds() as f32,
-          Some(PlayableItem::Episode(e)) => e.duration.num_milliseconds() as f32,
-          _ => 0.0,
-        },
-        None => 0.0,
-      };
-      let elapsed = app.seek_ms.unwrap_or(app.song_progress_ms) as f32;
-      // Clamp the window so it never runs past the envelope's end; with a
-      // wider panel than envelope (width > len) the window pins at the start.
-      let window = if fraction > 0.0 {
-        let start = ((elapsed / fraction) * env.len() as f32) as usize;
-        start
-          .min(env.len().saturating_sub(width.min(env.len())))
-          .min(env.len() - 1)
-      } else {
-        0
-      };
-      return (0..width)
-        .map(|col| env.get(window + col).copied().unwrap_or(0.0))
-        .collect();
-    }
-  }
-  if let Some((_, features)) = &app.audio_features {
-    // Beat-synced wave: tempo ~BPM -> radians/s, seeded by playback time,
-    // amplitude scaled by the track's energy.
-    let elapsed = app.seek_ms.unwrap_or(app.song_progress_ms) as f32 / 1000.0;
-    let tempo = features.tempo.max(1.0);
-    let phase = elapsed * (tempo / 60.0) * std::f32::consts::TAU;
-    return (0..width)
-      .map(|col| {
-        let col_phase = phase + (col as f32 / width.max(1) as f32) * std::f32::consts::TAU * 2.0;
-        (col_phase.sin() * 0.5 + 0.5) * features.energy
-      })
-      .collect();
-  }
-  // Simulated pattern, seeded by sub-second progress so it shifts every
-  // redraw tick rather than ~4x/s (progress >> 8), which reads as laggy.
-  let seed = app.seek_ms.unwrap_or(app.song_progress_ms) as u64 >> 2;
-  (0..width)
-    .map(|col| {
-      let x = seed
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407)
-        ^ (col as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-      let v = ((x >> 33) & 0xffff) as usize;
-      (v as f32 + 1.0) / 0x10000 as f32
-    })
-    .collect()
-}
-
 fn draw_music_visualizer(f: &mut Frame, app: &App, area: Rect) {
-  let columns = visualizer_columns(app, area.width.saturating_sub(2) as usize);
   let block = Block::default()
     .borders(Borders::ALL)
     .title("Visualizer")
     .style(Style::default().fg(app.user_config.theme.inactive));
-  match app.user_config.behavior.visualizer_style {
-    VisualizerStyle::Bars => {
-      draw_visualizer_bars(f, app, block, &columns, area);
-    }
-    VisualizerStyle::Oscilloscope => {
-      draw_visualizer_scope(f, app, block, &columns, area);
-    }
-  }
-}
-
-fn draw_visualizer_bars(f: &mut Frame, app: &App, block: Block, columns: &[f32], area: Rect) {
-  let bar_chars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-  let height = bar_chars.len();
-  let mut rows: Vec<Line> = Vec::new();
-  for row in (0..height).rev() {
-    let mut spans: Vec<Span> = Vec::new();
-    for v in columns {
-      let h = ((v.clamp(0.0, 1.0) * height as f32).ceil() as usize).min(height);
-      let ch = if row < h {
-        bar_chars[height - 1 - row]
-      } else {
-        ' '
-      };
-      spans.push(Span::styled(
-        ch.to_string(),
-        Style::default().fg(app.user_config.theme.playbar_progress),
-      ));
-    }
-    rows.push(Line::from(spans));
-  }
-  f.render_widget(Paragraph::new(rows).block(block), area);
-}
-
-fn draw_visualizer_scope(f: &mut Frame, app: &App, block: Block, columns: &[f32], area: Rect) {
-  let inner_h = (area.height.saturating_sub(2) as usize).max(1) as f64;
-  let width = columns.len().max(1) as f64;
-  let color = app.user_config.theme.playbar_progress;
-  let canvas = Canvas::default()
-    .block(block)
-    .marker(Marker::Braille)
-    .x_bounds([0.0, width])
-    .y_bounds([0.0, inner_h])
-    .paint(move |ctx| {
-      for col in 0..columns.len().saturating_sub(1) {
-        let y1 = (1.0 - columns[col].clamp(0.0, 1.0)) as f64 * inner_h;
-        let y2 = (1.0 - columns[col + 1].clamp(0.0, 1.0)) as f64 * inner_h;
-        ctx.draw(&CanvasLine::new(col as f64, y1, col as f64 + 1.0, y2, color));
-      }
-    });
-  f.render_widget(canvas, area);
+  f.render_widget(block, area);
 }
 
 fn format_count(n: u64) -> String {
@@ -1548,7 +1720,6 @@ fn draw_music_panel(f: &mut Frame, app: &App, area: Rect) {
         let album = track.album.name.as_str();
         let duration = track.duration.num_seconds() as u128;
         let progress_ms = app.seek_ms.unwrap_or(app.song_progress_ms);
-        lines.push(Line::from("Now Playing"));
         lines.push(Line::from(Span::styled(
           track.name.as_str(),
           Style::default().fg(app.user_config.theme.selected),
@@ -1557,7 +1728,6 @@ fn draw_music_panel(f: &mut Frame, app: &App, area: Rect) {
           artists,
           Style::default().fg(app.user_config.theme.active),
         )));
-        lines.push(Line::from(""));
         lines.push(Line::from(format!("Album: {}", album)));
         lines.push(Line::from(format!(
           "Duration: {}:{:02}",
@@ -1598,14 +1768,8 @@ fn draw_music_panel(f: &mut Frame, app: &App, area: Rect) {
         if let Some(q) = &app.queue_next {
           lines.push(Line::from(format!("Up next: {}", q)));
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-          "Artist profile →",
-          Style::default().fg(app.user_config.theme.selected),
-        )));
       }
       Some(PlayableItem::Episode(episode)) => {
-        lines.push(Line::from("Now Playing"));
         lines.push(Line::from(Span::styled(
           episode.name.as_str(),
           Style::default().fg(app.user_config.theme.selected),
@@ -1631,7 +1795,6 @@ fn draw_music_panel(f: &mut Frame, app: &App, area: Rect) {
     .style(Style::default().fg(app.user_config.theme.inactive));
   f.render_widget(Paragraph::new(lines).block(block), area);
 }
-
 
 pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
   // If no track is playing, render paragraph showing which device is selected, if no selected
@@ -1688,8 +1851,7 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
       let controls = build_playbar_controls(current_playback_context.is_playing);
       let repeat_text = repeat_label(current_playback_context.repeat_state);
       let controls_row = layout::playbar_controls_row(layout_chunk);
-      let controls_start =
-        layout::playbar_controls_x(layout_chunk, &controls);
+      let controls_start = layout::playbar_controls_x(layout_chunk, &controls);
       let name_limit = (controls_start.saturating_sub(controls_row.x + 1)) as usize;
       let name_text: String = if track_name.chars().count() > name_limit {
         track_name
@@ -1853,7 +2015,10 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
             format!("{:>5} ", millis_to_minutes(progress_ms)),
             Style::default().fg(theme.playbar_progress_text),
           ),
-          Span::styled("█".repeat(full.min(bar_len.saturating_sub(has_partial as usize))), fill_style),
+          Span::styled(
+            "█".repeat(full.min(bar_len.saturating_sub(has_partial as usize))),
+            fill_style,
+          ),
           Span::styled(partial_glyph, fill_style),
           Span::styled(
             "░".repeat(rest),
@@ -1910,6 +2075,15 @@ pub fn draw_error_screen(f: &mut Frame, app: &App) {
     ),
     Line::from(
       Span::styled(
+        format!(
+          "Press {} to copy this error to clipboard",
+          app.user_config.keys.copy_error
+        ),
+        Style::default().fg(app.user_config.theme.inactive),
+      ),
+    ),
+    Line::from(
+      Span::styled(
           "\nPress <Esc> to return",
           Style::default().fg(app.user_config.theme.inactive),
       ),
@@ -1947,7 +2121,7 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
     let label = match block {
       ArtistBlock::TopTracks => " Top tracks ",
       ArtistBlock::Albums => " Albums ",
-      ArtistBlock::Empty | ArtistBlock::RelatedArtists => "",
+      ArtistBlock::Empty => "",
     };
     let mut style = get_color(get_artist_highlight_state(app, block), theme);
     if block == shown {
@@ -1959,14 +2133,15 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
   match shown {
     ArtistBlock::TopTracks => {
       let b = &app.user_config.behavior;
-  let columns = song_table_columns(
-    layout_chunk.width,
-    false,
-    b.show_album_column,
-    b.show_artist_column,
-    b.show_length_column,
-    b.show_date_added_column,
-  );
+      let columns = song_table_columns(
+        layout_chunk.width,
+        false,
+        b.show_album_column,
+        b.show_artist_column,
+        b.show_length_column,
+        b.show_date_added_column,
+        false,
+      );
       let header = TableHeader {
         id: TableId::Song,
         items: columns
@@ -1988,9 +2163,8 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
       let mut items = artist
         .top_tracks
         .iter()
-        .map(|item| TableItem {
-          id: item.id.clone().map(|id| id.to_string()).unwrap_or_default(),
-          format: song_row_cells(
+        .map(|item| {
+          let mut cells = song_row_cells(
             &item.name,
             &create_artist_string(&item.artists),
             &item.album.name,
@@ -1998,11 +2172,31 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
             item.duration.num_milliseconds() as u128,
             false,
             b,
-          ),
+          );
+          cells[0] = if item
+            .id
+            .as_ref()
+            .map(|id| app.playlist_contains(&id.uri(), None))
+            .unwrap_or(false)
+          {
+            app.user_config.padded_in_playlist_icon()
+          } else {
+            "  ".to_string()
+          };
+          TableItem {
+            id: item.id.clone().map(|id| id.to_string()).unwrap_or_default(),
+            format: cells,
+          }
         })
         .collect::<Vec<TableItem>>();
       if artist.top_tracks_has_more {
-        let mut load_more_format = vec!["".to_string(), "Load more songs...".to_string()];
+        let remaining = artist
+          .top_tracks_total
+          .saturating_sub(artist.top_tracks.len());
+        let mut load_more_format = vec![
+          "".to_string(),
+          load_more_label("Load more songs...", (remaining > 0).then_some(remaining)),
+        ];
         if b.show_artist_column {
           load_more_format.push(String::new());
         }
@@ -2053,7 +2247,8 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
             })
             .collect::<Vec<String>>();
           if artist.albums.items.len() < artist.albums.total as usize {
-            albums.push("Load more albums...".to_string());
+            let remaining = artist.albums.total as usize - artist.albums.items.len();
+            albums.push(load_more_label("Load more albums...", Some(remaining)));
           }
           (
             albums,
@@ -2061,9 +2256,9 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
             Some(artist.selected_album_index),
           )
         }
-        ArtistBlock::Empty
-        | ArtistBlock::RelatedArtists
-        | ArtistBlock::TopTracks => (vec![], String::new(), None),
+        ArtistBlock::Empty | ArtistBlock::TopTracks => {
+          (vec![], String::new(), None)
+        }
       };
 
       draw_selectable_list(
@@ -2307,12 +2502,18 @@ pub fn draw_show_episodes(f: &mut Frame, app: &App, layout_chunk: Rect) {
 }
 
 pub fn draw_made_for_you(f: &mut Frame, app: &App, layout_chunk: Rect) {
-  let names: Vec<String> = MADE_FOR_YOU_NAMES
-    .iter()
-    .map(|name| name.to_string())
+  let current_route = app.get_current_route();
+  // The List content area is width-2 (borders eat 2 cols); name + " ✕" must
+  // fit, so the name field gets width-4.
+  let max_name = layout_chunk.width.saturating_sub(4) as usize;
+  let names: Vec<String> = (0..app.made_for_you_len())
+    .filter_map(|index| app.made_for_you_name(index))
+    .map(|name| {
+      let name: String = name.chars().take(max_name).collect();
+      format!("{:<width$} ✕", name, width = max_name)
+    })
     .collect();
 
-  let current_route = app.get_current_route();
   let highlight_state = (
     current_route.active_block == ActiveBlock::MadeForYou,
     current_route.hovered_block == ActiveBlock::MadeForYou,
@@ -2342,6 +2543,7 @@ pub fn draw_recently_played_table(f: &mut Frame, app: &App, layout_chunk: Rect) 
     b.show_artist_column,
     b.show_length_column,
     b.show_date_added_column,
+    false,
   );
   let header = TableHeader {
     id: TableId::RecentlyPlayed,
@@ -2429,7 +2631,14 @@ pub fn draw_recently_played_table(f: &mut Frame, app: &App, layout_chunk: Rect) 
 // (view offset, or selected_index - viewport for selection lists). Shared by
 // the gear menu, sidebar lists and the track table; the mouse drag arm uses
 // the same geometry (see handlers/mouse.rs arm_scrollbar).
-fn draw_scrollbar(f: &mut Frame, app: &App, rect: Rect, count: usize, viewport: usize, offset: usize) {
+fn draw_scrollbar(
+  f: &mut Frame,
+  app: &App,
+  rect: Rect,
+  count: usize,
+  viewport: usize,
+  offset: usize,
+) {
   if count <= viewport {
     return;
   }
@@ -2476,8 +2685,22 @@ fn draw_selectable_list<S>(
 
   let lst_items: Vec<ListItem> = items
     .iter()
+    .enumerate()
     .skip(offset)
-    .map(|i| ListItem::new(Span::raw(i.as_ref())))
+    .map(|(i, item)| {
+      let is_load_more =
+        i == items.len().saturating_sub(1) && item.as_ref().trim_start().starts_with("Load more");
+      if is_load_more {
+        ListItem::new(Span::styled(
+          item.as_ref(),
+          Style::default()
+            .fg(app.user_config.theme.load_more)
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC),
+        ))
+      } else {
+        ListItem::new(Span::raw(item.as_ref()))
+      }
+    })
     .collect();
 
   // Only the focused panel highlights its selected row; an unfocused panel
@@ -2640,7 +2863,13 @@ fn draw_add_to_playlist_dialog(f: &mut Frame, app: &App) {
   let text = Paragraph::new(lines)
     .wrap(Wrap { trim: true })
     .alignment(Alignment::Left);
-  f.render_widget(text, rect.inner(Margin { vertical: 2, horizontal: 2 }));
+  f.render_widget(
+    text,
+    rect.inner(Margin {
+      vertical: 2,
+      horizontal: 2,
+    }),
+  );
 
   let hint = Paragraph::new(Line::from(Span::styled(
     "↑/↓ pick   Enter add   q cancel",
@@ -2737,7 +2966,14 @@ fn draw_table(
   // scroll_offset when the selection crosses the viewport edge.
   let offset = match view_offset {
     Some(scrolled) => scrolled.min(items.len().saturating_sub(viewport)),
-    None => selected_index.checked_sub(viewport).unwrap_or(0),
+    // Keep the selection (and a load-more row pushed as the last item) visible
+    // at the bottom row; the window is items[selected - viewport + 1 ..= selected].
+    // table_row_index in mouse.rs maps clicks back through the same +1.
+    None => selected_index
+      .checked_sub(viewport)
+      .map(|o| o + 1)
+      .unwrap_or(0)
+      .min(items.len().saturating_sub(viewport)),
   };
 
   let rows = items.iter().skip(offset).enumerate().map(|(i, item)| {
@@ -2776,6 +3012,14 @@ fn draw_table(
         }
       }
       _ => {}
+    }
+
+    // The load-more row (pushed with an empty id as the last item) gets a
+    // distinct accent so it reads as a button rather than a song.
+    if offset + i == items.len().saturating_sub(1) && item.id.is_empty() {
+      style = Style::default()
+        .fg(app.user_config.theme.load_more)
+        .add_modifier(Modifier::BOLD | Modifier::ITALIC);
     }
 
     // Next check if the item is under selection.
@@ -2873,6 +3117,147 @@ mod tests {
       .chunks(w as usize)
       .map(|row| row.iter().map(|c| c.symbol().to_string()).collect())
       .collect()
+  }
+
+  #[test]
+  fn load_more_button_is_last_visible_row_when_selected_at_bottom() {
+    // 40 recently-played items + the load-more row, selection on the button
+    // (index 40), viewport 34 (chunk.height-5). The draw window must end ON
+    // the selection so the button is the last visible data row
+    // (y = chunk.y + height - 4), where the mouse maps clicks to index 40.
+    let mut app = App::default();
+    app.push_navigation_stack(RouteId::RecentlyPlayed, ActiveBlock::RecentlyPlayed);
+    let items: Vec<rspotify::model::PlayHistory> = (0..40)
+      .map(|i| {
+        serde_json::from_value(json!({
+          "track": {
+            "album": {
+              "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "Mock Artist" }],
+              "external_urls": {},
+              "href": null,
+              "id": null,
+              "images": [],
+              "name": "Mock Album",
+            },
+            "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "Mock Artist" }],
+            "disc_number": 1,
+            "duration_ms": 180_000,
+            "explicit": false,
+            "external_ids": {},
+            "external_urls": {},
+            "href": null,
+            "id": format!("mocktrack{}", i),
+            "is_local": false,
+            "name": format!("Mock Song {}", i),
+            "preview_url": null,
+            "track_number": 1,
+            "type": "track",
+          },
+          "played_at": "2024-01-01T00:00:00Z",
+          "context": null,
+        }))
+        .unwrap()
+      })
+      .collect();
+    app.recently_played.result = Some(rspotify::model::CursorBasedPage {
+      href: String::new(),
+      items,
+      limit: 40,
+      next: Some("mock-cursor".to_string()),
+      cursors: None,
+      total: Some(40),
+    });
+    app.recently_played.index = 40;
+
+    let backend = TestBackend::new(200, 50);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+      .draw(|f| draw_recently_played_table(f, &app, Rect::new(41, 6, 158, 39)))
+      .unwrap();
+    let row: String = terminal
+      .backend()
+      .buffer()
+      .content
+      .chunks(200)
+      .nth(41)
+      .unwrap()
+      .iter()
+      .map(|c| c.symbol().to_string())
+      .collect();
+    assert!(
+      row.contains("Load more songs..."),
+      "button must be the last visible data row (y=41), got: {:?}",
+      row
+    );
+  }
+
+  #[test]
+  fn search_songs_load_more_row_visible_with_count_when_selected() {
+    // 40 songs, selection on the load-more row (index == 40): the draw window
+    // must end ON the selection so the button is the last visible data row
+    // (y = 41), where mouse clicks map to index 40. The API total (100) must
+    // render as "(60 more)".
+    let mut app = App::default();
+    app.push_navigation_stack(RouteId::Search, ActiveBlock::SearchResultBlock);
+    app.search_results.selected_block = SearchResultBlock::SongSearch;
+    app.search_results.selected_tracks_index = Some(40);
+    app.search_results.tracks = Some(rspotify::model::Page {
+      href: String::new(),
+      items: (0..40)
+        .map(|i| {
+          serde_json::from_value(json!({
+            "album": {
+              "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "Mock Artist" }],
+              "external_urls": {},
+              "href": null,
+              "id": null,
+              "images": [],
+              "name": "Mock Album",
+            },
+            "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "Mock Artist" }],
+            "disc_number": 1,
+            "duration_ms": 180_000,
+            "explicit": false,
+            "external_ids": {},
+            "external_urls": {},
+            "href": null,
+            "id": format!("mocktrack{}", i),
+            "is_local": false,
+            "name": format!("Mock Song {}", i),
+            "preview_url": null,
+            "track_number": 1,
+            "type": "track",
+          }))
+          .unwrap()
+        })
+        .collect(),
+      limit: 10,
+      next: None,
+      offset: 0,
+      previous: None,
+      total: 100,
+    });
+
+    let backend = TestBackend::new(200, 50);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+      .draw(|f| draw_search_results(f, &app, Rect::new(41, 6, 158, 39)))
+      .unwrap();
+    let row: String = terminal
+      .backend()
+      .buffer()
+      .content
+      .chunks(200)
+      .nth(41)
+      .unwrap()
+      .iter()
+      .map(|c| c.symbol().to_string())
+      .collect();
+    assert!(
+      row.contains("Load more  (60 more)"),
+      "button with remaining count must be the last visible data row (y=41), got: {:?}",
+      row
+    );
   }
 
   #[test]
@@ -3118,7 +3503,9 @@ mod tests {
           .collect()
       })
       .collect();
-    let header_x = lines[1].find("Date Added").expect("Date Added header missing");
+    let header_x = lines[1]
+      .find("Date Added")
+      .expect("Date Added header missing");
     let first_row = &lines[2];
     assert!(
       first_row[header_x..].starts_with("2024-01-15"),
@@ -3127,30 +3514,14 @@ mod tests {
   }
 
   #[test]
-  fn stale_envelope_does_not_shadow_current_track() {
-    // An envelope for a previous track must not be drawn for the current one;
-    // the columns fall through to the features/simulated tiers instead.
-    // The id must be a valid base62 spotify id, else TrackId deserializes
-    // to None and the envelope can never match.
-    let mut app = playback_app_with_track("4iV5W9uYEdYUVa79Axb7Rh");
-    app.audio_envelope = Some(("old-track".to_string(), vec![1.0; 512]));
-    let columns = visualizer_columns(&app, 40);
-    assert!(
-      columns.iter().any(|&v| v < 1.0),
-      "stale envelope must not win for a different track"
-    );
-
-    // Matching uri: the envelope drives the bars (Display of a TrackId is
-    // its full URI, "spotify:track:...").
-    app.audio_envelope = Some((
-      "spotify:track:4iV5W9uYEdYUVa79Axb7Rh".to_string(),
-      vec![0.5; 512],
-    ));
-    let columns = visualizer_columns(&app, 40);
-    assert!(
-      columns.iter().all(|&v| (v - 0.5).abs() < 1e-6),
-      "envelope wins only for its own track"
-    );
+  fn relative_date_formats_hours_days_and_old_dates() {
+    let now = chrono::Utc::now();
+    // 2 hours ago → "2h ago"
+    assert_eq!(relative_date(now - chrono::Duration::hours(2)), "2h ago");
+    // 3 days ago → "3d ago"
+    assert_eq!(relative_date(now - chrono::Duration::days(3)), "3d ago");
+    // 2 months ago → absolute date
+    assert_eq!(relative_date(now - chrono::Duration::days(60)), (now - chrono::Duration::days(60)).format("%Y-%m-%d").to_string());
   }
 
   #[test]
@@ -3296,19 +3667,122 @@ mod tests {
     }
     // The top-tracks tab is a real table now: border row y=1, header y=2,
     // data rows from y=3. list_rect height 7 → draw_table viewport = 7-5 = 2,
-    // offset = 12-2 = 10 → rows y=3..4 hold Mock Song 10..11, matching
-    // table_row_index (index 0 at y=3 = rect.y+2). y=5 is the bottom border.
+    // offset = 12-2+1 = 11 → rows y=3..4 hold Mock Song 11..12, the window
+    // ends ON the selection, matching table_row_index (index 0 at y=3).
+    // y=5 is the bottom border.
     assert!(
       rows[2].contains("Title"),
       "row 2 should be the table header, got: {}",
       rows[2]
     );
-    for (row, expected) in [(3, 10), (4, 11)] {
+    for (row, expected) in [(3, 11), (4, 12)] {
       assert!(
         rows[row].contains(&format!("Mock Song {expected}")),
         "row {row} should hold Mock Song {expected}, got: {}",
         rows[row]
       );
     }
+  }
+
+  #[test]
+  fn lyrics_block_is_vertically_centered_and_text_centered() {
+    let mut app = App::default();
+    app.lyrics = Some(vec![
+      (0, "line one".to_string()),
+      (5000, "line two".to_string()),
+    ]);
+
+    let backend = TestBackend::new(30, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+      .draw(|f| draw_music_lyrics(f, &app, Rect::new(0, 0, 30, 20)))
+      .unwrap();
+    let buffer = terminal.backend().buffer();
+    let rows: Vec<String> = (0..20)
+      .map(|y| {
+        (0..30)
+          .map(|x| buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+          .collect()
+      })
+      .collect();
+    // The lyrics block is 70% of the rect (height 14): border rows 0 and 13,
+    // inner height 12, 4 lyric lines → 4 blank pad rows below the border, so
+    // the text is vertically centered. The block spans the full width while
+    // each text line is centered horizontally inside it.
+    assert!(
+      !rows[1].contains("line"),
+      "row 1 should be pad, got: {}",
+      rows[1]
+    );
+    assert!(
+      !rows[4].contains("line"),
+      "row 4 should be pad, got: {}",
+      rows[4]
+    );
+    assert!(
+      rows[5].starts_with('│'),
+      "block should hug x=0, got: {}",
+      rows[5]
+    );
+    assert!(
+      rows[5].contains("▶ line one") && !rows[5].starts_with("│▶"),
+      "row 5 should hold the centered current line, got: {}",
+      rows[5]
+    );
+    assert!(
+      rows[6].contains("line two"),
+      "row 6 should hold line two, got: {}",
+      rows[6]
+    );
+    assert!(
+      rows[8].contains("Lyrics by: LRCLIB"),
+      "row 8 should hold the attribution, got: {}",
+      rows[8]
+    );
+  }
+
+  #[test]
+  fn lyrics_empty_state_stays_at_the_top() {
+    let mut app = App::default();
+    app.lyrics = None;
+
+    let backend = TestBackend::new(40, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+      .draw(|f| draw_music_lyrics(f, &app, Rect::new(0, 0, 40, 20)))
+      .unwrap();
+    let buffer = terminal.backend().buffer();
+    let row1: String = (0..40)
+      .map(|x| buffer.cell((x, 1)).map(|c| c.symbol()).unwrap_or(" "))
+      .collect();
+    // No vertical padding: the message sits right below the top border, and
+    // the block keeps its full width.
+    assert!(
+      row1.contains("No lyrics available for this track"),
+      "row 1 should hold the message at the top, got: {}",
+      row1
+    );
+    let row0: String = (0..40)
+      .map(|x| buffer.cell((x, 0)).map(|c| c.symbol()).unwrap_or(" "))
+      .collect();
+    assert!(
+      row0.starts_with('┌'),
+      "block should span full width, got: {}",
+      row0
+    );
+  }
+
+  #[test]
+  fn ellipsize_keeps_the_head_of_a_long_input() {
+    let url = "https://open.spotify.com/playlist/37i9dQZEVXcO7jjUV7WpTq?si=6f9dfe1178b6482e";
+    // Short input is unchanged.
+    assert_eq!(ellipsize("short", 10), "short");
+    // Long input keeps the START, the ellipsis goes at the END.
+    let out = ellipsize(url, 30);
+    assert_eq!(out.chars().count(), 30);
+    assert!(out.starts_with("https://open.spotify.com/"));
+    assert!(out.ends_with("..."));
+    // A tiny box degrades to the ellipsis only.
+    assert_eq!(ellipsize(url, 3), "...");
   }
 }

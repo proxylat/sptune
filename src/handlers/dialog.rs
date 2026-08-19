@@ -73,11 +73,16 @@ fn millis_to_digits(ms: u32) -> String {
 }
 
 fn track_duration_ms(app: &App) -> Option<u32> {
-  app.current_playback_context.as_ref()?.item.as_ref().map(|item| match item {
-    PlayableItem::Track(track) => track.duration.num_milliseconds() as u32,
-    PlayableItem::Episode(episode) => episode.duration.num_milliseconds() as u32,
-    _ => 0,
-  })
+  app
+    .current_playback_context
+    .as_ref()?
+    .item
+    .as_ref()
+    .map(|item| match item {
+      PlayableItem::Track(track) => track.duration.num_milliseconds() as u32,
+      PlayableItem::Episode(episode) => episode.duration.num_milliseconds() as u32,
+      _ => 0,
+    })
 }
 
 fn handle_seek_dialog(key: Key, app: &mut App) {
@@ -124,9 +129,7 @@ fn seek_dialog_delta(app: &mut App, delta: i64) {
     .dialog
     .as_deref()
     .and_then(digits_to_millis)
-    .unwrap_or_else(|| {
-      app.seek_ms.unwrap_or(0) as u32
-    });
+    .unwrap_or_else(|| app.seek_ms.unwrap_or(0) as u32);
   let next_ms = (current_ms as i64 + delta).clamp(0, duration_ms as i64) as u32;
   app.dialog = Some(millis_to_digits(next_ms));
 }
@@ -162,7 +165,10 @@ fn handle_add_to_playlist_dialog(key: Key, app: &mut App) {
         .map(|playlist| playlist.id.to_string());
       app.pop_navigation_stack();
       if let Some(playlist_id) = playlist_id {
-        app.dispatch(crate::backend::IoEvent::AddTrackToPlaylist(uri, playlist_id));
+        app.dispatch(crate::backend::IoEvent::AddTrackToPlaylist(
+          uri,
+          playlist_id,
+        ));
       }
     }
     Key::Char('q') | Key::Esc => {

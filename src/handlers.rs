@@ -1,13 +1,11 @@
 mod album_list;
 mod album_tracks;
-mod artist_page;
 mod artist_list;
+mod artist_page;
 mod common_key_events;
 mod dialog;
-mod unfocused_keys;
 mod episode_table;
 mod help_keys;
-mod search_input;
 mod library;
 mod made_for_you;
 mod mouse;
@@ -16,19 +14,28 @@ mod playlist;
 mod podcasts;
 mod recently_played;
 mod request_log;
+mod search_input;
 mod search_results;
 mod select_device;
 mod track_table;
+mod unfocused_keys;
 
 use super::app::{ActiveBlock, App, ArtistBlock, DialogContext, RouteId, SearchResultBlock};
-use crate::event::Key;
 use crate::backend::IoEvent;
+use crate::event::Key;
 use rspotify::model::{context::CurrentPlaybackContext, PlayableItem};
 
-pub use search_input::handler as input_handler;
 pub use mouse::handle_mouse;
+pub use search_input::handler as input_handler;
 
 pub fn handle_app(key: Key, app: &mut App) {
+  // When the in-playlist search is focused, capture every key there: no
+  // global hotkeys, no playback controls, nothing else. The track_table
+  // handler owns the filter and types/moves/closes accordingly.
+  if app.playlist_search_active() {
+    track_table::handler(key, app);
+    return;
+  }
   // First handle any global event and then move to block event
   match key {
     Key::Esc => {
@@ -87,6 +94,9 @@ pub fn handle_app(key: Key, app: &mut App) {
     _ if key == app.user_config.keys.copy_album_url => {
       app.copy_album_url();
     }
+    _ if key == app.user_config.keys.copy_error => {
+      app.copy_error();
+    }
     _ if key == app.user_config.keys.music_view => {
       app.get_panel_data();
       app.push_navigation_stack(RouteId::MusicView, ActiveBlock::MusicView);
@@ -115,7 +125,10 @@ fn handle_digit(app: &mut App, c: char) {
       if app.current_playback_context.is_some() {
         app.dialog = Some(c.to_string());
         app.confirm = false;
-        app.push_navigation_stack(RouteId::Dialog, ActiveBlock::Dialog(DialogContext::SeekTime));
+        app.push_navigation_stack(
+          RouteId::Dialog,
+          ActiveBlock::Dialog(DialogContext::SeekTime),
+        );
       }
     }
   }
@@ -203,6 +216,11 @@ fn handle_escape(app: &mut App) {
       app.pop_navigation_stack();
     }
     ActiveBlock::Dialog(_) => {
+      app.pop_navigation_stack();
+    }
+    // Music view is a fullscreen overlay pushed on top of the dashboard;
+    // leaving restores the route that was active before it was opened.
+    ActiveBlock::MusicView => {
       app.pop_navigation_stack();
     }
     // These are global views that have no active/inactive distinction so do nothing

@@ -5,17 +5,34 @@ use super::{
   },
   common_key_events,
 };
-use crate::event::Key;
 use crate::backend::IoEvent;
+use crate::event::Key;
 use rspotify::model::Id;
+
+/// Down-arrow at the last result moves onto the " Load more " row when another
+/// page could arrive; otherwise it wraps to the top like on_down_press_handler.
+fn down_with_more(has_more: bool, items_len: usize, selected: Option<usize>) -> usize {
+  match selected {
+    Some(i) if i + 1 < items_len => i + 1,
+    Some(_) => {
+      if has_more {
+        items_len
+      } else {
+        0
+      }
+    }
+    None => 0,
+  }
+}
 
 fn handle_down_press_on_selected_block(app: &mut App) {
   // Start selecting within the selected block
   match app.search_results.selected_block {
     SearchResultBlock::AlbumSearch => {
       if let Some(result) = &app.search_results.albums {
-        let next_index = common_key_events::on_down_press_handler(
-          &result.items,
+        let next_index = down_with_more(
+          app.search_block_has_more(&SearchResultBlock::AlbumSearch),
+          result.items.len(),
           app.search_results.selected_album_index,
         );
         app.search_results.selected_album_index = Some(next_index);
@@ -23,8 +40,9 @@ fn handle_down_press_on_selected_block(app: &mut App) {
     }
     SearchResultBlock::SongSearch => {
       if let Some(result) = &app.search_results.tracks {
-        let next_index = common_key_events::on_down_press_handler(
-          &result.items,
+        let next_index = down_with_more(
+          app.search_block_has_more(&SearchResultBlock::SongSearch),
+          result.items.len(),
           app.search_results.selected_tracks_index,
         );
         app.search_results.selected_tracks_index = Some(next_index);
@@ -32,8 +50,9 @@ fn handle_down_press_on_selected_block(app: &mut App) {
     }
     SearchResultBlock::ArtistSearch => {
       if let Some(result) = &app.search_results.artists {
-        let next_index = common_key_events::on_down_press_handler(
-          &result.items,
+        let next_index = down_with_more(
+          app.search_block_has_more(&SearchResultBlock::ArtistSearch),
+          result.items.len(),
           app.search_results.selected_artists_index,
         );
         app.search_results.selected_artists_index = Some(next_index);
@@ -41,8 +60,9 @@ fn handle_down_press_on_selected_block(app: &mut App) {
     }
     SearchResultBlock::PlaylistSearch => {
       if let Some(result) = &app.search_results.playlists {
-        let next_index = common_key_events::on_down_press_handler(
-          &result.items,
+        let next_index = down_with_more(
+          app.search_block_has_more(&SearchResultBlock::PlaylistSearch),
+          result.items.len(),
           app.search_results.selected_playlists_index,
         );
         app.search_results.selected_playlists_index = Some(next_index);
@@ -50,8 +70,9 @@ fn handle_down_press_on_selected_block(app: &mut App) {
     }
     SearchResultBlock::ShowSearch => {
       if let Some(result) = &app.search_results.shows {
-        let next_index = common_key_events::on_down_press_handler(
-          &result.items,
+        let next_index = down_with_more(
+          app.search_block_has_more(&SearchResultBlock::ShowSearch),
+          result.items.len(),
           app.search_results.selected_shows_index,
         );
         app.search_results.selected_shows_index = Some(next_index);
@@ -291,11 +312,12 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
         &app.search_results.selected_album_index,
         &app.search_results.albums,
       ) {
-        if *index == albums_result.items.len() {
+        if *index >= albums_result.items.len() {
           app.load_more_search_block(&SearchResultBlock::AlbumSearch);
         } else if let Some(album) = albums_result.items.get(index.to_owned()).cloned() {
           app.track_table.context = Some(TrackTableContext::AlbumSearch);
           app.dispatch(IoEvent::GetAlbumTracks(Box::new(album)));
+          app.clear_search_input();
         };
       }
     }
@@ -303,7 +325,7 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
       let index = app.search_results.selected_tracks_index;
       let tracks = app.search_results.tracks.clone();
       if let (Some(index), Some(tracks)) = (index, tracks.as_ref()) {
-        if index == tracks.items.len() {
+        if index >= tracks.items.len() {
           app.load_more_search_block(&SearchResultBlock::SongSearch);
         } else {
           let track_uris = tracks
@@ -318,11 +340,12 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
     SearchResultBlock::ArtistSearch => {
       if let Some(index) = &app.search_results.selected_artists_index {
         if let Some(result) = app.search_results.artists.clone() {
-          if *index == result.items.len() {
+          if *index >= result.items.len() {
             app.load_more_search_block(&SearchResultBlock::ArtistSearch);
           } else if let Some(artist) = result.items.get(index.to_owned()) {
             app.get_artist(artist.id.to_string(), artist.name.clone());
             app.push_navigation_stack(RouteId::Artist, ActiveBlock::ArtistBlock);
+            app.clear_search_input();
           };
         };
       };
@@ -332,13 +355,14 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
         app.search_results.selected_playlists_index,
         &app.search_results.playlists,
       ) {
-        if index == playlists_result.items.len() {
+        if index >= playlists_result.items.len() {
           app.load_more_search_block(&SearchResultBlock::PlaylistSearch);
         } else if let Some(playlist) = playlists_result.items.get(index) {
           // Go to playlist tracks table
           app.track_table.context = Some(TrackTableContext::PlaylistSearch);
           let playlist_id = playlist.id.to_string();
           app.dispatch(IoEvent::GetPlaylistItems(playlist_id, app.playlist_offset));
+          app.clear_search_input();
         };
       }
     }
@@ -347,11 +371,12 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
         app.search_results.selected_shows_index,
         &app.search_results.shows,
       ) {
-        if index == shows_result.items.len() {
+        if index >= shows_result.items.len() {
           app.load_more_search_block(&SearchResultBlock::ShowSearch);
         } else if let Some(show) = shows_result.items.get(index).cloned() {
           // Go to show tracks table
           app.dispatch(IoEvent::GetShowEpisodes(Box::new(show)));
+          app.clear_search_input();
         };
       }
     }

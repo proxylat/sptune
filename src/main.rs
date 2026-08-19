@@ -1,10 +1,10 @@
 mod app;
-mod lcg;
+mod backend;
 mod cli;
 mod client_creds;
 mod event;
 mod handlers;
-mod backend;
+mod lcg;
 mod library_cache;
 mod playlist_cache;
 mod redirect_uri;
@@ -15,7 +15,7 @@ use crate::app::RouteId;
 use crate::event::Key;
 use anyhow::{anyhow, Result};
 use app::{ActiveBlock, App};
-use std::backtrace::Backtrace;
+use backend::{get_spotify, IoEvent, Network, SavedState};
 use clap::{Arg, Command};
 use clap_complete::{generate, Shell};
 use client_creds::ClientConfig;
@@ -27,7 +27,6 @@ use crossterm::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
   },
 };
-use backend::{get_spotify, IoEvent, Network, SavedState};
 use ratatui::{
   backend::{Backend, CrosstermBackend},
   layout::Rect,
@@ -41,8 +40,8 @@ use rspotify::{
   model::Token,
   AuthCodeSpotify, Credentials, OAuth,
 };
+use std::backtrace::Backtrace;
 use std::{
-  cmp::{max, min},
   io::{self, stdout},
   panic::{self, PanicHookInfo},
   path::PathBuf,
@@ -50,7 +49,7 @@ use std::{
   time::SystemTime,
 };
 use tokio::sync::Mutex;
-use user_config::{theme_presets, UserConfig, UserConfigPaths, VisualizerStyle};
+use user_config::{theme_presets, UserConfig, UserConfigPaths};
 
 const SCOPES: [&str; 14] = [
   "playlist-read-collaborative",
@@ -169,13 +168,6 @@ of the app. Beware that this comes at a CPU cost!",
         .value_name("SHELL"),
     )
     .arg(
-      Arg::new("mock")
-        .short('m')
-        .long("mock")
-        .help("Run in test mode without connecting to Spotify")
-        .action(clap::ArgAction::SetTrue),
-    )
-    .arg(
       Arg::new("no-cache")
         .long("no-cache")
         .help("Run without reading or writing the on-disk caches")
@@ -237,8 +229,6 @@ of the app. Beware that this comes at a CPU cost!",
   client_config.load_config()?;
   let config_paths = client_config.get_or_build_paths()?;
 
-  let mock = matches.get_flag("mock");
-
   // Start authorization with spotify
   let oauth = OAuth {
     redirect_uri: client_config.get_redirect_uri(),
@@ -253,20 +243,12 @@ of the app. Beware that this comes at a CPU cost!",
   };
   let mut spotify = AuthCodeSpotify::with_config(creds, oauth, config);
 
-  let (spotify, token_expiry) = if mock {
-    // Test mode: never touch the real token/API
-    (
-      get_spotify(Token::default(), &client_config).0,
-      SystemTime::now(),
-    )
-  } else {
-    let config_port = client_config.get_port();
-    match get_token_auto(&mut spotify, config_port).await {
-      Some(token) => get_spotify(token, &client_config),
-      None => {
-        println!("\nSpotify auth failed");
-        return Ok(());
-      }
+  let config_port = client_config.get_port();
+  let (spotify, token_expiry) = match get_token_auto(&mut spotify, config_port).await {
+    Some(token) => get_spotify(token, &client_config),
+    None => {
+      println!("\nSpotify auth failed");
+      return Ok(());
     }
   };
 
@@ -278,7 +260,7 @@ of the app. Beware that this comes at a CPU cost!",
   let mut restored_theme_index = None;
   let mut restored_show_library = None;
   let mut restored_show_playlists = None;
-  if let Some(saved) = SavedState::load(mock) {
+  if let Some(saved) = SavedState::load() {
     if let Some(enabled) = saved.mouse_enabled {
       user_config.behavior.enable_mouse = enabled;
     }
@@ -318,9 +300,6 @@ of the app. Beware that this comes at a CPU cost!",
     if let Some(ramp) = saved.volume_ramp_bar {
       user_config.behavior.volume_ramp_bar = ramp;
     }
-    if let Some(style) = saved.visualizer_style {
-      user_config.behavior.visualizer_style = VisualizerStyle::from_str(&style);
-    }
     if let Some(enable) = saved.enable_add_to_playlist {
       user_config.behavior.enable_add_to_playlist = enable;
     }
@@ -338,13 +317,17 @@ of the app. Beware that this comes at a CPU cost!",
     token_expiry,
   )));
   let mut app_guard = app.lock().await;
-  app_guard.mock = mock;
   app_guard.theme_preset_index = restored_theme_index;
   if let Some(show) = restored_show_library {
     app_guard.show_library = show;
   }
   if let Some(show) = restored_show_playlists {
     app_guard.show_playlists = show;
+  }
+  if let Some(saved) = SavedState::load() {
+    if let Some(custom) = saved.made_for_you_custom {
+      app_guard.made_for_you_custom = custom;
+    }
   }
   app_guard.clamp_library_selection();
   drop(app_guard);
@@ -362,15 +345,11 @@ of the app. Beware that this comes at a CPU cost!",
   } else {
     let cloned_app = Arc::clone(&app);
     std::thread::spawn(move || {
-      let mut network = if mock {
-        Network::new_mock(spotify, client_config, &app)
-      } else {
-        Network::new(spotify, client_config, &app)
-      };
+      let mut network = Network::new(spotify, client_config, &app);
       start_tokio(sync_io_rx, &mut network);
     });
     // Resume the volume and track from the last session
-    if let Some(saved) = SavedState::load(mock) {
+    if let Some(saved) = SavedState::load() {
       if user_config.behavior.restore_settings {
         if saved.shuffle.is_some()
           || saved.repeat.is_some()
@@ -385,23 +364,14 @@ of the app. Beware that this comes at a CPU cost!",
       }
       if user_config.behavior.resume_track {
         if let Some(uri) = saved.track_uri {
-          if mock {
-            let index = uri
-              .strip_prefix("spotify:track:mocktrack")
-              .and_then(|s| s.parse::<usize>().ok())
-              .map(|i| i % 20);
-            let _ = sync_io_tx.send(IoEvent::StartPlayback(None, None, index.or(Some(0))));
-            if saved.is_playing == Some(false) {
-              let _ = sync_io_tx.send(IoEvent::PausePlayback);
-            }
-          } else if saved.is_playing != Some(false) {
+          if saved.is_playing != Some(false) {
             let _ = sync_io_tx.send(IoEvent::StartPlayback(None, Some(vec![uri]), Some(0)));
           }
         }
       }
     }
     // The UI must run in the "main" thread
-    start_ui(user_config, &cloned_app, mock).await?;
+    start_ui(user_config, &cloned_app).await?;
   }
 
   Ok(())
@@ -421,7 +391,7 @@ fn start_tokio(io_rx: std::sync::mpsc::Receiver<IoEvent>, network: &mut Network)
   }
 }
 
-async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>, mock: bool) -> Result<()> {
+async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> {
   // Terminal initialization
   let mut stdout = stdout();
   execute!(stdout, EnterAlternateScreen)?;
@@ -472,16 +442,16 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>, mock: bool) ->
 
         app.size = size;
 
-        // Based on the size of the terminal, adjust the search limit.
-        let potential_limit = max((app.size.height as i32) - 13, 0) as u32;
-        let max_limit = min(potential_limit, 50);
-        let large_search_limit = min((f32::from(size.height) / 1.4) as u32, max_limit);
-        let small_search_limit = min((f32::from(size.height) / 2.85) as u32, max_limit / 2);
-
-        app.dispatch(IoEvent::UpdateSearchLimits(
-          large_search_limit,
-          small_search_limit,
-        ));
+        // Page size is the API max regardless of terminal size; the screen
+        // renders a viewport of what fits, so bigger pages stay invisible.
+        // Only dispatch when the limit actually changes (default is already
+        // the API max), so the first-render no-op stays out of the request log.
+        if app.large_search_limit != backend::API_MAX_LIMIT {
+          app.dispatch(IoEvent::UpdateSearchLimits(
+            backend::API_MAX_LIMIT,
+            backend::API_MAX_LIMIT,
+          ));
+        }
 
         // Based on the size of the terminal, adjust how many lines are
         // displayed in the settings menu (8 = margins + borders + header,
@@ -497,8 +467,8 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>, mock: bool) ->
 
     let mut quit = false;
     for event in batch {
-      // Handle authentication refresh (mock mode has no real token to refresh)
-      if !mock && SystemTime::now() > app.spotify_token_expiry {
+      // Handle authentication refresh
+      if SystemTime::now() > app.spotify_token_expiry {
         app.dispatch(IoEvent::RefreshAuthentication);
       }
 
@@ -591,16 +561,14 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>, mock: bool) ->
       tui::layout::header_height(&app),
     );
     let search_box = tui::layout::search_box_rect(&app, input_box);
-    {
-      let w = terminal.backend_mut();
-      execute!(
-        w,
-        MoveTo(
-          search_box.x + 1 + app.input_cursor_position,
-          search_box.y + 1
-        )
-      )?;
-    }
+    let w = terminal.backend_mut();
+    // Clamp the cursor to the search box (the input string may be longer
+    // than the box; the drawer ellipsizes the tail). The ellipsized text
+    // ends at x+width-5 (3 dots; the ✕ button starts at x+width-4), so the
+    // cursor sits one cell past the text, before the ✕.
+    let cursor_col = (search_box.x + 1 + app.input_cursor_position)
+      .min(search_box.x + search_box.width.saturating_sub(4));
+    execute!(w, MoveTo(cursor_col, search_box.y + 1))?;
 
     // Delay spotify request until first render, will have the effect of improving
     // startup speed

@@ -1,7 +1,4 @@
-use super::{
-  super::app::App,
-  common_key_events,
-};
+use super::{super::app::App, common_key_events};
 use crate::event::Key;
 
 pub fn handler(key: Key, app: &mut App) {
@@ -21,6 +18,7 @@ pub fn handler(key: Key, app: &mut App) {
     k if common_key_events::high_event(k) => select(app, 0),
     k if common_key_events::middle_event(k) => select(app, count / 2),
     k if common_key_events::low_event(k) => select(app, count),
+    k if k == app.user_config.keys.copy_error => app.copy_request_log(),
     _ => {}
   }
 }
