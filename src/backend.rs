@@ -457,6 +457,8 @@ pub struct SavedState {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub show_playlists: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
+  pub sidebar_minimized: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub volume_ramp_bar: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub black_background: Option<bool>,
@@ -546,6 +548,9 @@ impl SavedState {
       if let Some(value) = &self.show_playlists {
         obj.insert("show_playlists".to_string(), serde_json::json!(value));
       }
+      if let Some(value) = &self.sidebar_minimized {
+        obj.insert("sidebar_minimized".to_string(), serde_json::json!(value));
+      }
       if let Some(value) = &self.volume_ramp_bar {
         obj.insert("volume_ramp_bar".to_string(), serde_json::json!(value));
       }
@@ -598,8 +603,10 @@ fn sort_column_from_name(name: &str) -> Option<TrackSortColumn> {
 
 // Global token bucket: at most API_BURST requests can fire back-to-back,
 // then the bucket refills at API_RATE_PER_SEC tokens/second.
-const API_RATE_PER_SEC: f64 = 2.0;
-const API_BURST: f64 = 5.0;
+// 6/s ≈ the pre-bucket fixed 150ms pace (bcfd9cb) — fast enough for
+// instant cached playlist opens, slow enough to avoid 429s.
+const API_RATE_PER_SEC: f64 = 6.0;
+const API_BURST: f64 = 10.0;
 const SAVED_CHECK_TTL: Duration = Duration::from_secs(300);
 // Max page size Spotify allows on paged endpoints (playlist items, saved
 // tracks/albums/shows, etc.). One request should always ask for it.
@@ -659,7 +666,67 @@ impl<'a> Network<'a> {
       None => debug,
     };
     self.app.lock().await.log_request(text);
-    self.pace().await;
+    // Cached opens must not wait for the token bucket — serve immediately
+    // and only pace the background reconcile. Otherwise a fully-cached
+    // playlist open pays 200-500ms for no network work.
+    let skip_pace = match &io_event {
+      IoEvent::GetPlaylistItems(pid, 0) => {
+        self.playlist_cache.ensure_loaded();
+        self
+          .playlist_cache
+          .lookup(pid)
+          .map(|e| !e.items.is_empty() && !self.playlist_cache.is_polluted(pid))
+          .unwrap_or(false)
+      }
+      IoEvent::GetMadeForYouPlaylistItems(pid, 0) => {
+        self.playlist_cache.ensure_loaded();
+        self
+          .playlist_cache
+          .lookup(pid)
+          .map(|e| !e.items.is_empty() && !self.playlist_cache.is_polluted(pid))
+          .unwrap_or(false)
+      }
+      IoEvent::GetCurrentSavedTracks(None)
+      | IoEvent::GetCurrentUserSavedAlbums(None)
+      | IoEvent::GetCurrentUserSavedShows(None) => {
+        self.library_cache.ensure_loaded();
+        match &io_event {
+          IoEvent::GetCurrentSavedTracks(None) => {
+            self.library_cache.get("saved_tracks").is_some()
+          }
+          IoEvent::GetCurrentUserSavedAlbums(None) => {
+            self.library_cache.get("saved_albums").is_some()
+          }
+          IoEvent::GetCurrentUserSavedShows(None) => {
+            self.library_cache.get("saved_shows").is_some()
+          }
+          _ => false,
+        }
+      }
+      IoEvent::GetPlaylists => {
+        self.library_cache.ensure_loaded();
+        self.library_cache.get("playlists").is_some()
+      }
+      IoEvent::GetUser => {
+        self.library_cache.ensure_loaded();
+        self
+          .library_cache
+          .get_typed::<PrivateUser>("profile")
+          .is_some()
+      }
+      IoEvent::SetTracksToTable(_) | IoEvent::SaveState | IoEvent::CleanCache => true,
+      _ => false,
+    };
+    if skip_pace {
+      // keep token state fresh for the panel without sleeping
+      let now = Instant::now();
+      self.tokens = (self.tokens
+        + now.duration_since(self.last_refill).as_secs_f64() * API_RATE_PER_SEC)
+        .clamp(0.0, API_BURST);
+      self.last_refill = now;
+    } else {
+      self.pace().await;
+    }
     // Expose rate limiter state for the dev panel.
     {
       let mut app = self.app.lock().await;
@@ -1032,6 +1099,7 @@ impl<'a> Network<'a> {
       seek_by_typing: None,
       show_library: None,
       show_playlists: None,
+      sidebar_minimized: None,
       volume_ramp_bar: None,
       black_background: None,
       show_album_column: None,
@@ -1067,6 +1135,7 @@ impl<'a> Network<'a> {
         .and_then(|i| theme_presets().get(i).map(|(name, _)| name.to_string())),
       show_library: Some(app.show_library),
       show_playlists: Some(app.show_playlists),
+      sidebar_minimized: Some(app.sidebar_minimized),
       volume_ramp_bar: Some(app.user_config.behavior.volume_ramp_bar),
       black_background: Some(app.user_config.theme.background == Color::Rgb(0, 0, 0)),
       show_album_column: Some(app.user_config.behavior.show_album_column),
@@ -4502,12 +4571,14 @@ mod tests {
     rt.block_on(async {
       let mut app_guard = app.lock().await;
       app_guard.show_library = false;
+      app_guard.sidebar_minimized = true;
       app_guard.user_config.theme.background = Color::Rgb(0, 0, 0);
       network.save_settings_from_app(&app_guard);
     });
     let saved = SavedState::load().expect("state file should exist");
     assert_eq!(saved.show_library, Some(false));
     assert_eq!(saved.show_playlists, Some(true));
+    assert_eq!(saved.sidebar_minimized, Some(true));
     assert_eq!(saved.volume_ramp_bar, Some(false));
     assert_eq!(saved.black_background, Some(true));
     assert_eq!(saved.resume_track, Some(false));

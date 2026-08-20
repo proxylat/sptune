@@ -211,7 +211,11 @@ fn handle_left_click(x: u16, y: u16, app: &mut App) -> bool {
     }
   }
 
-  let (left, right) = content_columns(routes);
+  // The sidebar is auto-sized to its content by the drawer; clicks must be
+  // routed with that same geometry, or a strip of the song table (between
+  // the drawn sidebar and the old fixed 20% mark) selects library/playlists
+  // instead of the row under the cursor.
+  let (left, right) = layout::sidebar_content_split(app, routes);
 
   if x < left.x + left.width {
     handle_user_block_click(x, y, left, app)
@@ -292,7 +296,7 @@ fn handle_wheel(up: bool, mouse: MouseEvent, app: &mut App) {
     return;
   }
 
-  let (left, right) = content_columns(routes);
+  let (left, right) = layout::sidebar_content_split(app, routes);
   // The expanded search block scrolls as a whole; the library sidebar is left
   // to the generic path below.
   if app.get_current_route().id == RouteId::Search && x >= left.x + left.width {
@@ -397,14 +401,6 @@ fn main_layout(app: &App) -> Option<(Rect, Rect, Option<Rect>)> {
   Some((parent[1], parent[2], Some(parent[0])))
 }
 
-fn content_columns(routes: Rect) -> (Rect, Rect) {
-  let columns = Layout::default()
-    .direction(Direction::Horizontal)
-    .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
-    .split(routes);
-  (columns[0], columns[1])
-}
-
 // Pressing on the scrollbar thumb starts a drag; the thumb then follows the
 // cursor until the button is released, like a normal website scrollbar.
 // One arm for every scrollable list: gear menu, sidebar (library/playlists),
@@ -429,7 +425,7 @@ fn handle_scrollbar_down(x: u16, y: u16, app: &mut App) -> bool {
   if y >= playbar.y && y < playbar.y + playbar.height {
     return false;
   }
-  let (left, right) = content_columns(routes);
+  let (left, right) = layout::sidebar_content_split(app, routes);
   if x < left.x + left.width {
     if let Some(block) = user_block_at(y, left, app) {
       let (library, playlists) = crate::tui::layout::library_playlists_split(app, left);
@@ -755,7 +751,7 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
       let (library, playlists) = layout::library_playlists_split(app, chunk);
 
       if y == library.y {
-        app.dispatch(IoEvent::RefreshUser);
+        app.sidebar_minimized = !app.sidebar_minimized;
         return true;
       }
       if y >= library.y && y < library.y + library.height {
@@ -771,7 +767,7 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
           return true;
         }
       } else if y == playlists.y {
-        app.dispatch(IoEvent::RefreshPlaylists);
+        app.sidebar_minimized = !app.sidebar_minimized;
         return true;
       } else if y >= playlists.y && y < playlists.y + playlists.height {
         let count = app
@@ -791,7 +787,7 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
     (true, false) => {
       let count = visible_library_options(&app.hidden_library_sections).len();
       if y == chunk.y {
-        app.dispatch(IoEvent::RefreshUser);
+        app.sidebar_minimized = !app.sidebar_minimized;
         return true;
       }
       if y >= chunk.y && y < chunk.y + chunk.height {
@@ -811,7 +807,7 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
         .unwrap_or(0);
       let selected = app.selected_playlist_index.unwrap_or(0);
       if y == chunk.y {
-        app.dispatch(IoEvent::RefreshPlaylists);
+        app.sidebar_minimized = !app.sidebar_minimized;
         return true;
       }
       if y >= chunk.y && y < chunk.y + chunk.height {
@@ -949,13 +945,14 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
               Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
             );
           let columns = song_table_columns(
-            chunk.width,
+            chunk.width.saturating_sub(2),
             with_date,
             b.show_album_column,
             b.show_artist_column,
             b.show_length_column,
             b.show_date_added_column,
             show_remove,
+            false,
           );
           if let Some(x_in) = x.checked_sub(chunk.x + 1) {
             if let Some((column, _, _)) = columns
@@ -1368,13 +1365,14 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       let track = artist.top_tracks.get(index)?;
       let b = &app.user_config.behavior;
       let columns = song_table_columns(
-        list_rect.width,
+        list_rect.width.saturating_sub(2),
         true,
         b.show_album_column,
         b.show_artist_column,
         b.show_length_column,
         b.show_date_added_column,
         false,
+        true,
       );
       let (col_x, col_w) = columns
         .iter()
@@ -1490,13 +1488,14 @@ fn handle_table_header_click(x: u16, chunk: Rect, app: &mut App) {
       Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
     );
   let columns = song_table_columns(
-    chunk.width,
+    chunk.width.saturating_sub(2),
     with_date,
     b.show_album_column,
     b.show_artist_column,
     b.show_length_column,
     b.show_date_added_column,
     show_remove,
+    false,
   );
   let Some(x_in) = x.checked_sub(chunk.x + 1) else {
     return;
@@ -1889,19 +1888,24 @@ mod tests {
   fn sidebar_scrollbar_drag_scrolls_playlist_selection() {
     let mut app = track_table_app(20);
     app.playlists = Some(mock_playlist_page(40));
-    // size 200x50: routes=(1,6,198,40), left=(1,6,40,40). The Library box
-    // grows to fit its 6 entries (+2 borders = 8 rows), so playlists start
-    // at y=14 with height 32 → viewport 30 < 40 items → scrollbar drawn at
-    // x = left.x + left.width - 2 = 39. Press on the track and drag to the
-    // bottom: the selection scrolls to the last playlist.
-    handle_mouse(click_event(39, 40), &mut app);
-    handle_mouse(drag_event(39, 40), &mut app);
+    // Derive the sidebar rect the same way the drawer and handler do (auto
+    // width: block titles, library options and the longest "Mock Playlist N"
+    // name all fit). The Library box grows to fit its 6 entries (+2 borders =
+    // 8 rows), so playlists start at left.y+8 with the rest of the column →
+    // viewport 30 < 40 items → scrollbar drawn at x = left.x + left.width - 2.
+    let (routes, _, _) = main_layout(&app).unwrap();
+    let (left, _) = layout::sidebar_content_split(&app, routes);
+    let scrollbar_x = left.x + left.width - 2;
+    // Press on the track and drag to the bottom: the selection scrolls to the
+    // last playlist.
+    handle_mouse(click_event(scrollbar_x, 40), &mut app);
+    handle_mouse(drag_event(scrollbar_x, 40), &mut app);
     assert_eq!(app.selected_playlist_index, Some(35));
     assert_eq!(
       app.get_current_route().active_block,
       ActiveBlock::MyPlaylists
     );
-    handle_mouse(up_event(39, 40), &mut app);
+    handle_mouse(up_event(scrollbar_x, 40), &mut app);
   }
 
   #[test]
@@ -1909,11 +1913,13 @@ mod tests {
     let mut app = track_table_app(20);
     // Library box height = entries + 2 border rows, so the fit list never
     // overflows and the scrollbar arm refuses to start a drag there.
-    let (library, _) = crate::tui::layout::library_playlists_split(&app, Rect::new(1, 6, 40, 40));
+    let (routes, _, _) = main_layout(&app).unwrap();
+    let (left, _) = layout::sidebar_content_split(&app, routes);
+    let (library, _) = crate::tui::layout::library_playlists_split(&app, left);
     let visible = visible_library_options(&app.hidden_library_sections).len();
     assert_eq!(library.height as usize, visible + 2);
-    handle_mouse(click_event(39, 8), &mut app);
-    handle_mouse(drag_event(39, 45), &mut app);
+    handle_mouse(click_event(left.x + left.width - 2, 8), &mut app);
+    handle_mouse(drag_event(left.x + left.width - 2, 45), &mut app);
     assert_eq!(app.selected_playlist_index, None);
   }
 
@@ -1957,10 +1963,10 @@ mod tests {
       });
     }
     // Dev panel = right column's right quarter; derive the rects the exact
-    // same way the handlers do (20/80 columns, 75/25 dev split), so the
+    // same way the handlers do (auto-sized sidebar, 75/25 dev split), so the
     // click column lands exactly on the drawn scrollbar.
     let (routes, _, _) = main_layout(&app).unwrap();
-    let (_, right) = content_columns(routes);
+    let (_, right) = layout::sidebar_content_split(&app, routes);
     let dev = dev_panel_rect(right);
     let scrollbar_x = dev.x + dev.width - 2;
     // count 80, viewport = 39−2 (panel height 40) → max offset 42: dragging
@@ -1993,7 +1999,7 @@ mod tests {
       });
     }
     let (routes, _, _) = main_layout(&app).unwrap();
-    let (_, right) = content_columns(routes);
+    let (_, right) = layout::sidebar_content_split(&app, routes);
     let dev = dev_panel_rect(right);
     // Title row is 4 rows below dev rect (below throttle info header).
     handle_mouse(click_event(dev.x + 2, dev.y + 4), &mut app);

@@ -27,10 +27,11 @@ pub const PLAYBAR_TIME_LEN: u16 = 6;
 // volume ramp bar, mouse interactions, theme preset, seek by typing,
 // resume last song, restore settings, clear cache, dev view, columns,
 // visualizer style
-pub const SETTINGS_ROW_COUNT: u16 = 18;
+pub const SETTINGS_ROW_COUNT: u16 = 19;
 
 // Prefix for list panel titles; clicking the title row refreshes the list.
 pub const REFRESH_GLYPH: &str = "♻ ";
+pub const NUMBER_TO_TITLE_GAP: u16 = 2;
 
 // The volume bar: 1 row, right-aligned inside the playbar, on the same row
 // as the music bar. Shared by drawer and mouse hit-test.
@@ -396,12 +397,8 @@ pub fn get_percentage_width(width: u16, percentage: f32) -> u16 {
 }
 
 // Make better use of space on small terminals
-pub fn get_main_layout_margin(app: &App) -> u16 {
-  if app.size.height > SMALL_TERMINAL_HEIGHT {
-    1
-  } else {
-    0
-  }
+pub fn get_main_layout_margin(_app: &App) -> u16 {
+  0
 }
 
 // Thumb geometry for the website-style scrollbar, shared by rendering and
@@ -424,6 +421,38 @@ pub fn scrollbar_geometry(
   let max_offset = count.saturating_sub(viewport).max(1);
   let thumb_top = (offset.min(max_offset) * travel / max_offset).min(travel);
   (thumb_top, thumb_len)
+}
+
+// Sidebar content split: auto-sizes the sidebar to fit its content, with the
+// content area taking the remaining space.
+pub fn sidebar_content_split(app: &App, chunk: Rect) -> (Rect, Rect) {
+  let width = sidebar_width(app, chunk);
+  let columns = Layout::default()
+    .direction(Direction::Horizontal)
+    .constraints([Constraint::Length(width), Constraint::Min(1)].as_ref())
+    .split(chunk);
+  (columns[0], columns[1])
+}
+
+/// Sidebar width: in expanded mode, sized to the longest rendered line (block
+/// titles, library options, playlist names) + padding; in minimized mode,
+/// sized to the widest playlist number.
+pub fn sidebar_width(app: &App, chunk: Rect) -> u16 {
+  let playlist_len = app
+    .playlists
+    .as_ref()
+    .map(|p| p.items.len())
+    .unwrap_or(0);
+  let playlist_digits = format!("{}", playlist_len).len();
+  let content_len = if app.sidebar_minimized {
+    playlist_digits
+  } else {
+    crate::app::sidebar_max_content_len(app).max(1)
+  };
+  // +2 for the two block borders. A minimized sidebar has no scrollbar
+  // column, so it needs no extra cell; the expanded one reserves one for it.
+  let extra = if app.sidebar_minimized { 0 } else { 1 };
+  (content_len as u16 + 2 + extra).min(chunk.width / 2)
 }
 
 // Sidebar split: the Library box grows to fit its (small) entry list so it
@@ -655,42 +684,60 @@ pub fn song_table_columns(
   show_length: bool,
   show_date_added: bool,
   show_remove: bool,
+  show_in_playlist: bool,
 ) -> Vec<(ColumnId, u16, u16)> {
-  // The non-title columns keep their fixed percentage widths; the title
-  // column absorbs whatever the visible columns leave over, so hiding a
-  // column widens the song names instead of leaving a gap.
-  let mut tail: Vec<(ColumnId, u16)> = vec![];
-  if show_artist {
-    tail.push((ColumnId::Artist, get_percentage_width(width, 0.3)));
-  }
-  if with_date {
-    if show_album {
-      tail.push((ColumnId::Album, get_percentage_width(width, 0.15)));
-    }
-    if show_date_added {
-      tail.push((ColumnId::DateAdded, get_percentage_width(width, 0.15)));
-    }
-  } else if show_album {
-    tail.push((ColumnId::Album, get_percentage_width(width, 0.3)));
-  }
-  if show_length {
-    tail.push((ColumnId::Length, get_percentage_width(width, 0.1)));
-  }
-  let fixed: u16 = tail.iter().map(|(_, w)| w).sum();
-  // The remove ✕ column reserves the rightmost 2 cells; the title absorbs the
-  // loss so the other columns keep their fixed widths.
-  let remove = if show_remove { 2 } else { 0 };
-  let title = width.saturating_sub(2 + remove + fixed).max(1);
+  // Artist keeps its 30% share; DateAdded and Length are pinned to the
+  // right. Title and Album split whatever is left over, with ~40% of the
+  // flex going to Album so hiding a column widens the song names instead of
+  // leaving a gap.
+  let artist = if show_artist {
+    get_percentage_width(width, 0.3)
+  } else {
+    0
+  };
+  let date = if with_date && show_date_added {
+    get_percentage_width(width, 0.15)
+  } else {
+    0
+  };
+  let length = if show_length {
+    get_percentage_width(width, 0.1)
+  } else {
+    0
+  };
+  let right = if show_remove || show_in_playlist { 2 } else { 0 };
+  // Number column stays 4 wide (anchored). Title is GAP narrower than the
+  // flex share so draw_table can pad its cell with leading spaces, pushing the
+  // song names right without moving the track numbers.
+  let flex = width.saturating_sub(4 + right + artist + date + length).max(1);
+  let album = if show_album {
+    (flex * 2 / 5).min(flex.saturating_sub(4)).max(1)
+  } else {
+    0
+  };
+  let title = flex.saturating_sub(album).max(1);
 
-  let mut columns = vec![(ColumnId::Liked, 0, 2)];
-  let mut x = 2;
+  let mut columns = vec![(ColumnId::Liked, 0, 4)];
+  let mut x = 4;
   columns.push((ColumnId::Title, x, title));
   x += title;
-  for (column, w) in tail {
-    columns.push((column, x, w));
-    x += w;
+  if show_artist {
+    columns.push((ColumnId::Artist, x, artist));
+    x += artist;
   }
-  if show_remove {
+  if show_album {
+    columns.push((ColumnId::Album, x, album));
+    x += album;
+  }
+  if with_date && show_date_added {
+    columns.push((ColumnId::DateAdded, x, date));
+    x += date;
+  }
+  if show_length {
+    columns.push((ColumnId::Length, x, length));
+    x += length;
+  }
+  if show_remove || show_in_playlist {
     columns.push((ColumnId::None, x, 2));
   }
   columns
@@ -717,6 +764,43 @@ mod tests {
     // terminal) must not panic on the thumb clamp.
     assert_eq!(scrollbar_geometry(0, 5, 3, 0), (0, 0));
     assert_eq!(scrollbar_geometry(0, 0, 0, 0), (0, 0));
+  }
+
+  #[test]
+  fn sidebar_split_shrinks_in_minimized_mode() {
+    let mut app = App::default();
+    let chunk = Rect::new(0, 0, 200, 50);
+    // Expanded: sidebar fits the longest label (15) + 2 borders + scrollbar.
+    let (left, right) = sidebar_content_split(&app, chunk);
+    assert_eq!(left.width, 18);
+    assert_eq!(right.width, 182);
+    // Minimized: only the playlist digit + 2 borders, no scrollbar column.
+    app.sidebar_minimized = true;
+    let (left, right) = sidebar_content_split(&app, chunk);
+    assert_eq!(left.width, 3);
+    assert_eq!(right.width, 197);
+  }
+
+    #[test]
+  fn song_table_columns_number_column_is_four_wide() {
+    // The leftmost column is the 4-wide number slot; the right-most None
+    // column (✓ / ✕) appears only when remove or in-playlist is requested.
+    let no_right = song_table_columns(120, false, true, true, true, false, false, false);
+    let (id, x, w) = no_right[0];
+    assert!(matches!(id, ColumnId::Liked));
+    assert_eq!(x, 0);
+    assert_eq!(w, 4);
+    assert!(!no_right.iter().any(|(id, _, _)| matches!(id, ColumnId::None)));
+
+    let with_playlist = song_table_columns(120, false, true, true, true, false, false, true);
+    let (id, x, w) = with_playlist[0];
+    assert!(matches!(id, ColumnId::Liked));
+    assert_eq!(x, 0);
+    assert_eq!(w, 4);
+    assert!(with_playlist.iter().any(|(id, _, _)| matches!(id, ColumnId::None)));
+
+    let with_remove = song_table_columns(120, false, true, true, true, false, true, false);
+    assert!(with_remove.iter().any(|(id, _, _)| matches!(id, ColumnId::None)));
   }
 
   #[test]

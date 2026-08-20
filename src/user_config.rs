@@ -220,6 +220,7 @@ pub struct KeyBindingsString {
   clear_cache: Option<String>,
   search_in_playlist: Option<String>,
   remove_from_playlist: Option<String>,
+  toggle_sidebar: Option<String>,
 }
 
 #[derive(Clone)]
@@ -255,6 +256,7 @@ pub struct KeyBindings {
   pub clear_cache: Option<Key>,
   pub search_in_playlist: Option<Key>,
   pub remove_from_playlist: Option<Key>,
+  pub toggle_sidebar: Option<Key>,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -284,6 +286,7 @@ pub struct BehaviorConfigString {
   pub in_playlist_icon: Option<String>,
   pub show_liked_icon: Option<bool>,
   pub enable_remove_from_playlist: Option<bool>,
+  pub max_display_length: Option<u16>,
 }
 
 #[derive(Clone)]
@@ -313,6 +316,8 @@ pub struct BehaviorConfig {
   pub in_playlist_icon: String,
   pub show_liked_icon: bool,
   pub enable_remove_from_playlist: bool,
+  /// Maximum characters for name columns (song, artist, album). 0 = no limit.
+  pub max_display_length: u16,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -366,6 +371,7 @@ impl UserConfig {
         clear_cache: None,
         search_in_playlist: Some(Key::Char('f')),
         remove_from_playlist: None,
+        toggle_sidebar: Some(Key::Char('\\')),
       },
       behavior: BehaviorConfig {
         seek_milliseconds: 1000,
@@ -393,6 +399,7 @@ impl UserConfig {
         in_playlist_icon: "✓".to_string(),
         show_liked_icon: true,
         enable_remove_from_playlist: false,
+        max_display_length: 0,
       },
       path_to_config: None,
     }
@@ -477,6 +484,7 @@ impl UserConfig {
     to_optional_keys!(clear_cache);
     to_optional_keys!(search_in_playlist);
     to_optional_keys!(remove_from_playlist);
+    to_optional_keys!(toggle_sidebar);
 
     Ok(())
   }
@@ -574,6 +582,10 @@ impl UserConfig {
 
     if let Some(enable_remove_from_playlist) = behavior_config.enable_remove_from_playlist {
       self.behavior.enable_remove_from_playlist = enable_remove_from_playlist;
+    }
+
+    if let Some(max_display_length) = behavior_config.max_display_length {
+      self.behavior.max_display_length = max_display_length;
     }
 
     if let Some(paused_icon) = behavior_config.paused_icon {

@@ -88,6 +88,10 @@ pub fn handle_app(key: Key, app: &mut App) {
     _ if key == app.user_config.keys.search => {
       app.set_current_route_state(Some(ActiveBlock::Input), Some(ActiveBlock::Input));
     }
+    _ if Some(key) == app.user_config.keys.toggle_sidebar => {
+      app.sidebar_minimized = !app.sidebar_minimized;
+      app.dispatch(IoEvent::SaveState);
+    }
     _ if key == app.user_config.keys.copy_song_url => {
       app.copy_song_url();
     }
