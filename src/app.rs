@@ -57,6 +57,78 @@ pub fn visible_library_options(hidden: &[String]) -> Vec<&'static str> {
     .collect()
 }
 
+/// Display width (columns) of a line, so the sidebar sizes itself to what
+/// actually renders (♻ is two columns, not one).
+fn disp_width(s: &str) -> usize {
+  unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// Sidebar block titles, shared by the drawer (tui.rs) and the width
+/// computation (layout.rs) so the two can never drift apart.
+pub fn library_block_title(app: &App) -> String {
+  app
+    .user
+    .as_ref()
+    .and_then(|u| u.display_name.as_deref())
+    .map(|name| format!("{}({}) Library", crate::tui::layout::REFRESH_GLYPH, name))
+    .unwrap_or_else(|| format!("{}{}", crate::tui::layout::REFRESH_GLYPH, "Library"))
+}
+
+pub fn playlists_block_title() -> String {
+  format!("{}{}", crate::tui::layout::REFRESH_GLYPH, "Playlists")
+}
+
+/// Longest line the sidebar renders right now: both block titles plus every
+/// visible library option and playlist name. Used to size the panel to its
+/// content so nothing clips and no columns are wasted.
+pub fn sidebar_max_content_len(app: &App) -> usize {
+  let titles = [
+    disp_width(&library_block_title(app)),
+    disp_width(&playlists_block_title()),
+  ];
+  let library = visible_library_options(&app.hidden_library_sections)
+    .iter()
+    .map(|s| disp_width(s))
+    .max()
+    .unwrap_or(0);
+  let playlists = cached_playlist_max_width(app);
+  titles
+    .into_iter()
+    .chain([library, playlists])
+    .max()
+    .unwrap_or(0)
+}
+
+// Scanning every playlist name on every frame is O(n) over the whole library and
+// was the one per-frame cost introduced for the no-truncation sidebar sizing.
+// Cache it: the playlist set only changes when a new page is assigned (new
+// pointer) or grown (new length), so key on both and recompute only then.
+thread_local! {
+  static PLAYLIST_MAX_WIDTH: std::cell::RefCell<(usize, usize, usize)> =
+    std::cell::RefCell::new((0, 0, 0)); // (page_ptr, len, cached_width)
+}
+
+fn cached_playlist_max_width(app: &App) -> usize {
+  let key = app
+    .playlists
+    .as_ref()
+    .map(|p| (p as *const _ as usize, p.items.len()))
+    .unwrap_or((0, 0));
+  PLAYLIST_MAX_WIDTH.with(|cell| {
+    let mut slot = cell.borrow_mut();
+    if slot.0 == key.0 && slot.1 == key.1 {
+      return slot.2;
+    }
+    let w = app
+      .playlists
+      .as_ref()
+      .map(|p| p.items.iter().map(|i| disp_width(&i.name)).max().unwrap_or(0))
+      .unwrap_or(0);
+    *slot = (key.0, key.1, w);
+    w
+  })
+}
+
 const DEFAULT_ROUTE: Route = Route {
   id: RouteId::MadeForYou,
   active_block: ActiveBlock::Empty,
@@ -424,6 +496,7 @@ pub struct App {
   pub playlist_picker_index: usize,
   pub show_library: bool,
   pub show_playlists: bool,
+  pub sidebar_minimized: bool,
   pub hidden_library_sections: Vec<String>,
   pub config_theme: Theme,
   pub theme_preset_index: Option<usize>,
@@ -539,6 +612,7 @@ impl Default for App {
       playlist_picker_index: 0,
       show_library: true,
       show_playlists: true,
+      sidebar_minimized: false,
       hidden_library_sections: vec![],
       config_theme: Theme::default(),
       theme_preset_index: None,
@@ -2076,14 +2150,26 @@ impl App {
         self.user_config.behavior.enable_remove_from_playlist =
           !self.user_config.behavior.enable_remove_from_playlist;
       }
+      // Max display length: cycles through off(0), 15, 20, 25, 30, 40, 50.
+      17 => {
+        self.user_config.behavior.max_display_length = match self.user_config.behavior.max_display_length {
+          0 => 15,
+          15 => 20,
+          20 => 25,
+          25 => 30,
+          30 => 40,
+          40 => 50,
+          _ => 0,
+        };
+      }
       // Clear the on-disk playlist/library caches. Danger action: the last
       // settings row is styled red, so this stays the last arm too.
-      17 => {
+      18 => {
         self.dispatch(IoEvent::CleanCache);
       }
       _ => {}
     }
-    if index <= 17 {
+    if index <= 18 {
       self.dispatch(IoEvent::SaveState);
     }
   }

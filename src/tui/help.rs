@@ -158,6 +158,15 @@ pub fn get_help_docs(key_bindings: &KeyBindings) -> Vec<Vec<String>> {
       String::from("General"),
     ],
     vec![
+      String::from("Collapse/expand the sidebar"),
+      key_bindings
+        .toggle_sidebar
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "none".to_string()),
+      String::from("General"),
+    ],
+    vec![
       String::from("Enter hover mode"),
       String::from("<Esc>"),
       String::from("Selected block"),

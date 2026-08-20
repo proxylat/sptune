@@ -260,6 +260,7 @@ of the app. Beware that this comes at a CPU cost!",
   let mut restored_theme_index = None;
   let mut restored_show_library = None;
   let mut restored_show_playlists = None;
+  let mut restored_sidebar_minimized = None;
   if let Some(saved) = SavedState::load() {
     if let Some(enabled) = saved.mouse_enabled {
       user_config.behavior.enable_mouse = enabled;
@@ -308,6 +309,7 @@ of the app. Beware that this comes at a CPU cost!",
     }
     restored_show_library = saved.show_library;
     restored_show_playlists = saved.show_playlists;
+    restored_sidebar_minimized = saved.sidebar_minimized;
   }
 
   // Initialise app state
@@ -323,6 +325,9 @@ of the app. Beware that this comes at a CPU cost!",
   }
   if let Some(show) = restored_show_playlists {
     app_guard.show_playlists = show;
+  }
+  if let Some(minimized) = restored_sidebar_minimized {
+    app_guard.sidebar_minimized = minimized;
   }
   if let Some(saved) = SavedState::load() {
     if let Some(custom) = saved.made_for_you_custom {
@@ -407,6 +412,10 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
   }
 
   let mut terminal = Terminal::new(backend)?;
+  // Clear the alternate screen so no scroll offset from the regular screen
+  // survives into the TUI (a leftover offset hides the top rows of the app,
+  // which is where the figlet banner starts).
+  terminal.clear()?;
   terminal.hide_cursor()?;
 
   let events = event::Events::new(user_config.behavior.tick_rate_milliseconds);
@@ -549,11 +558,9 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
       terminal.hide_cursor()?;
     }
 
-    let cursor_space_y = app.size.height > tui::layout::SMALL_TERMINAL_HEIGHT;
-
     // Put the cursor back inside the search box (replicated header geometry,
     // matching what the drawer renders, so it tracks layout changes).
-    let margin = if cursor_space_y { 1 } else { 0 };
+    let margin = tui::layout::get_main_layout_margin(&app);
     let input_box = ratatui::layout::Rect::new(
       margin,
       margin,
