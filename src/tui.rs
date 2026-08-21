@@ -892,8 +892,11 @@ fn draw_request_log(f: &mut Frame, app: &App, layout_chunk: Rect) {
     None => "Load-more: idle".to_string(),
   };
   let throttle_text = format!(
-    "Tokens: {:.1} / 5\n{}\n{}",
-    app.api_tokens, backoff_line, load_more_line
+    "Tokens: {:.1} / {}\n{}\n{}",
+    app.api_tokens,
+    crate::backend::API_BURST as u32,
+    backoff_line,
+    load_more_line
   );
   f.render_widget(
     Paragraph::new(throttle_text).style(inactive),
