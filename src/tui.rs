@@ -253,6 +253,30 @@ fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'a>> {
       "Animations: {}",
       on_off(app.user_config.behavior.enable_animations)
     ),
+    format!(
+      "Spotify auto launch: {}",
+      on_off(app.user_config.spotify.auto_launch)
+    ),
+    format!(
+      "Spotify chromium flags: {}",
+      on_off(app.user_config.spotify.use_chromium_flags)
+    ),
+    format!(
+      "Spotify suspend children: {}",
+      on_off(app.user_config.spotify.suspend_children)
+    ),
+    format!(
+      "Spotify trim WorkingSet: {}",
+      on_off(app.user_config.spotify.trim_working_set)
+    ),
+    format!(
+      "Spotify memory limit: {}",
+      if app.user_config.spotify.memory_limit_mb == 0 {
+        "off".to_string()
+      } else {
+        format!("{} MB", app.user_config.spotify.memory_limit_mb)
+      }
+    ),
     // Danger action: styled red and always last in the block.
     match app.user_config.keys.clear_cache {
       Some(key) => format!("Clear cache ({})", key),

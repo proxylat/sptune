@@ -330,6 +330,21 @@ of the app. Beware that this comes at a CPU cost!",
     restored_sidebar_minimized = saved.sidebar_minimized;
     restored_sidebar_width = saved.sidebar_width;
     restored_library_height = saved.library_height;
+    if let Some(v) = saved.spotify_auto_launch {
+      user_config.spotify.auto_launch = v;
+    }
+    if let Some(v) = saved.spotify_use_flags {
+      user_config.spotify.use_chromium_flags = v;
+    }
+    if let Some(v) = saved.spotify_suspend {
+      user_config.spotify.suspend_children = v;
+    }
+    if let Some(v) = saved.spotify_trim_ws {
+      user_config.spotify.trim_working_set = v;
+    }
+    if let Some(v) = saved.spotify_mem_limit {
+      user_config.spotify.memory_limit_mb = v;
+    }
   }
 
   // Initialise app state
@@ -364,7 +379,12 @@ of the app. Beware that this comes at a CPU cost!",
     }
   }
   app_guard.clamp_library_selection();
+  let should_auto_launch = app_guard.user_config.spotify.auto_launch;
+  let spotify_cfg = app_guard.user_config.spotify.clone();
   drop(app_guard);
+  if should_auto_launch {
+    let _ = crate::platform::spotify::launch(&spotify_cfg);
+  }
 
   // Work with the cli (not really async)
   if let Some(cmd) = matches.subcommand_name() {
