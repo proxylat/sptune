@@ -262,6 +262,7 @@ of the app. Beware that this comes at a CPU cost!",
   let mut restored_show_playlists = None;
   let mut restored_sidebar_minimized = None;
   let mut restored_sidebar_width = None;
+  let mut restored_library_height = None;
   let mut restored_dev_view = None;
   if let Some(saved) = SavedState::load() {
     if let Some(enabled) = saved.mouse_enabled {
@@ -325,6 +326,7 @@ of the app. Beware that this comes at a CPU cost!",
     restored_show_playlists = saved.show_playlists;
     restored_sidebar_minimized = saved.sidebar_minimized;
     restored_sidebar_width = saved.sidebar_width;
+    restored_library_height = saved.library_height;
   }
 
   // Initialise app state
@@ -346,6 +348,9 @@ of the app. Beware that this comes at a CPU cost!",
   }
   if let Some(w) = restored_sidebar_width {
     app_guard.sidebar_width_override = Some(w);
+  }
+  if let Some(h) = restored_library_height {
+    app_guard.library_height_override = Some(h);
   }
   if let Some(dev) = restored_dev_view {
     app_guard.dev_view = dev;

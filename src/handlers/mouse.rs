@@ -29,6 +29,7 @@ thread_local! {
   // a value while dragging.
   static PLAYBAR_DRAG: std::cell::RefCell<Option<PlaybarDrag>> = const { std::cell::RefCell::new(None) };
   static SIDEBAR_DRAG: std::cell::RefCell<Option<SidebarDrag>> = const { std::cell::RefCell::new(None) };
+  static LIBRARY_DRAG: std::cell::RefCell<Option<SidebarDrag>> = const { std::cell::RefCell::new(None) };
 }
 
 // Active scrollbar thumb drag state (thread-local, see SCROLLBAR_DRAG).
@@ -71,6 +72,9 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
       if x >= app.size.width || y >= app.size.height {
         return;
       }
+      if handle_library_drag_down(x, y, app) {
+        return;
+      }
       if handle_sidebar_drag_down(x, y, app) {
         return;
       }
@@ -84,6 +88,9 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
       }
     }
     MouseEventKind::Drag(MouseButton::Left) => {
+      if handle_library_drag(mouse.row, app) {
+        return;
+      }
       if handle_sidebar_drag(mouse.column, app) {
         return;
       }
@@ -124,7 +131,14 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
       handle_hover(mouse.column, mouse.row, app);
     }
     MouseEventKind::Up(MouseButton::Left) => {
+      let mut need_save = false;
       if SIDEBAR_DRAG.with(|d| d.borrow_mut().take().is_some()) {
+        need_save = true;
+      }
+      if LIBRARY_DRAG.with(|d| d.borrow_mut().take().is_some()) {
+        need_save = true;
+      }
+      if need_save {
         app.dispatch(IoEvent::SaveState);
       }
       SCROLLBAR_DRAG.with(|d| *d.borrow_mut() = None);
@@ -549,6 +563,9 @@ fn handle_scrollbar_drag(y: u16, app: &mut App) {
 }
 
 fn handle_sidebar_drag_down(x: u16, y: u16, app: &mut App) -> bool {
+  if !app.user_config.behavior.enable_animations {
+    return false;
+  }
   let Some((routes, _, _)) = main_layout(app) else {
     return false;
   };
@@ -573,6 +590,9 @@ fn handle_sidebar_drag_down(x: u16, y: u16, app: &mut App) -> bool {
 }
 
 fn handle_sidebar_drag(x: u16, app: &mut App) -> bool {
+  if !app.user_config.behavior.enable_animations {
+    return false;
+  }
   let drag = SIDEBAR_DRAG.with(|d| d.borrow().clone());
   let Some(drag) = drag else {
     return false;
@@ -598,6 +618,48 @@ fn handle_sidebar_drag(x: u16, app: &mut App) -> bool {
   }
   new_w = new_w.clamp(layout::SIDEBAR_MIN_WIDTH, routes.width / 2);
   app.sidebar_width_override = Some(new_w);
+  true
+}
+
+fn handle_library_drag_down(x: u16, y: u16, app: &mut App) -> bool {
+  if !app.user_config.behavior.enable_animations {
+    return false;
+  }
+  let Some((routes, _, _)) = main_layout(app) else {
+    return false;
+  };
+  let (left, _) = layout::sidebar_content_split(app, routes);
+  if x < left.x || x >= left.x + left.width {
+    return false;
+  }
+  let handle = layout::library_handle_rect(app, left);
+  if y == handle.y && x >= handle.x && x < handle.x + handle.width {
+    LIBRARY_DRAG.with(|d| {
+      *d.borrow_mut() = Some(SidebarDrag {
+        start_x: y,
+        start_width: handle.y,
+      })
+    });
+    return true;
+  }
+  false
+}
+
+fn handle_library_drag(y: u16, app: &mut App) -> bool {
+  if !app.user_config.behavior.enable_animations {
+    return false;
+  }
+  let drag = LIBRARY_DRAG.with(|d| d.borrow().clone());
+  let Some(drag) = drag else {
+    return false;
+  };
+  let Some((routes, _, _)) = main_layout(app) else {
+    return false;
+  };
+  let (left, _) = layout::sidebar_content_split(app, routes);
+  let delta = y as i16 - drag.start_x as i16;
+  let new_h = (drag.start_width as i16 + delta).clamp(4, left.height.saturating_sub(4) as i16) as u16;
+  app.library_height_override = Some(new_h);
   true
 }
 
@@ -837,7 +899,10 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
 
   // Transport buttons (shuffle, prev, play/pause, next, repeat)
   // dead-centered on the first inner row, just above the music bar.
-  let controls = build_playbar_controls(current_playback_context.is_playing);
+  let controls = build_playbar_controls(
+    current_playback_context.is_playing,
+    app.smart_shuffle,
+  );
   if y == playbar.y + 1 {
     let mut btn_x = playbar_controls_x(playbar, &controls);
     for (kind, text) in &controls {
@@ -1056,7 +1121,7 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
             }
             _ => {}
           }
-          return true;
+          return false;
         }
         // Search zone: focus the search box on playlist pages.
         if matches!(
@@ -1067,14 +1132,14 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           app.set_current_route_state(Some(ActiveBlock::TrackTable), None);
           return false;
         }
-        return true;
+        return false;
       }
       let has_more = app.track_table_has_more();
       let count = app.track_table.tracks.len() + usize::from(has_more);
       // The view is wheel-scrolled by scroll_offset (selection stays put), so
       // the clicked row must map through the RENDERED offset, not the
       // selection-derived one.
-      let viewport = chunk.height.saturating_sub(5) as usize;
+      let viewport = chunk.height.saturating_sub(3) as usize;
       let offset = app
         .track_table
         .scroll_offset
@@ -1255,7 +1320,7 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
     RouteId::AlbumList => {
       if y == chunk.y {
         app.dispatch(IoEvent::RefreshSavedAlbums);
-        return true;
+        return false;
       }
       let count = app
         .library
@@ -1280,7 +1345,7 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
     RouteId::Podcasts => {
       if y == chunk.y {
         app.dispatch(IoEvent::RefreshSavedShows);
-        return true;
+        return false;
       }
       let count = app
         .library
@@ -1662,7 +1727,7 @@ fn table_row_index(y: u16, chunk: Rect, count: usize, selected: usize) -> Option
   if count == 0 || y < chunk.y + 2 || y >= chunk.y + chunk.height {
     return None;
   }
-  let visible = chunk.height.saturating_sub(5) as usize;
+  let visible = chunk.height.saturating_sub(3) as usize;
   // The drawn window is items[selected - visible + 1 ..= selected] (see
   // draw_table), so clicks must map back through the same +1 offset. With the
   // selection on the load-more row, the last visible row maps to index == count.
@@ -1902,14 +1967,14 @@ mod tests {
 
   #[test]
   fn keyboard_down_keeps_selection_visible() {
-    // viewport = 34 (200x50, 5-row header): selection below the window must
+    // viewport = 36 (200x50, 3-row header): selection below the window must
     // push the view so the selection stays on the bottom row.
     let mut app = track_table_app(40);
     app.track_table.selected_index = 35;
     app.track_table.scroll_offset = 0;
     handle_app(Key::Down, &mut app);
     assert_eq!(app.track_table.selected_index, 36);
-    assert_eq!(app.track_table.scroll_offset, 3);
+    assert_eq!(app.track_table.scroll_offset, 1);
   }
 
   #[test]
@@ -1991,13 +2056,13 @@ mod tests {
   #[test]
   fn scrollbar_drag_moves_selection() {
     let mut app = track_table_app(40);
-    // size 200x50: right=(41,6,158,39), track_h=37, viewport=34, count=40,
-    // max offset 6. TrackTable drags move the VIEW offset (website-style):
+    // size 200x50: right=(41,6,158,39), track_h=37, viewport=36, count=40,
+    // max offset 4. TrackTable drags move the VIEW offset (website-style):
     // the thumb reaches the end of the track, selection stays put.
     // Press on the thumb (top = right.y+1 = 7), then drag down to the bottom.
     handle_mouse(click_event(197, 7), &mut app);
     handle_mouse(drag_event(197, 43), &mut app);
-    assert_eq!(app.track_table.scroll_offset, 6);
+    assert_eq!(app.track_table.scroll_offset, 4);
     assert_eq!(app.track_table.selected_index, 0);
     // Drag back to the top of the track.
     handle_mouse(drag_event(197, 2), &mut app);
@@ -2022,7 +2087,7 @@ mod tests {
     // big lists): the drag arms anyway and the thumb jumps under the cursor.
     handle_mouse(click_event(197, 43), &mut app);
     handle_mouse(drag_event(197, 43), &mut app);
-    assert_eq!(app.track_table.scroll_offset, 6);
+    assert_eq!(app.track_table.scroll_offset, 4);
     handle_mouse(up_event(197, 43), &mut app);
   }
 
@@ -2140,11 +2205,11 @@ mod tests {
       previous: None,
       total: 505,
     });
-    // right=(41,6,158,39), track rows 7..44, viewport 34, count 59 → max
-    // offset 25. Press the thumb at the top, drag to the bottom.
+    // right=(41,6,158,39), track rows 7..44, viewport 36, count 59 → max
+    // offset 23. Press the thumb at the top, drag to the bottom.
     handle_mouse(click_event(197, 7), &mut app);
     handle_mouse(drag_event(197, 44), &mut app);
-    assert_eq!(app.track_table.scroll_offset, 25);
+    assert_eq!(app.track_table.scroll_offset, 23);
     // And back to the top.
     handle_mouse(drag_event(197, 7), &mut app);
     assert_eq!(app.track_table.scroll_offset, 0);
@@ -2425,18 +2490,18 @@ mod tests {
   #[test]
   fn click_selects_row_under_cursor_with_scrolled_view() {
     let mut app = track_table_app(40);
-    // Wheel-scroll the view all the way down (viewport 34 → max offset 6).
+    // Wheel-scroll the view all the way down (viewport 36 → max offset 4).
     for _ in 0..10 {
       wheel_over_track_table(false, &mut app);
     }
-    assert_eq!(app.track_table.scroll_offset, 6);
+    assert_eq!(app.track_table.scroll_offset, 4);
     // size 200x50: right=(41,6,158,39); first data row is chunk.y+2 = 8.
-    // Clicking row 10 with offset 6 → index 6 + (10-8) = 8.
+    // Clicking row 10 with offset 4 → index 4 + (10-8) = 6.
     handle_mouse(click_event(150, 10), &mut app);
-    assert_eq!(app.track_table.selected_index, 8);
+    assert_eq!(app.track_table.selected_index, 6);
     // Click the row right below the header (row 8) → index == offset.
     handle_mouse(click_event(150, 8), &mut app);
-    assert_eq!(app.track_table.selected_index, 6);
+    assert_eq!(app.track_table.selected_index, 4);
   }
 
   #[test]
@@ -2579,7 +2644,7 @@ mod tests {
     // it must fetch the next page, NOT fire Enter and play the song behind it.
     let (mut app, rx) = recently_played_app(40, true);
     app.recently_played.index = 40;
-    handle_mouse(click_event(150, 41), &mut app);
+    handle_mouse(click_event(150, 43), &mut app);
     assert_eq!(app.recently_played.index, 40);
     let dispatched: Vec<IoEvent> = rx.try_iter().collect();
     assert_eq!(dispatched, vec![IoEvent::GetMoreRecentlyPlayed(None)]);
@@ -2895,7 +2960,7 @@ mod tests {
     // stay correct no matter the glyph widths. Click the play/pause glyph's
     // midpoint: it dispatches (is_loading turns on).
     let ctx = app.current_playback_context.as_ref().unwrap();
-    let controls = build_playbar_controls(ctx.is_playing);
+    let controls = build_playbar_controls(ctx.is_playing, false);
     let (_, playbar, _) = main_layout(&app).unwrap();
     let mut btn_x = playbar_controls_x(playbar, &controls);
     let mut play_x = None;

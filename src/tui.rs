@@ -353,7 +353,7 @@ pub fn draw_input_and_help_box(f: &mut Frame, app: &App, layout_chunk: Rect) {
   // reserve 3 cells for the clear button when there is input.
   let input_string = ellipsize(
     &input_string,
-    chunks[1].width.saturating_sub(if app.input.is_empty() { 2 } else { 5 }) as usize,
+    (chunks[1].width as usize / 2).saturating_sub(if app.input.is_empty() { 1 } else { 3 }),
   );
   let lines = Text::from(input_string);
   let input = Paragraph::new(lines).block(
@@ -443,7 +443,7 @@ pub fn draw_routes(f: &mut Frame, app: &App, layout_chunk: Rect) {
   let (sidebar, content_rect) = layout::sidebar_content_split(app, layout_chunk);
 
   draw_user_block(f, app, sidebar);
-  if !app.sidebar_minimized {
+  if !app.sidebar_minimized && app.user_config.behavior.enable_animations {
     let handle = layout::sidebar_handle_rect(app, layout_chunk);
     let style = Style::default().fg(app.user_config.theme.inactive);
     let (lib_rect, pl_rect) = layout::library_playlists_split(app, sidebar);
@@ -453,6 +453,14 @@ pub fn draw_routes(f: &mut Frame, app: &App, layout_chunk: Rect) {
           cell.set_symbol("│");
           cell.set_style(style);
         }
+      }
+    }
+    // Horizontal library/playlists divider handle
+    let lib_handle = layout::library_handle_rect(app, sidebar);
+    for x in lib_handle.x + 1..lib_handle.x + lib_handle.width.saturating_sub(1) {
+      if let Some(cell) = f.buffer_mut().cell_mut((x, lib_handle.y)) {
+        cell.set_symbol("─");
+        cell.set_style(style);
       }
     }
   }
@@ -1948,7 +1956,7 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
       // dead-centered on the first inner row, just above the music bar. The
       // song name shares this row, left of the buttons (truncated so it
       // never overlaps).
-      let controls = build_playbar_controls(current_playback_context.is_playing);
+      let controls = build_playbar_controls(current_playback_context.is_playing, app.smart_shuffle);
       let repeat_text = repeat_label(current_playback_context.repeat_state);
       let controls_row = layout::playbar_controls_row(layout_chunk);
       let controls_start = layout::playbar_controls_x(layout_chunk, &controls);

@@ -152,7 +152,7 @@ pub fn song_table_viewport(app: &App) -> usize {
     .saturating_sub(header_height(app))
     .saturating_sub(PLAYBAR_HEIGHT)
     .saturating_sub(2 * margin)
-    .saturating_sub(5) as usize
+    .saturating_sub(3) as usize
 }
 
 // Header-row column zones (mirror of draw_input_and_help_box's split):
@@ -474,6 +474,16 @@ pub fn sidebar_handle_rect(app: &App, chunk: Rect) -> Rect {
 // never needs a scrollbar; playlists take the rest. The cap keeps playlists
 // visible when the library itself overflows.
 pub fn library_playlists_split(app: &App, chunk: Rect) -> (Rect, Rect) {
+  if app.user_config.behavior.enable_animations {
+    if let Some(h) = app.library_height_override {
+      let lib_h = h.clamp(4, chunk.height.saturating_sub(4));
+      let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(lib_h), Constraint::Min(1)].as_ref())
+        .split(chunk);
+      return (chunks[0], chunks[1]);
+    }
+  }
   let library_len = visible_library_options(&app.hidden_library_sections).len() + 2;
   let cap = ((chunk.height * 2 / 5) as usize).max(4);
   let lib_h = library_len.min(cap) as u16;
@@ -482,6 +492,11 @@ pub fn library_playlists_split(app: &App, chunk: Rect) -> (Rect, Rect) {
     .constraints([Constraint::Length(lib_h), Constraint::Min(1)].as_ref())
     .split(chunk);
   (chunks[0], chunks[1])
+}
+
+pub fn library_handle_rect(app: &App, chunk: Rect) -> Rect {
+  let (lib, _) = library_playlists_split(app, chunk);
+  Rect::new(chunk.x, lib.y + lib.height.saturating_sub(1), chunk.width, 1)
 }
 
 /// Facts about a scrollable list: how many rows it scrolls through, how many
@@ -559,7 +574,7 @@ pub fn list_scroll(app: &App, block: ActiveBlock, rect: Rect) -> Option<ListScro
     ActiveBlock::TrackTable => ListScroll {
       // The load-more row is part of the drawn table, so it scrolls too.
       count: app.track_table.tracks.len() + usize::from(app.track_table_has_more()),
-      viewport: rect.height.saturating_sub(5) as usize,
+      viewport: rect.height.saturating_sub(3) as usize,
       view_mode: true,
       index: 0,
       offset: app.track_table.scroll_offset,
@@ -645,9 +660,17 @@ pub fn playbar_controls_x(playbar: Rect, controls: &[(PlaybarButton, String)]) -
 // separate span rendered after the group (see repeat_label) so the button
 // group keeps a constant width. All strings are fixed-width so the group
 // never re-centers between states; the centering math uses unicode widths.
-pub fn build_playbar_controls(is_playing: bool) -> Vec<(PlaybarButton, String)> {
+// Smart shuffle shows "Smart ⇄" in the shuffle slot.
+pub fn build_playbar_controls(is_playing: bool, smart_shuffle: bool) -> Vec<(PlaybarButton, String)> {
   vec![
-    (PlaybarButton::Shuffle, "⇄".into()),
+    (
+      PlaybarButton::Shuffle,
+      if smart_shuffle {
+        "Smart ⇄".into()
+      } else {
+        "⇄".into()
+      },
+    ),
     (PlaybarButton::Prev, "⏮".into()),
     (
       PlaybarButton::PlayPause,
