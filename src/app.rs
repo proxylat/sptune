@@ -424,6 +424,7 @@ pub struct App {
   pub hovered_library_index: Option<usize>,
   pub hovered_playlist_index: Option<usize>,
   pub hovered_list_index: Option<usize>,
+  pub smart_shuffle: bool,
   pub followed_artist_ids_set: HashSet<String>,
   pub saved_album_ids_set: HashSet<String>,
   pub saved_show_ids_set: HashSet<String>,
@@ -513,6 +514,7 @@ pub struct App {
   pub show_playlists: bool,
   pub sidebar_minimized: bool,
   pub sidebar_width_override: Option<u16>,
+  pub library_height_override: Option<u16>,
   pub hidden_library_sections: Vec<String>,
   pub config_theme: Theme,
   pub theme_preset_index: Option<usize>,
@@ -630,9 +632,11 @@ impl Default for App {
       show_playlists: true,
       sidebar_minimized: false,
       sidebar_width_override: None,
+      library_height_override: None,
       hovered_library_index: None,
       hovered_playlist_index: None,
       hovered_list_index: None,
+      smart_shuffle: false,
       hidden_library_sections: vec![],
       config_theme: Theme::default(),
       theme_preset_index: None,
@@ -1317,7 +1321,24 @@ impl App {
 
   pub fn shuffle(&mut self) {
     if let Some(context) = &self.current_playback_context.clone() {
-      self.dispatch(IoEvent::Shuffle(context.shuffle_state));
+      // Smart shuffle is a 3-state cycle: Off -> On -> Smart -> Off
+      if self.smart_shuffle {
+        // Smart -> Off: disable shuffle and smart
+        self.smart_shuffle = false;
+        self.dispatch(IoEvent::Shuffle(true));
+      } else if context.shuffle_state {
+        // On -> Smart: keep shuffle on, enable smart recommendations
+        self.smart_shuffle = true;
+        // Fetch recommendations for current track as smart queue
+        if let Some(PlayableItem::Track(track)) = &context.item {
+          if let Some(id) = &track.id {
+            self.dispatch(IoEvent::GetRecommendationsForTrackId(id.to_string(), None));
+          }
+        }
+      } else {
+        // Off -> On
+        self.dispatch(IoEvent::Shuffle(false));
+      }
     };
   }
 

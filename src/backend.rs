@@ -461,6 +461,8 @@ pub struct SavedState {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub sidebar_width: Option<u16>,
   #[serde(skip_serializing_if = "Option::is_none")]
+  pub library_height: Option<u16>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub volume_ramp_bar: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub black_background: Option<bool>,
@@ -563,6 +565,9 @@ impl SavedState {
       }
       if let Some(value) = &self.sidebar_width {
         obj.insert("sidebar_width".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.library_height {
+        obj.insert("library_height".to_string(), serde_json::json!(value));
       }
       if let Some(value) = &self.volume_ramp_bar {
         obj.insert("volume_ramp_bar".to_string(), serde_json::json!(value));
@@ -1129,6 +1134,7 @@ impl<'a> Network<'a> {
       show_playlists: None,
       sidebar_minimized: None,
       sidebar_width: None,
+      library_height: None,
       volume_ramp_bar: None,
       black_background: None,
       show_album_column: None,
@@ -1170,6 +1176,7 @@ impl<'a> Network<'a> {
       show_playlists: Some(app.show_playlists),
       sidebar_minimized: Some(app.sidebar_minimized),
       sidebar_width: app.sidebar_width_override,
+      library_height: app.library_height_override,
       volume_ramp_bar: Some(app.user_config.behavior.volume_ramp_bar),
       black_background: Some(app.user_config.theme.background == Color::Rgb(0, 0, 0)),
       show_album_column: Some(app.user_config.behavior.show_album_column),
