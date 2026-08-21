@@ -459,6 +459,8 @@ pub struct SavedState {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub sidebar_minimized: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
+  pub sidebar_width: Option<u16>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub volume_ramp_bar: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub black_background: Option<bool>,
@@ -472,6 +474,14 @@ pub struct SavedState {
   pub show_date_added_column: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub enable_add_to_playlist: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub enable_remove_from_playlist: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub max_display_length: Option<u16>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub dev_view: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub enable_animations: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub show_liked_icon: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -551,6 +561,9 @@ impl SavedState {
       if let Some(value) = &self.sidebar_minimized {
         obj.insert("sidebar_minimized".to_string(), serde_json::json!(value));
       }
+      if let Some(value) = &self.sidebar_width {
+        obj.insert("sidebar_width".to_string(), serde_json::json!(value));
+      }
       if let Some(value) = &self.volume_ramp_bar {
         obj.insert("volume_ramp_bar".to_string(), serde_json::json!(value));
       }
@@ -571,6 +584,21 @@ impl SavedState {
           "show_date_added_column".to_string(),
           serde_json::json!(value),
         );
+      }
+      if let Some(value) = &self.enable_remove_from_playlist {
+        obj.insert(
+          "enable_remove_from_playlist".to_string(),
+          serde_json::json!(value),
+        );
+      }
+      if let Some(value) = &self.max_display_length {
+        obj.insert("max_display_length".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.dev_view {
+        obj.insert("dev_view".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.enable_animations {
+        obj.insert("enable_animations".to_string(), serde_json::json!(value));
       }
       if let Some(value) = &self.made_for_you_custom {
         obj.insert("made_for_you_custom".to_string(), serde_json::json!(value));
@@ -1100,6 +1128,7 @@ impl<'a> Network<'a> {
       show_library: None,
       show_playlists: None,
       sidebar_minimized: None,
+      sidebar_width: None,
       volume_ramp_bar: None,
       black_background: None,
       show_album_column: None,
@@ -1109,6 +1138,10 @@ impl<'a> Network<'a> {
       resume_track: None,
       restore_settings: None,
       enable_add_to_playlist: None,
+      enable_remove_from_playlist: None,
+      max_display_length: None,
+      dev_view: None,
+      enable_animations: None,
       show_liked_icon: None,
       made_for_you_custom: None,
     }
@@ -1136,6 +1169,7 @@ impl<'a> Network<'a> {
       show_library: Some(app.show_library),
       show_playlists: Some(app.show_playlists),
       sidebar_minimized: Some(app.sidebar_minimized),
+      sidebar_width: app.sidebar_width_override,
       volume_ramp_bar: Some(app.user_config.behavior.volume_ramp_bar),
       black_background: Some(app.user_config.theme.background == Color::Rgb(0, 0, 0)),
       show_album_column: Some(app.user_config.behavior.show_album_column),
@@ -1143,6 +1177,10 @@ impl<'a> Network<'a> {
       show_length_column: Some(app.user_config.behavior.show_length_column),
       show_date_added_column: Some(app.user_config.behavior.show_date_added_column),
       enable_add_to_playlist: Some(app.user_config.behavior.enable_add_to_playlist),
+      enable_remove_from_playlist: Some(app.user_config.behavior.enable_remove_from_playlist),
+      max_display_length: Some(app.user_config.behavior.max_display_length),
+      dev_view: Some(app.dev_view),
+      enable_animations: Some(app.user_config.behavior.enable_animations),
       show_liked_icon: Some(app.user_config.behavior.show_liked_icon),
       made_for_you_custom: Some(app.made_for_you_custom.clone()),
     }

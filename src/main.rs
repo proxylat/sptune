@@ -261,6 +261,8 @@ of the app. Beware that this comes at a CPU cost!",
   let mut restored_show_library = None;
   let mut restored_show_playlists = None;
   let mut restored_sidebar_minimized = None;
+  let mut restored_sidebar_width = None;
+  let mut restored_dev_view = None;
   if let Some(saved) = SavedState::load() {
     if let Some(enabled) = saved.mouse_enabled {
       user_config.behavior.enable_mouse = enabled;
@@ -304,12 +306,25 @@ of the app. Beware that this comes at a CPU cost!",
     if let Some(enable) = saved.enable_add_to_playlist {
       user_config.behavior.enable_add_to_playlist = enable;
     }
+    if let Some(enable) = saved.enable_remove_from_playlist {
+      user_config.behavior.enable_remove_from_playlist = enable;
+    }
+    if let Some(max_len) = saved.max_display_length {
+      user_config.behavior.max_display_length = max_len;
+    }
+    if let Some(dev_view) = saved.dev_view {
+      restored_dev_view = Some(dev_view);
+    }
+    if let Some(enable_animations) = saved.enable_animations {
+      user_config.behavior.enable_animations = enable_animations;
+    }
     if let Some(show_liked_icon) = saved.show_liked_icon {
       user_config.behavior.show_liked_icon = show_liked_icon;
     }
     restored_show_library = saved.show_library;
     restored_show_playlists = saved.show_playlists;
     restored_sidebar_minimized = saved.sidebar_minimized;
+    restored_sidebar_width = saved.sidebar_width;
   }
 
   // Initialise app state
@@ -328,6 +343,12 @@ of the app. Beware that this comes at a CPU cost!",
   }
   if let Some(minimized) = restored_sidebar_minimized {
     app_guard.sidebar_minimized = minimized;
+  }
+  if let Some(w) = restored_sidebar_width {
+    app_guard.sidebar_width_override = Some(w);
+  }
+  if let Some(dev) = restored_dev_view {
+    app_guard.dev_view = dev;
   }
   if let Some(saved) = SavedState::load() {
     if let Some(custom) = saved.made_for_you_custom {

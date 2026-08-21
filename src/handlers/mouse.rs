@@ -28,6 +28,7 @@ thread_local! {
   // Active playbar scrub drag: music or volume bar, mapping cursor x back to
   // a value while dragging.
   static PLAYBAR_DRAG: std::cell::RefCell<Option<PlaybarDrag>> = const { std::cell::RefCell::new(None) };
+  static SIDEBAR_DRAG: std::cell::RefCell<Option<SidebarDrag>> = const { std::cell::RefCell::new(None) };
 }
 
 // Active scrollbar thumb drag state (thread-local, see SCROLLBAR_DRAG).
@@ -40,10 +41,16 @@ struct ScrollbarDrag {
   grab_offset: usize,
 }
 
-// Active music/volume bar scrub (thread-local, see PLAYBAR_DRAG). `dragged`
-// becomes true after the first Drag tick, so a plain click commits nothing.
 #[derive(Clone)]
-struct PlaybarDrag {
+struct SidebarDrag {
+  start_x: u16,
+  start_width: u16,
+}
+
+ // Active music/volume bar scrub (thread-local, see PLAYBAR_DRAG). `dragged`
+ // becomes true after the first Drag tick, so a plain click commits nothing.
+ #[derive(Clone)]
+ struct PlaybarDrag {
   music: bool,
   bar_x: u16,
   bar_w: u16,
@@ -64,6 +71,9 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
       if x >= app.size.width || y >= app.size.height {
         return;
       }
+      if handle_sidebar_drag_down(x, y, app) {
+        return;
+      }
       // Press on the scrollbar thumb starts a drag
       if handle_scrollbar_down(x, y, app) {
         return;
@@ -74,6 +84,9 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
       }
     }
     MouseEventKind::Drag(MouseButton::Left) => {
+      if handle_sidebar_drag(mouse.column, app) {
+        return;
+      }
       PLAYBAR_DRAG.with(|d| {
         if let Some(drag) = d.borrow_mut().as_mut() {
           drag.dragged = true;
@@ -107,7 +120,13 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
       });
       handle_scrollbar_drag(mouse.row, app);
     }
+    MouseEventKind::Moved => {
+      handle_hover(mouse.column, mouse.row, app);
+    }
     MouseEventKind::Up(MouseButton::Left) => {
+      if SIDEBAR_DRAG.with(|d| d.borrow_mut().take().is_some()) {
+        app.dispatch(IoEvent::SaveState);
+      }
       SCROLLBAR_DRAG.with(|d| *d.borrow_mut() = None);
       // Commit a scrubbed seek/volume once on release (immediate jump on
       // press already dispatched; only a real drag adds the final commit).
@@ -526,6 +545,187 @@ fn handle_scrollbar_drag(y: u16, app: &mut App) {
       drag.block,
       (offset + drag.viewport).min(drag.count - 1),
     );
+  }
+}
+
+fn handle_sidebar_drag_down(x: u16, y: u16, app: &mut App) -> bool {
+  let Some((routes, _, _)) = main_layout(app) else {
+    return false;
+  };
+  let handle = layout::sidebar_handle_rect(app, routes);
+  // 2-col grab zone (handle + first content col) so the 1-col border is not a pixel hunt;
+  // we avoid handle-1 which is the scrollbar column (width-2)
+  if (x == handle.x || x == handle.x + 1) && y >= handle.y && y < handle.y + handle.height {
+    let w = layout::sidebar_width(app, routes);
+    SIDEBAR_DRAG.with(|d| {
+      *d.borrow_mut() = Some(SidebarDrag {
+        start_x: handle.x,
+        start_width: w,
+      })
+    });
+    // Dragging from minimized should immediately expand
+    if app.sidebar_minimized {
+      app.sidebar_minimized = false;
+    }
+    return true;
+  }
+  false
+}
+
+fn handle_sidebar_drag(x: u16, app: &mut App) -> bool {
+  let drag = SIDEBAR_DRAG.with(|d| d.borrow().clone());
+  let Some(drag) = drag else {
+    return false;
+  };
+  let Some((routes, _, _)) = main_layout(app) else {
+    return false;
+  };
+  let delta = x as i16 - drag.start_x as i16;
+  let mut new_w = (drag.start_width as i16 + delta).clamp(
+    6,
+    (routes.width / 2) as i16,
+  ) as u16;
+  // Snap to minimized when dragged past the minimum interactive width
+  if new_w <= 10 {
+    if !app.sidebar_minimized {
+      app.sidebar_minimized = true;
+      // keep the last expanded width for restore on next expand
+    }
+    return true;
+  }
+  if app.sidebar_minimized && new_w > 10 {
+    app.sidebar_minimized = false;
+  }
+  new_w = new_w.clamp(layout::SIDEBAR_MIN_WIDTH, routes.width / 2);
+  app.sidebar_width_override = Some(new_w);
+  true
+}
+
+fn handle_hover(x: u16, y: u16, app: &mut App) {
+  if !app.user_config.behavior.enable_animations {
+    app.hovered_library_index = None;
+    app.hovered_playlist_index = None;
+    app.hovered_list_index = None;
+    return;
+  }
+  let Some((routes, _, _)) = main_layout(app) else {
+    app.hovered_library_index = None;
+    app.hovered_playlist_index = None;
+    app.hovered_list_index = None;
+    return;
+  };
+  let (left, right) = layout::sidebar_content_split(app, routes);
+  // Left sidebar: Library / Playlists per-row hover
+  if x >= left.x && x < left.x + left.width {
+    app.hovered_list_index = None;
+    let (lib_rect, pl_rect) = layout::library_playlists_split(app, left);
+    if y == lib_rect.y {
+      app.hovered_library_index = None;
+      app.hovered_playlist_index = None;
+      app.set_current_route_state(None, Some(ActiveBlock::Library));
+      return;
+    }
+    if y == pl_rect.y {
+      app.hovered_library_index = None;
+      app.hovered_playlist_index = None;
+      app.set_current_route_state(None, Some(ActiveBlock::MyPlaylists));
+      return;
+    }
+    if y > lib_rect.y && y < lib_rect.y + lib_rect.height {
+      let count = visible_library_options(&app.hidden_library_sections).len();
+      if let Some(idx) = list_row_index(y, lib_rect, count, app.library.selected_index) {
+        app.hovered_library_index = Some(idx);
+        app.hovered_playlist_index = None;
+        app.set_current_route_state(None, Some(ActiveBlock::Library));
+        return;
+      }
+    }
+    if y > pl_rect.y && y < pl_rect.y + pl_rect.height {
+      let count = app.playlists.as_ref().map(|p| p.items.len()).unwrap_or(0);
+      let sel = app.selected_playlist_index.unwrap_or(0);
+      if let Some(idx) = list_row_index(y, pl_rect, count, sel) {
+        app.hovered_playlist_index = Some(idx);
+        app.hovered_library_index = None;
+        app.set_current_route_state(None, Some(ActiveBlock::MyPlaylists));
+        return;
+      }
+    }
+    app.hovered_library_index = None;
+    app.hovered_playlist_index = None;
+    return;
+  }
+  // Content area: all song tables and lists get full-row hover bg
+  app.hovered_library_index = None;
+  app.hovered_playlist_index = None;
+  if x < right.x || x >= right.x + right.width || y < right.y || y >= right.y + right.height {
+    app.hovered_list_index = None;
+    return;
+  }
+  // Route-specific hover mapping
+  let hover = match app.get_current_route().id {
+    RouteId::TrackTable | RouteId::Recommendations => {
+      let count = app.track_table.tracks.len() + usize::from(app.track_table_has_more());
+      let viewport = layout::song_table_viewport(app);
+      let offset = app.track_table.scroll_offset.min(count.saturating_sub(viewport));
+      if y < right.y + 2 {
+        None
+      } else {
+        let row = (y - (right.y + 2)) as usize;
+        let idx = offset + row;
+        if idx < count { Some(idx) } else { None }
+      }
+    }
+    RouteId::AlbumTracks => {
+      let (count, sel) = match &app.album_table_context {
+        AlbumTableContext::Simplified => app.selected_album_simplified.as_ref().map(|a| (a.tracks.items.len() + usize::from(a.tracks.items.len() < a.tracks.total as usize), a.selected_index)).unwrap_or((0,0)),
+        AlbumTableContext::Full => (app.selected_album_full.as_ref().map(|a| a.album.tracks.items.len()).unwrap_or(0), app.saved_album_tracks_index),
+      };
+      table_row_index(y, right, count, sel)
+    }
+    RouteId::Search => {
+      let (_tab_cells, list_rect) = search_layout_parts(app, right);
+      if y == list_rect.y {
+        None
+      } else {
+        let block = app.search_results.selected_block.clone();
+        let (count, sel) = search_block_state(app, block.clone());
+        let total = count + usize::from(app.search_block_has_more(&block));
+        if block == SearchResultBlock::SongSearch {
+          table_row_index(y, list_rect, total, sel)
+        } else {
+          list_row_index(y, list_rect, total, sel)
+        }
+      }
+    }
+    RouteId::Artist => {
+      let Some(artist) = &app.artist else { app.hovered_list_index = None; return; };
+      let shown = if artist.artist_selected_block == ArtistBlock::Empty { artist.artist_hovered_block } else { artist.artist_selected_block };
+      let (count, sel) = match shown {
+        ArtistBlock::TopTracks => (artist.top_tracks.len() + usize::from(artist.top_tracks_has_more), artist.selected_top_track_index),
+        ArtistBlock::Albums => (artist.albums.items.len() + usize::from((artist.albums.items.len() as u32) < artist.albums.total), artist.selected_album_index),
+        _ => (0,0),
+      };
+      let list_rect = Rect { x: right.x, y: right.y + 1, width: right.width, height: right.height.saturating_sub(1) };
+      if shown == ArtistBlock::TopTracks {
+        table_row_index(y, list_rect, count, sel)
+      } else {
+        list_row_index(y, list_rect, count, sel)
+      }
+    }
+    _ => {
+      if let Some(scroll) = layout::list_scroll(app, content_block_at(app).unwrap_or(ActiveBlock::TrackTable), right) {
+        // generic fallback via list_scroll geometry
+        let y_rel = y.saturating_sub(right.y + 1) as usize;
+        let idx = scroll.offset + y_rel;
+        if idx < scroll.count { Some(idx) } else { None }
+      } else { None }
+    }
+  };
+  app.hovered_list_index = hover;
+  if hover.is_some() {
+    if let Some(block) = content_block_at(app) {
+      app.set_current_route_state(None, Some(block));
+    }
   }
 }
 

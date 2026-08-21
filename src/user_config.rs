@@ -287,6 +287,7 @@ pub struct BehaviorConfigString {
   pub show_liked_icon: Option<bool>,
   pub enable_remove_from_playlist: Option<bool>,
   pub max_display_length: Option<u16>,
+  pub enable_animations: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -318,6 +319,7 @@ pub struct BehaviorConfig {
   pub enable_remove_from_playlist: bool,
   /// Maximum characters for name columns (song, artist, album). 0 = no limit.
   pub max_display_length: u16,
+  pub enable_animations: bool,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -400,6 +402,7 @@ impl UserConfig {
         show_liked_icon: true,
         enable_remove_from_playlist: false,
         max_display_length: 0,
+        enable_animations: true,
       },
       path_to_config: None,
     }
@@ -626,6 +629,9 @@ impl UserConfig {
     }
     if let Some(show_date) = behavior_config.show_date_added_column {
       self.behavior.show_date_added_column = show_date;
+    }
+    if let Some(enable_animations) = behavior_config.enable_animations {
+      self.behavior.enable_animations = enable_animations;
     }
 
     Ok(())
