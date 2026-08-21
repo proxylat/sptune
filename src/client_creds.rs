@@ -19,6 +19,9 @@ pub struct ClientConfig {
   pub device_id: Option<String>,
   // FIXME: port should be defined in `user_config` not in here
   pub port: Option<u16>,
+  // ponytail: temporary dual-flow flag — auto keeps legacy AuthCode working until natural re-auth rotates to PKCE; delete after PKCE cutover
+  #[serde(default)]
+  pub auth_flow: Option<String>,
 }
 
 pub struct ConfigPaths {
@@ -33,7 +36,16 @@ impl ClientConfig {
       client_secret: "".to_string(),
       device_id: None,
       port: None,
+      auth_flow: None,
     }
+  }
+
+  pub fn auth_flow(&self) -> &str {
+    self.auth_flow.as_deref().unwrap_or("auto")
+  }
+
+  pub fn is_pkce(&self) -> bool {
+    self.auth_flow() == "pkce"
   }
 
   pub fn get_redirect_uri(&self) -> String {
@@ -97,6 +109,7 @@ impl ClientConfig {
       self.client_secret = config_yml.client_secret;
       self.device_id = config_yml.device_id;
       self.port = config_yml.port;
+      self.auth_flow = config_yml.auth_flow;
 
       Ok(())
     } else {
@@ -137,6 +150,7 @@ impl ClientConfig {
         client_secret,
         device_id: None,
         port: Some(port),
+        auth_flow: None,
       };
 
       let content_yml = serde_yml::to_string(&config_yml)?;
@@ -148,6 +162,7 @@ impl ClientConfig {
       self.client_secret = config_yml.client_secret;
       self.device_id = config_yml.device_id;
       self.port = config_yml.port;
+      self.auth_flow = config_yml.auth_flow;
 
       Ok(())
     }

@@ -46,7 +46,7 @@ use std::{
   panic::{self, PanicHookInfo},
   path::PathBuf,
   sync::Arc,
-  time::SystemTime,
+  time::{Duration, SystemTime},
 };
 use tokio::sync::Mutex;
 use user_config::{theme_presets, UserConfig, UserConfigPaths};
@@ -68,6 +68,7 @@ const SCOPES: [&str; 14] = [
   "user-read-recently-played",
 ];
 
+// ponytail: temporary dual-flow — auto keeps legacy AuthCode working until natural re-auth rotates to PKCE (rspotify AuthCodePkceSpotify not in 0.16.1); after upgrade, branch here on client_config.is_pkce() and use PKCE verifier/challenge, delete AuthCode path after 2 releases.
 /// get token automatically with local webserver
 pub async fn get_token_auto(spotify: &mut AuthCodeSpotify, port: u16) -> Option<Token> {
   if let Ok(Some(token)) = spotify.read_token_cache(false).await {
@@ -235,6 +236,7 @@ of the app. Beware that this comes at a CPU cost!",
     scopes: SCOPES.iter().map(|s| s.to_string()).collect(),
     ..Default::default()
   };
+  // ponytail: auto keeps client_secret prompt for legacy installs; is_pkce() will branch to AuthCodePkceSpotify after rspotify upgrade — delete this AuthCode path after cutover
   let creds = Credentials::new(&client_config.client_id, &client_config.client_secret);
   let config = rspotify::Config {
     cache_path: config_paths.token_cache_path,
@@ -449,6 +451,7 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
   // play music on, if not send them to the device selection view
 
   let mut is_first_render = true;
+  let mut last_refresh_attempt = SystemTime::UNIX_EPOCH;
 
   loop {
     // Wait for the next event WITHOUT holding the app lock, so the network
@@ -502,8 +505,15 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
 
     let mut quit = false;
     for event in batch {
-      // Handle authentication refresh
-      if SystemTime::now() > app.spotify_token_expiry {
+      // ponytail: cooldown 60s so a failed refetch (main.rs:505 every 250ms) doesn't tight-loop; temporary dual-flow keeps AuthCode until invalid_grant rotates to PKCE
+      let now = SystemTime::now();
+      if now > app.spotify_token_expiry
+        && now
+          .duration_since(last_refresh_attempt)
+          .unwrap_or(Duration::ZERO)
+          > Duration::from_secs(60)
+      {
+        last_refresh_attempt = now;
         app.dispatch(IoEvent::RefreshAuthentication);
       }
 
