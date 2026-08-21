@@ -799,13 +799,21 @@ pub fn draw_user_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
         )
       };
       let lib_hl = (lib_active, lib_hovered);
+      let lib_selected = if app.selection_engaged
+        || app.sidebar_latched_block == Some(ActiveBlock::Library)
+        || app.get_current_route().active_block == ActiveBlock::Library
+      {
+        Some(lib_items.len().saturating_sub(1).min(app.library.selected_index))
+      } else {
+        None
+      };
       draw_sidebar_section(
         f,
         app,
         &lib_title,
         &lib_items,
         lib_hl,
-        Some(lib_items.len().saturating_sub(1).min(app.library.selected_index)),
+        lib_selected,
         app.hovered_library_index,
         lib_sec,
       );

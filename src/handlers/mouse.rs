@@ -700,16 +700,10 @@ fn handle_hover(x: u16, y: u16, app: &mut App) {
     app.hovered_list_index = None;
     if app.show_library && app.show_playlists {
       let (lib_sec, _sep, pl_sec) = layout::sidebar_combined_split(app, left);
-      if y == lib_sec.y {
+      if y == lib_sec.y || y == pl_sec.y {
         app.hovered_library_index = None;
         app.hovered_playlist_index = None;
-        app.set_current_route_state(None, Some(ActiveBlock::Library));
-        return;
-      }
-      if y == pl_sec.y {
-        app.hovered_library_index = None;
-        app.hovered_playlist_index = None;
-        app.set_current_route_state(None, Some(ActiveBlock::MyPlaylists));
+        // title row hover should not change selected row or latched state
         return;
       }
       if y > lib_sec.y && y < lib_sec.y + lib_sec.height {
@@ -1089,8 +1083,9 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       let (library, _sep, playlists) = layout::sidebar_combined_split(app, chunk);
       if y == library.y {
         if x < library.x + 3 {
-          app.dispatch(IoEvent::GetCurrentSavedTracks(None));
-          app.dispatch(IoEvent::GetCurrentUserSavedAlbums(None));
+          app.dispatch(IoEvent::RefreshUser);
+          app.dispatch(IoEvent::RefreshSavedTracks);
+          app.dispatch(IoEvent::RefreshSavedAlbums);
           return false;
         }
         app.sidebar_minimized = !app.sidebar_minimized;
@@ -1110,7 +1105,7 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
         }
       } else if y == playlists.y {
         if x < playlists.x + 3 {
-          app.dispatch(IoEvent::GetPlaylists);
+          app.dispatch(IoEvent::RefreshPlaylists);
           return false;
         }
         app.sidebar_minimized = !app.sidebar_minimized;
@@ -1134,8 +1129,9 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       let count = visible_library_options(&app.hidden_library_sections).len();
       if y == chunk.y {
         if x < chunk.x + 3 {
-          app.dispatch(IoEvent::GetCurrentSavedTracks(None));
-          app.dispatch(IoEvent::GetCurrentUserSavedAlbums(None));
+          app.dispatch(IoEvent::RefreshUser);
+          app.dispatch(IoEvent::RefreshSavedTracks);
+          app.dispatch(IoEvent::RefreshSavedAlbums);
           return false;
         }
         app.sidebar_minimized = !app.sidebar_minimized;
@@ -1159,7 +1155,7 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       let selected = app.selected_playlist_index.unwrap_or(0);
       if y == chunk.y {
         if x < chunk.x + 3 {
-          app.dispatch(IoEvent::GetPlaylists);
+          app.dispatch(IoEvent::RefreshPlaylists);
           return false;
         }
         app.sidebar_minimized = !app.sidebar_minimized;
