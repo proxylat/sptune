@@ -2096,6 +2096,19 @@ fn draw_music_panel(f: &mut Frame, app: &App, area: Rect) {
         if let Some(q) = &app.queue_next {
           lines.push(Line::from(format!("Up next: {}", q)));
         }
+        // Playlist membership
+        if let Some(uri) = app.playing_track_uri() {
+          let names = app.playlists_containing(&uri);
+          if names.is_empty() {
+            lines.push(Line::from(Span::styled(
+              "Not in any playlist",
+              Style::default().fg(app.user_config.theme.inactive),
+            )));
+          } else {
+            let text = format!("In playlists: {}", names.join(", "));
+            lines.push(Line::from(Span::styled(text, Style::default().fg(app.user_config.theme.inactive))));
+          }
+        }
       }
       Some(PlayableItem::Episode(episode)) => {
         lines.push(Line::from(Span::styled(
@@ -2288,13 +2301,28 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
       let artist_row = layout::playbar_artist_row(layout_chunk);
       let bar_rect = layout::playbar_progress_rect(layout_chunk);
 
-      // Song name on the row above the music bar, left of the centered
-      // transport buttons (truncated so the two never overlap).
+      // Song name with playlist membership prefix: ✓ if in any playlist else + (clickable to add)
       let name_style = Style::default()
         .fg(theme.selected)
         .add_modifier(Modifier::BOLD);
+      let uri = app.playing_track_uri();
+      let in_playlist = uri.as_deref().map(|u| app.is_in_any_playlist(u)).unwrap_or(false);
+      let prefix = if in_playlist {
+        app.user_config.behavior.in_playlist_icon.clone() + " "
+      } else {
+        "+ ".to_string()
+      };
+      // prefix is 2 cols, keep truncation inside song_row
+      let prefix_style = if in_playlist {
+        Style::default().fg(theme.active).add_modifier(Modifier::BOLD)
+      } else {
+        Style::default().fg(theme.active).add_modifier(Modifier::BOLD)
+      };
       f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(name_text, name_style)])),
+        Paragraph::new(Line::from(vec![
+          Span::styled(prefix, prefix_style),
+          Span::styled(name_text, name_style),
+        ])),
         song_row,
       );
 
