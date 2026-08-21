@@ -499,6 +499,36 @@ pub fn library_handle_rect(app: &App, chunk: Rect) -> Rect {
   Rect::new(chunk.x, lib.y + lib.height.saturating_sub(1), chunk.width, 1)
 }
 
+// Combined sidebar: one outer block with a horizontal separator inside.
+// Returns (library_section, separator, playlist_section) all inside the
+// outer border (inset by 1). Library height follows the same cap/override
+// as library_playlists_split but on the inner height.
+pub fn sidebar_combined_split(app: &App, chunk: Rect) -> (Rect, Rect, Rect) {
+  let inner = Rect::new(
+    chunk.x + 1,
+    chunk.y + 1,
+    chunk.width.saturating_sub(2),
+    chunk.height.saturating_sub(2),
+  );
+  if inner.height == 0 || inner.width == 0 {
+    return (inner, Rect::default(), Rect::default());
+  }
+  // Reserve 1 row for the separator.
+  let for_lib = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
+  let (tmp_lib, _) = library_playlists_split(app, for_lib);
+  let lib_h = tmp_lib.height.min(inner.height.saturating_sub(1));
+  let library = Rect::new(inner.x, inner.y, inner.width, lib_h);
+  let separator = Rect::new(inner.x, library.y + library.height, inner.width, 1);
+  let playlist_h = inner.height.saturating_sub(lib_h + 1);
+  let playlist = Rect::new(inner.x, separator.y + 1, inner.width, playlist_h);
+  (library, separator, playlist)
+}
+
+pub fn sidebar_combined_separator_rect(app: &App, chunk: Rect) -> Rect {
+  let (_, sep, _) = sidebar_combined_split(app, chunk);
+  sep
+}
+
 /// Facts about a scrollable list: how many rows it scrolls through, how many
 /// fit the viewport and where the thumb sits. The drawer, the wheel and the
 /// scrollbar drag all read from this one place, so count/viewport/offset can
