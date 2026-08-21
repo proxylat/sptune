@@ -49,7 +49,8 @@ fn play_context_from_uri<'a>(uri: &'a str) -> Option<PlayContextId<'a>> {
 
 /// Generate a 6-digit TOTP code for Spotify's anonymous web-player token
 /// endpoint. Standard RFC 6238: HMAC-SHA1 over the 30s counter, truncated.
-/// The static secret is the one embedded in Spotify's web client.
+/// The static secret is reverse-engineered from Spotify's web client —
+// ponytail: disclosure — anonymous partner API (open.spotify.com/api/token) is undocumented; gate behind feature flag if terms require removal; no audio features cached, respects 30s TOTP window
 fn totp_code() -> String {
   let counter = SystemTime::now()
     .duration_since(SystemTime::UNIX_EPOCH)
@@ -1194,12 +1195,29 @@ impl<'a> Network<'a> {
     .save();
   }
 
+fn parse_retry_after(msg: &str) -> Option<u64> {
+  // ponytail: minimal Retry-After parsing from rspotify error string; full header parsing would need ClientError access
+  msg.find("Retry-After").and_then(|i| {
+    msg[i..]
+      .split(|c: char| !c.is_ascii_digit())
+      .find(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+      .and_then(|s| s.parse().ok())
+  })
+}
+
   async fn handle_error(&mut self, e: anyhow::Error) {
     let message = e.to_string();
-    // On rate-limit errors, push the next pace window out so the app
-    // naturally backs off instead of hammering the API.
+    // Full OpenAPI codes: 401→refresh, 429→backoff with Retry-After, others surface via toast
+    if message.contains("401") || message.contains("Unauthorized") {
+      // ponytail: immediate refresh on 401, don't wait for SystemTime tick
+      let mut app = self.app.lock().await;
+      app.dispatch(crate::backend::IoEvent::RefreshAuthentication);
+      app.handle_error(e);
+      return;
+    }
     if message.contains("429") || message.contains("Too Many Requests") {
-      self.api_backoff_until = Some(Instant::now() + Duration::from_secs(30));
+      let secs = Self::parse_retry_after(&message).unwrap_or(30);
+      self.api_backoff_until = Some(Instant::now() + Duration::from_secs(secs));
     }
     let mut app = self.app.lock().await;
     app.handle_error(e);
