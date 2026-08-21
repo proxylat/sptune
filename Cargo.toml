@@ -3,8 +3,8 @@ name = "sptune"
 description = "A terminal user interface for Spotify"
 keywords = ["spotify", "tui", "cli", "terminal"]
 categories = ["command-line-utilities"]
-version = "0.1.1"
-authors = ["Proxy"]
+version = "2.0.0"
+authors = ["Proxy Works"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
