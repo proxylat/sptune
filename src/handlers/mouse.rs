@@ -1082,12 +1082,17 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
   }
 }
 
-fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
+fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
   // The search header is global now, so the sidebar only holds library/playlists
   match (app.show_library, app.show_playlists) {
     (true, true) => {
       let (library, _sep, playlists) = layout::sidebar_combined_split(app, chunk);
       if y == library.y {
+        if x < library.x + 3 {
+          app.dispatch(IoEvent::GetCurrentSavedTracks(None));
+          app.dispatch(IoEvent::GetCurrentUserSavedAlbums(None));
+          return false;
+        }
         app.sidebar_minimized = !app.sidebar_minimized;
         return true;
       }
@@ -1104,6 +1109,10 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
           return true;
         }
       } else if y == playlists.y {
+        if x < playlists.x + 3 {
+          app.dispatch(IoEvent::GetPlaylists);
+          return false;
+        }
         app.sidebar_minimized = !app.sidebar_minimized;
         return true;
       } else if y >= playlists.y && y < playlists.y + playlists.height {
@@ -1124,6 +1133,11 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
     (true, false) => {
       let count = visible_library_options(&app.hidden_library_sections).len();
       if y == chunk.y {
+        if x < chunk.x + 3 {
+          app.dispatch(IoEvent::GetCurrentSavedTracks(None));
+          app.dispatch(IoEvent::GetCurrentUserSavedAlbums(None));
+          return false;
+        }
         app.sidebar_minimized = !app.sidebar_minimized;
         return true;
       }
@@ -1144,6 +1158,10 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
         .unwrap_or(0);
       let selected = app.selected_playlist_index.unwrap_or(0);
       if y == chunk.y {
+        if x < chunk.x + 3 {
+          app.dispatch(IoEvent::GetPlaylists);
+          return false;
+        }
         app.sidebar_minimized = !app.sidebar_minimized;
         return true;
       }

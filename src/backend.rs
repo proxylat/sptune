@@ -571,8 +571,8 @@ fn sort_column_from_name(name: &str) -> Option<TrackSortColumn> {
 // then the bucket refills at API_RATE_PER_SEC tokens/second.
 // 6/s ≈ the pre-bucket fixed 150ms pace (bcfd9cb) — fast enough for
 // instant cached playlist opens, slow enough to avoid 429s.
-const API_RATE_PER_SEC: f64 = 6.0;
-const API_BURST: f64 = 10.0;
+pub const API_RATE_PER_SEC: f64 = 6.0;
+pub const API_BURST: f64 = 10.0;
 const SAVED_CHECK_TTL: Duration = Duration::from_secs(300);
 // Max page size Spotify allows on paged endpoints (playlist items, saved
 // tracks/albums/shows, etc.). One request should always ask for it.
