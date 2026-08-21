@@ -919,6 +919,15 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
       }
       btn_x += w + 1;
     }
+    // Repeat label "All"/"One" is clickable too
+    if let Some(label) = crate::tui::layout::repeat_label(current_playback_context.repeat_state) {
+      let group_w: u16 = controls.iter().map(|(_, t)| t.width() as u16 + 1).sum();
+      let label_x = playbar_controls_x(playbar, &controls) + group_w + 1;
+      if x >= label_x && x < label_x + label.width() as u16 {
+        app.repeat();
+        return;
+      }
+    }
   }
 
   // Track name opens the album, artist name opens the artist page. Both
