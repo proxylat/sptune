@@ -1734,35 +1734,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     playlist_track_page: &Page<PlaylistItem>,
     append: bool,
   ) {
-    // Confirm before fix: log raw vs filtered counts for 30→27 diagnosis
-    {
-      let total = playlist_track_page.total;
-      let items_len = playlist_track_page.items.len();
-      let null_count = playlist_track_page
-        .items
-        .iter()
-        .filter(|i| i.item.is_none())
-        .count();
-      let unplayable = playlist_track_page
-        .items
-        .iter()
-        .filter(|i| matches!(i.item.as_ref(), Some(PlayableItem::Track(t)) if t.is_playable == Some(false)))
-        .count();
-      let episodes = playlist_track_page
-        .items
-        .iter()
-        .filter(|i| matches!(i.item.as_ref(), Some(PlayableItem::Episode(_))))
-        .count();
-      eprintln!(
-        "[confirm] playlist total={} items_len={} null={} unplayable={} episodes={} filtered_will_be={}",
-        total,
-        items_len,
-        null_count,
-        unplayable,
-        episodes,
-        items_len - unplayable // episodes+null currently dropped after pos accounting, vs B will show 30
-      );
-    }
     // Spotify's context offset skips explicitly unavailable tracks
     // (is_playable: false); they are hidden from the table and dropped from
     // the offset count. Episodes, unknown items, and empty entries keep their
