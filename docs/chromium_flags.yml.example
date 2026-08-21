@@ -1,25 +1,76 @@
 # Override entirely: if ~/.config/sptune/chromium_flags.yml exists, it replaces LEAN_FLAGS.
-# Copy to ~/.config/sptune/chromium_flags.yml and edit. All flags from src/platform/chromium_flags.rs LEAN_FLAGS:
+# Copy to ~/.config/sptune/chromium_flags.yml and edit. All 72 flags from src/platform/chromium_flags.rs:
 flags:
-  - --disable-backgrounding-occluded-windows
-  - --disable-background-timer-throttling
-  - --disable-renderer-backgrounding
-  - --disable-features=CalculateNativeWinOcclusion
-  - --disable-ipc-flooding-protection
-  - --disable-hang-monitor
+  - --headless=new
+  - --force-prefers-reduced-motion
+  - --intensive-wake-up-throttling-policy=0
+  - --renderer-process-limit=1
+  - --js-flags=--max-old-space-size=512 --optimize-for-size
+  - --disable-v8-idle-tasks
+  - --disable-background-networking
+  - --disable-domain-reliability
+  - --disable-component-update
+  - --no-pings
   - --disable-breakpad
   - --disable-crash-reporter
-  - --disable-dev-shm-usage
+  - --disable-in-process-stack-traces
+  - --disable-stack-profiler
   - --disable-extensions
-  - --disable-component-extensions-with-background-pages
-  - --disable-background-networking
   - --disable-sync
-  - --disable-domain-reliability
-  - --disable-client-side-phishing-detection
-  - --disable-component-update
   - --no-first-run
   - --no-default-browser-check
+  - --disable-renderer-accessibility
+  - --disable-speech-api
+  - --disable-speech-synthesis-api
+  - --disable-notifications
+  - --disable-site-isolation-trials
+  - --disable-logging
+  - --disable-threaded-animation
+  - --disable-threaded-compositing
+  - --disable-remote-fonts
+  - --disable-remote-playback-api
+  - --disable-webgl2
+  - --num-raster-threads=1
+  - --disable-video-capture-use-gpu-memory-buffer
+  - --disable-threaded-scrolling
+  - --disable-component-extensions-with-background-pages
+  - --disable-accelerated-video-decode
+  - --disable-accelerated-mjpeg-decode
+  - --disable-3d-apis
+  - --disable-2d-canvas-clip-aa
+  - --disable-gpu
+  - --disable-gpu-watchdog
+  - --disable-gpu-compositing
+  - --disable-gpu-memory-buffer-compositor-resources
+  - --disable-gpu-memory-buffer-video-frames
+  - --disable-accelerated-video-encode
+  - --disable-accelerated-2d-canvas
+  - --disable-accelerated-jpeg-decoding
+  - --blink-settings=imagesEnabled=false
+  - --disable-webgl
+  - --autoplay-policy=no-user-gesture-required
+  - --touch-events=disabled
+  - --disable-pinch
   - --disable-default-apps
-  - --disable-popup-blocking
+  - --disable-translate
+  - --disable-spell-checking
+  - --disable-spell-check-service
+  - --disable-hang-monitor
   - --disable-prompt-on-repost
-  - --disable-blink-features=AutomationControlled
+  - --disable-client-side-phishing-detection
+  - --disable-popup-blocking
+  - --disable-gpu-rasterization
+  - --disable-gpu-program-cache
+  - --disable-gpu-shader-disk-cache
+  - --disable-software-rasterizer
+  - --disable-skia-graphite
+  - --disable-lcd-text
+  - --disable-smooth-scrolling
+  - --disable-canvas-aa
+  - --no-sandbox
+  - --disable-dev-shm-usage
+  - --disable-infobars
+  - --disk-cache-size=0
+  - --media-cache-size=0
+  - --enable-features=AudioWorkletRealtimeThread,NetworkServiceInProcess,RestrictThreadPoolInBackground,ThrottleUnimportantFrameTimers
+  - --disable-features=AudioServiceOutOfProcess,AudioServiceSandbox,AutofillAssistant,BackForwardCache,BackgroundFetch,CalculateNativeWinOcclusion,CompositeAfterPaint,DialMediaRouteProvider,GetDisplayMedia,HardwareMediaKeyHandling,HeavyAdIntervention,InterestFeedContentSuggestions,LayoutNG,MediaSession,MediaStreamTrackTransfer,NetworkServiceSandbox,OptimizationGuideModelDownloading,OptimizationHints,PaintHolding,PictureInPicture,PointerLock,RTCEncodedVideoFrames,SharedStorage,SpareRendererForSitePerProcess,StorageBuckets,StorageServiceOutOfProcess,TabHoverCards,TabHoverCardImages,Translate,TranslateUI,VideoCapture,WebBluetooth,WebHID,WebNFC,WebOTP,WebRtcRemoteEventLog,WebShare,WebUSB
