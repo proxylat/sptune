@@ -6,6 +6,9 @@ use std::{
   path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 const DEFAULT_PORT: u16 = 8888;
 const FILE_NAME: &str = "client.yml";
 const CONFIG_DIR: &str = ".config";
@@ -69,10 +72,29 @@ impl ClientConfig {
 
         if !app_config_dir.exists() {
           fs::create_dir(&app_config_dir)?;
+          #[cfg(unix)]
+          {
+            let _ = fs::set_permissions(&app_config_dir, fs::Permissions::from_mode(0o700));
+          }
+        }
+        #[cfg(unix)]
+        {
+          if app_config_dir.exists() {
+            let _ = fs::set_permissions(&app_config_dir, fs::Permissions::from_mode(0o700));
+          }
         }
 
         let config_file_path = &app_config_dir.join(FILE_NAME);
         let token_cache_path = &app_config_dir.join(TOKEN_CACHE_FILE);
+        #[cfg(unix)]
+        {
+          if token_cache_path.exists() {
+            let _ = fs::set_permissions(token_cache_path, fs::Permissions::from_mode(0o600));
+          }
+          if config_file_path.exists() {
+            let _ = fs::set_permissions(config_file_path, fs::Permissions::from_mode(0o600));
+          }
+        }
 
         let paths = ConfigPaths {
           config_file_path: config_file_path.to_path_buf(),
@@ -96,6 +118,10 @@ impl ClientConfig {
     let new_config = serde_yml::to_string(&config_yml)?;
     let mut config_file = fs::File::create(&paths.config_file_path)?;
     write!(config_file, "{}", new_config)?;
+    #[cfg(unix)]
+    {
+      let _ = fs::set_permissions(&paths.config_file_path, fs::Permissions::from_mode(0o600));
+    }
     Ok(())
   }
 
@@ -157,6 +183,10 @@ impl ClientConfig {
 
       let mut new_config = fs::File::create(&paths.config_file_path)?;
       write!(new_config, "{}", content_yml)?;
+      #[cfg(unix)]
+      {
+        let _ = fs::set_permissions(&paths.config_file_path, fs::Permissions::from_mode(0o600));
+      }
 
       self.client_id = config_yml.client_id;
       self.client_secret = config_yml.client_secret;
