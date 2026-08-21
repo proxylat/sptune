@@ -1,16 +1,20 @@
+# sptune
+
+```text
  ___ _ __ | |_ _   _ _ __   ___
 / __| '_ \| __| | | | '_ \ / _ \
 \__ \ |_) | |_| |_| | | | |  __/
 |___/ .__/ \__|\__,_|_| |_|\___|
     |_|
-
-# :Program image:
-
-# sptune
+```
 
 A Spotify client for those who really love the terminal and music.
 Performance and privacy first — everything runs locally.
 No bloat, no noise — just the essentials.
+
+## Preview
+
+<!-- add image -->
 
 ## Features
 
@@ -19,15 +23,18 @@ No bloat, no noise — just the essentials.
 - Search, browse and play your library, playlists, albums, artists and podcasts
 - CLI for playback control, playlists and search (`sptune --help`)
 - User-configurable theme, behavior and keybindings (${HOME}/.config/sptune/config.yml)
+
+## Compatibility
+
 - Made only for spotify at the moment...
 - No mac development at the moment.
-
-## Connecting to Spotify
 
 > [!NOTE]
 > This app uses the official Spotify Web API, which doesn't handle streaming
 > itself — you need an official Spotify client or a thirdparty client like [spotifyd](https://github.com/Spotifyd/spotifyd)
 > open to play music. Playing tracks requires a Spotify Premium account.
+
+## Connecting to Spotify
 
 Initial setup is one time and interactive: run `sptune` and it will walk you
 through it. If you want to set it up manually:
