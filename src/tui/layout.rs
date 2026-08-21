@@ -727,7 +727,7 @@ pub fn repeat_label(repeat: RepeatState) -> Option<String> {
 // Playbar title: the trailing cells of the title text are the fullscreen
 // toggle (see handle_playbar_click). ASCII so every terminal renders it.
 pub fn build_playbar_title(play_title: &str, device_name: &str) -> String {
-  format!("{:-7} ({}) - [ ]", play_title, device_name)
+  format!("{:-7} ({})——[ ]", play_title, device_name)
 }
 
 // Which track-table contexts have a Date Added column (they carry added_at).
