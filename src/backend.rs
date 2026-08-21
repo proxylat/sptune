@@ -1117,7 +1117,9 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
     if message.contains("429") || message.contains("Too Many Requests") {
       let secs = Self::parse_retry_after(&message).unwrap_or(30);
-      self.api_backoff_until = Some(Instant::now() + Duration::from_secs(secs));
+      // ponytail: 200ms jitter avoids thundering herd after shared Retry-After window
+      self.api_backoff_until =
+        Some(Instant::now() + Duration::from_secs(secs) + Duration::from_millis(200));
     }
     let mut app = self.app.lock().await;
     app.handle_error(e);
@@ -1302,9 +1304,8 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
           .map(|playlist| playlist.name)
           .unwrap_or_default();
         if public.is_empty() {
-          // Algorithmic playlists 404 on the public metadata endpoint; the
-          // partner API still serves their names.
-          self.partner_playlist_name(playlist_id).await.unwrap_or_default()
+          // ponytail: partner API removed — fallback to oEmbed (no auth) for name, else id
+          Self::oembed_playlist_name(playlist_id).await.unwrap_or_default()
         } else {
           public
         }
@@ -1463,6 +1464,18 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
 
   async fn partner_playlist_tracks(&self, _playlist_id: &str, _offset: u32) -> anyhow::Result<(Page<PlaylistItem>, String)> {
     anyhow::bail!("partner API removed for terms compliance")
+  }
+
+  async fn oembed_playlist_name(playlist_id: &str) -> anyhow::Result<String> {
+    let url = format!(
+      "https://open.spotify.com/oembed?url=https://open.spotify.com/playlist/{}",
+      playlist_id
+    );
+    let resp: serde_json::Value = reqwest::Client::new().get(&url).send().await?.json().await?;
+    resp["title"]
+      .as_str()
+      .map(|s| s.to_string())
+      .ok_or_else(|| anyhow!("no title in oembed"))
   }
 
   /// Load every remaining page of a playlist so a column sort spans the
@@ -4029,6 +4042,14 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       Ok(Some(new_token_info)) => {
         let (new_spotify, new_token_expiry) = get_spotify(new_token_info, &self.client_config);
         self.spotify = new_spotify;
+        #[cfg(unix)]
+        {
+          use std::os::unix::fs::PermissionsExt;
+          let _ = std::fs::set_permissions(
+            self.spotify.get_config().cache_path.clone(),
+            std::fs::Permissions::from_mode(0o600),
+          );
+        }
         let mut app = self.app.lock().await;
         app.spotify_token_expiry = new_token_expiry;
       }
