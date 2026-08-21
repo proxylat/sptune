@@ -323,10 +323,44 @@ pub struct BehaviorConfig {
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SpotifyConfigString {
+  pub binary_path: Option<String>,
+  pub auto_launch: Option<bool>,
+  pub use_chromium_flags: Option<bool>,
+  pub suspend_children: Option<bool>,
+  pub trim_working_set: Option<bool>,
+  pub memory_limit_mb: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SpotifyConfig {
+  pub binary_path: String,
+  pub auto_launch: bool,
+  pub use_chromium_flags: bool,
+  pub suspend_children: bool,
+  pub trim_working_set: bool,
+  pub memory_limit_mb: u32,
+}
+
+impl Default for SpotifyConfig {
+  fn default() -> Self {
+    Self {
+      binary_path: String::new(),
+      auto_launch: false,
+      use_chromium_flags: false,
+      suspend_children: false,
+      trim_working_set: false,
+      memory_limit_mb: 0,
+    }
+  }
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UserConfigString {
   keybindings: Option<KeyBindingsString>,
   behavior: Option<BehaviorConfigString>,
   theme: Option<UserTheme>,
+  spotify: Option<SpotifyConfigString>,
 }
 
 #[derive(Clone)]
@@ -334,6 +368,7 @@ pub struct UserConfig {
   pub keys: KeyBindings,
   pub theme: Theme,
   pub behavior: BehaviorConfig,
+  pub spotify: SpotifyConfig,
   pub path_to_config: Option<UserConfigPaths>,
 }
 
@@ -341,6 +376,7 @@ impl UserConfig {
   pub fn new() -> UserConfig {
     UserConfig {
       theme: Default::default(),
+      spotify: SpotifyConfig::default(),
       keys: KeyBindings {
         back: Key::Char('q'),
         next_page: Key::Ctrl('d'),
@@ -664,6 +700,9 @@ impl UserConfig {
       if let Some(theme) = config_yml.theme {
         self.load_theme(theme)?;
       }
+      if let Some(spotify) = config_yml.spotify {
+        self.load_spotify_config(spotify);
+      }
 
       Ok(())
     } else {
@@ -677,6 +716,27 @@ impl UserConfig {
 
   pub fn padded_in_playlist_icon(&self) -> String {
     format!("{} ", &self.behavior.in_playlist_icon)
+  }
+
+  pub fn load_spotify_config(&mut self, s: SpotifyConfigString) {
+    if let Some(v) = s.binary_path {
+      self.spotify.binary_path = v;
+    }
+    if let Some(v) = s.auto_launch {
+      self.spotify.auto_launch = v;
+    }
+    if let Some(v) = s.use_chromium_flags {
+      self.spotify.use_chromium_flags = v;
+    }
+    if let Some(v) = s.suspend_children {
+      self.spotify.suspend_children = v;
+    }
+    if let Some(v) = s.trim_working_set {
+      self.spotify.trim_working_set = v;
+    }
+    if let Some(v) = s.memory_limit_mb {
+      self.spotify.memory_limit_mb = v;
+    }
   }
 }
 
