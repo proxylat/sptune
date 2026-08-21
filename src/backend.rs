@@ -1322,7 +1322,23 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
 
   async fn refresh_playlists(&mut self) {
     self.refetch_playlists().await;
-    self.serve_playlists_cache().await;
+    // refetch writes file; serve must read it and force in-memory + UI cache refresh
+    self.library_cache.ensure_loaded();
+    if let Some((items, total)) = self.library_cache.get_typed::<SimplifiedPlaylist>("playlists") {
+      let page = Page::<SimplifiedPlaylist> {
+        href: String::new(),
+        limit: 0,
+        next: None,
+        offset: 0,
+        previous: None,
+        total,
+        items,
+      };
+      let mut app = self.app.lock().await;
+      app.playlists = Some(page);
+      // bust tui.rs PLAYLIST_ITEMS thread-local (ptr, len) so next frame rebuilds strings
+      crate::tui::bust_playlist_items_cache();
+    }
   }
 
   // A playlist pasted into the search box is added to For you. Must run after
