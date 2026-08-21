@@ -50,6 +50,7 @@ fn play_context_from_uri<'a>(uri: &'a str) -> Option<PlayContextId<'a>> {
 // TOTP/anon partner API removed for terms compliance — algorithmic playlists now via Web API only
 
 // ponytail: partner API removed — below kept as stub for callers, returns error
+#[allow(dead_code)]
 /// Map a partner-API `itemV2.data` track object into an internal
 /// [`FullTrack`] by reshaping it into the Web API shape rspotify expects. (removed)
 fn partner_track_from_value(data: &serde_json::Value) -> anyhow::Result<Option<FullTrack>> {
@@ -163,10 +164,6 @@ fn partner_track_from_value(data: &serde_json::Value) -> anyhow::Result<Option<F
   serde_json::from_value(track_json)
     .map(Some)
     .map_err(|e| anyhow!("partner track mapping failed: {}", e))
-}
-
-async fn partner_tokens() -> anyhow::Result<(String, String)> {
-  anyhow::bail!("partner API removed for terms compliance — use Web API")
 }
 
 /// Parse a track/episode URI into a [`PlayableId`].
@@ -1376,39 +1373,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         }
       }
       Err(e) => {
-        // The public Web API returns 404 for algorithmic playlists (Daily
-        // Mixes, Discover Weekly, ...). Fall back to the web player's private
-        // partner API, which serves their track lists.
-        if e.to_string().contains("404") {
-          match self
-            .partner_playlist_tracks(&playlist_id, playlist_offset)
-            .await
-          {
-            Ok((page, name)) if !page.items.is_empty() => {
-              self
-                .apply_playlist_tracks(&playlist_id, page, playlist_offset)
-                .await;
-              if playlist_offset == 0 {
-                self.consume_pending_for_you_add(&playlist_id, Some(name)).await;
-              }
-              return;
-            }
-            Ok(_) => {}
-            Err(partner_err) => {
-              self
-                .handle_error(anyhow!(
-                  "failed to load tracks of playlist '{}': {}{} (partner API fallback also failed: {})",
-                  playlist_id,
-                  e,
-                  " — Spotify's public Web API returns 404 for algorithmic playlists (Daily Mixes, Discover Weekly, etc.)",
-                  partner_err
-                ))
-                .await;
-              self.app.lock().await.is_fetching_next_page = false;
-              return;
-            }
-          }
-        }
         let hint = if e.to_string().contains("404") {
           " — Spotify's public Web API returns 404 for algorithmic playlists (Daily Mixes, Discover Weekly, etc.) even when the link opens in the Spotify web player; sptune uses the public API, which does not expose those track lists"
         } else {
@@ -1456,14 +1420,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
     app.is_fetching_next_page = false;
     app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
-  }
-
-  async fn partner_playlist_name(&self, _playlist_id: &str) -> anyhow::Result<String> {
-    anyhow::bail!("partner API removed for terms compliance")
-  }
-
-  async fn partner_playlist_tracks(&self, _playlist_id: &str, _offset: u32) -> anyhow::Result<(Page<PlaylistItem>, String)> {
-    anyhow::bail!("partner API removed for terms compliance")
   }
 
   async fn oembed_playlist_name(playlist_id: &str) -> anyhow::Result<String> {
@@ -1949,50 +1905,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         self.sync_playlist_uris(&mut app);
       }
       Err(e) => {
-        if e.to_string().contains("404") {
-          match self
-            .partner_playlist_tracks(&playlist_id, made_for_you_offset)
-            .await
-          {
-            Ok((page, name)) if !page.items.is_empty() => {
-              self
-                .set_playlist_tracks_to_table(&page, made_for_you_offset > 0)
-                .await;
-              let cache_items = page.items.clone();
-              let cache_total = page.total;
-              let mut app = self.app.lock().await;
-              if made_for_you_offset == 0 {
-                app.made_for_you_tracks = Some(page);
-              } else if let Some(existing) = app.made_for_you_tracks.as_mut() {
-                existing.items.extend(page.items);
-                existing.total = page.total;
-              }
-              app.playlist_view = Some((name, playlist_id.clone()));
-              app.is_fetching_next_page = false;
-              if app.get_current_route().id != RouteId::TrackTable {
-                app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
-              }
-              drop(app);
-              self
-                .playlist_cache
-                .update(&playlist_id, cache_items, cache_total, made_for_you_offset > 0);
-              let mut app = self.app.lock().await;
-              self.sync_playlist_uris(&mut app);
-              return;
-            }
-            Ok(_) => {}
-            Err(partner_err) => {
-              self
-                .handle_error(anyhow!(
-                  "failed to load tracks of playlist '{}': {} (partner API fallback also failed: {})",
-                  playlist_id, e, partner_err
-                ))
-                .await;
-              self.app.lock().await.is_fetching_next_page = false;
-              return;
-            }
-          }
-        }
         self
           .handle_error(anyhow!(
             "failed to load tracks of playlist '{}': {}",

@@ -43,10 +43,12 @@ impl ClientConfig {
     }
   }
 
+  #[allow(dead_code)]
   pub fn auth_flow(&self) -> &str {
     self.auth_flow.as_deref().unwrap_or("auto")
   }
 
+  #[allow(dead_code)]
   pub fn is_pkce(&self) -> bool {
     self.auth_flow() == "pkce"
   }
