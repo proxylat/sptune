@@ -47,8 +47,6 @@ through it. If you want to set it up manually:
 1. Accept the permissions on the Spotify page — you'll be redirected back and
    authenticated automatically
 
-Your credentials live in `${HOME}/.config/sptune/client.yml`.
-
 ## Using
 
 Running `sptune` with no arguments brings up the UI. Press `?` for the help
@@ -76,7 +74,7 @@ across restarts (stored in `${HOME}/.config/sptune/state.json`).
 Install [Rust](https://www.rust-lang.org/tools/install) and
 
 ```bash
-cargo install sptune
+cargo install sptune  # after `cargo publish` — for now use `cargo install --path .`
 ```
 
 On Linux, the development packages for `libssl` and `pkg-config` are required
