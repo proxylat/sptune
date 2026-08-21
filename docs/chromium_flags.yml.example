@@ -1,5 +1,5 @@
-# Override entirely: if ~/.config/sptune/chromium_flags.yml exists, these flags replace the built-in lean preset.
-# Copy this file to ~/.config/sptune/chromium_flags.yml and edit.
+# Override entirely: if ~/.config/sptune/chromium_flags.yml exists, it replaces LEAN_FLAGS.
+# Copy to ~/.config/sptune/chromium_flags.yml and edit. All flags from src/platform/chromium_flags.rs LEAN_FLAGS:
 flags:
   - --disable-backgrounding-occluded-windows
   - --disable-background-timer-throttling
@@ -9,3 +9,17 @@ flags:
   - --disable-hang-monitor
   - --disable-breakpad
   - --disable-crash-reporter
+  - --disable-dev-shm-usage
+  - --disable-extensions
+  - --disable-component-extensions-with-background-pages
+  - --disable-background-networking
+  - --disable-sync
+  - --disable-domain-reliability
+  - --disable-client-side-phishing-detection
+  - --disable-component-update
+  - --no-first-run
+  - --no-default-browser-check
+  - --disable-default-apps
+  - --disable-popup-blocking
+  - --disable-prompt-on-repost
+  - --disable-blink-features=AutomationControlled

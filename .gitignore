@@ -14,6 +14,9 @@
 # Source code
 !/src/
 !/vendor/
+!/docs/
+/docs/*
+!/docs/chromium_flags.yml.example
 
 # Secrets / local config (never commit, even if un-ignored later)
 client.yml
