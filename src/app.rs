@@ -78,6 +78,7 @@ pub fn playlists_block_title() -> String {
   format!("{}{}", crate::tui::layout::REFRESH_GLYPH, "Playlists")
 }
 
+#[allow(dead_code)]
 pub fn library_row_letter(name: &str) -> char {
   match name {
     "For you" => 'F',
