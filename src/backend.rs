@@ -2934,11 +2934,14 @@ impl<'a> Network<'a> {
   }
 
   async fn shuffle(&mut self, shuffle_state: bool) {
-    match self
-      .spotify
-      .shuffle(!shuffle_state, self.client_config.device_id.as_deref())
-      .await
-    {
+    let device_id = self.client_config.device_id.clone().or_else(|| {
+      self
+        .app
+        .try_lock()
+        .ok()
+        .and_then(|a| a.current_playback_context.as_ref().and_then(|c| c.device.id.clone()))
+    });
+    match self.spotify.shuffle(!shuffle_state, device_id.as_deref()).await {
       Ok(()) => {
         // Update the UI eagerly (otherwise the UI will wait until the next 5 second interval
         // due to polling playback context)
