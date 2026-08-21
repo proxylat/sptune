@@ -2212,9 +2212,28 @@ impl App {
       19 => {
         self.dispatch(IoEvent::CleanCache);
       }
+      20 => {
+        self.user_config.spotify.auto_launch = !self.user_config.spotify.auto_launch;
+      }
+      21 => {
+        self.user_config.spotify.use_chromium_flags = !self.user_config.spotify.use_chromium_flags;
+      }
+      22 => {
+        self.user_config.spotify.suspend_children = !self.user_config.spotify.suspend_children;
+      }
+      23 => {
+        self.user_config.spotify.trim_working_set = !self.user_config.spotify.trim_working_set;
+      }
+      24 => {
+        self.user_config.spotify.memory_limit_mb = if self.user_config.spotify.memory_limit_mb == 0 {
+          150
+        } else {
+          0
+        };
+      }
       _ => {}
     }
-    if index <= 19 {
+    if index <= 24 {
       self.dispatch(IoEvent::SaveState);
     }
   }

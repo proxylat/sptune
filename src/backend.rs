@@ -386,6 +386,16 @@ pub struct SavedState {
   pub show_liked_icon: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub made_for_you_custom: Option<Vec<(String, String)>>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub spotify_auto_launch: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub spotify_use_flags: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub spotify_suspend: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub spotify_trim_ws: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub spotify_mem_limit: Option<u32>,
 }
 
 impl SavedState {
@@ -506,6 +516,31 @@ impl SavedState {
       if let Some(value) = &self.made_for_you_custom {
         obj.insert("made_for_you_custom".to_string(), serde_json::json!(value));
       }
+      if let Some(value) = &self.spotify_auto_launch {
+        obj.insert("spotify_auto_launch".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.spotify_use_flags {
+        obj.insert("spotify_use_flags".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.spotify_suspend {
+        obj.insert("spotify_suspend".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.spotify_trim_ws {
+        obj.insert("spotify_trim_ws".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.spotify_mem_limit {
+        obj.insert("spotify_mem_limit".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.enable_add_to_playlist {
+        obj.insert(
+          "enable_add_to_playlist".to_string(),
+          serde_json::json!(value),
+        );
+      }
+      if let Some(value) = &self.show_liked_icon {
+        obj.insert("show_liked_icon".to_string(), serde_json::json!(value));
+      }
+      // dedup: earlier inserts already covered these; keep one copy above spotify
     }
     let _ = fs::write(path, root.to_string());
   }
@@ -1048,6 +1083,11 @@ impl<'a> Network<'a> {
       enable_animations: None,
       show_liked_icon: None,
       made_for_you_custom: None,
+      spotify_auto_launch: None,
+      spotify_use_flags: None,
+      spotify_suspend: None,
+      spotify_trim_ws: None,
+      spotify_mem_limit: None,
     }
     .save();
   }
@@ -1088,6 +1128,11 @@ impl<'a> Network<'a> {
       enable_animations: Some(app.user_config.behavior.enable_animations),
       show_liked_icon: Some(app.user_config.behavior.show_liked_icon),
       made_for_you_custom: Some(app.made_for_you_custom.clone()),
+      spotify_auto_launch: Some(app.user_config.spotify.auto_launch),
+      spotify_use_flags: Some(app.user_config.spotify.use_chromium_flags),
+      spotify_suspend: Some(app.user_config.spotify.suspend_children),
+      spotify_trim_ws: Some(app.user_config.spotify.trim_working_set),
+      spotify_mem_limit: Some(app.user_config.spotify.memory_limit_mb),
     }
     .save();
   }
