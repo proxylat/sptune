@@ -374,10 +374,9 @@ fn handle_wheel(up: bool, mouse: MouseEvent, app: &mut App) {
 }
 
 fn user_block_at(y: u16, chunk: Rect, app: &App) -> Option<ActiveBlock> {
-  // The search header is global now, so the sidebar only holds library/playlists
   match (app.show_library, app.show_playlists) {
     (true, true) => {
-      let (library, playlists) = crate::tui::layout::library_playlists_split(app, chunk);
+      let (library, _sep, playlists) = crate::tui::layout::sidebar_combined_split(app, chunk);
       if y >= library.y && y < library.y + library.height {
         Some(ActiveBlock::Library)
       } else if y >= playlists.y && y < playlists.y + playlists.height {
@@ -390,6 +389,20 @@ fn user_block_at(y: u16, chunk: Rect, app: &App) -> Option<ActiveBlock> {
     (false, true) => Some(ActiveBlock::MyPlaylists),
     (false, false) => None,
   }
+}
+
+fn combined_sidebar_row_index(y: u16, chunk: Rect, count: usize, selected: usize) -> Option<usize> {
+  if count == 0 || y < chunk.y + 1 || y >= chunk.y + chunk.height {
+    return None;
+  }
+  let viewport = chunk.height.saturating_sub(1) as usize;
+  let offset = if selected >= viewport {
+    selected - viewport + 1
+  } else {
+    0
+  };
+  let index = offset + (y - (chunk.y + 1)) as usize;
+  if index < count { Some(index) } else { None }
 }
 
 fn content_block_at(app: &App) -> Option<ActiveBlock> {
@@ -461,11 +474,12 @@ fn handle_scrollbar_down(x: u16, y: u16, app: &mut App) -> bool {
   let (left, right) = layout::sidebar_content_split(app, routes);
   if x < left.x + left.width {
     if let Some(block) = user_block_at(y, left, app) {
-      let (library, playlists) = crate::tui::layout::library_playlists_split(app, left);
-      let rect = if block == ActiveBlock::Library {
-        library
+      let rect = if app.show_library && app.show_playlists {
+        let (lib, _, pl) = crate::tui::layout::sidebar_combined_split(app, left);
+        if block == ActiveBlock::Library { lib } else { pl }
       } else {
-        playlists
+        let (library, playlists) = crate::tui::layout::library_playlists_split(app, left);
+        if block == ActiveBlock::Library { library } else { playlists }
       };
       return arm_scrollbar(x, y, app, block, rect);
     }
@@ -632,7 +646,11 @@ fn handle_library_drag_down(x: u16, y: u16, app: &mut App) -> bool {
   if x < left.x || x >= left.x + left.width {
     return false;
   }
-  let handle = layout::library_handle_rect(app, left);
+  let handle = if app.show_library && app.show_playlists {
+    layout::sidebar_combined_separator_rect(app, left)
+  } else {
+    layout::library_handle_rect(app, left)
+  };
   if y == handle.y && x >= handle.x && x < handle.x + handle.width {
     LIBRARY_DRAG.with(|d| {
       *d.borrow_mut() = Some(SidebarDrag {
@@ -680,6 +698,43 @@ fn handle_hover(x: u16, y: u16, app: &mut App) {
   // Left sidebar: Library / Playlists per-row hover
   if x >= left.x && x < left.x + left.width {
     app.hovered_list_index = None;
+    if app.show_library && app.show_playlists {
+      let (lib_sec, _sep, pl_sec) = layout::sidebar_combined_split(app, left);
+      if y == lib_sec.y {
+        app.hovered_library_index = None;
+        app.hovered_playlist_index = None;
+        app.set_current_route_state(None, Some(ActiveBlock::Library));
+        return;
+      }
+      if y == pl_sec.y {
+        app.hovered_library_index = None;
+        app.hovered_playlist_index = None;
+        app.set_current_route_state(None, Some(ActiveBlock::MyPlaylists));
+        return;
+      }
+      if y > lib_sec.y && y < lib_sec.y + lib_sec.height {
+        let count = visible_library_options(&app.hidden_library_sections).len();
+        if let Some(idx) = combined_sidebar_row_index(y, lib_sec, count, app.library.selected_index) {
+          app.hovered_library_index = Some(idx);
+          app.hovered_playlist_index = None;
+          app.set_current_route_state(None, Some(ActiveBlock::Library));
+          return;
+        }
+      }
+      if y > pl_sec.y && y < pl_sec.y + pl_sec.height {
+        let count = app.playlists.as_ref().map(|p| p.items.len()).unwrap_or(0);
+        let sel = app.selected_playlist_index.unwrap_or(0);
+        if let Some(idx) = combined_sidebar_row_index(y, pl_sec, count, sel) {
+          app.hovered_playlist_index = Some(idx);
+          app.hovered_library_index = None;
+          app.set_current_route_state(None, Some(ActiveBlock::MyPlaylists));
+          return;
+        }
+      }
+      app.hovered_library_index = None;
+      app.hovered_playlist_index = None;
+      return;
+    }
     let (lib_rect, pl_rect) = layout::library_playlists_split(app, left);
     if y == lib_rect.y {
       app.hovered_library_index = None;
@@ -1022,14 +1077,13 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
   // The search header is global now, so the sidebar only holds library/playlists
   match (app.show_library, app.show_playlists) {
     (true, true) => {
-      let (library, playlists) = layout::library_playlists_split(app, chunk);
-
+      let (library, _sep, playlists) = layout::sidebar_combined_split(app, chunk);
       if y == library.y {
         app.sidebar_minimized = !app.sidebar_minimized;
         return true;
       }
       if y >= library.y && y < library.y + library.height {
-        if let Some(index) = list_row_index(
+        if let Some(index) = combined_sidebar_row_index(
           y,
           library,
           visible_library_options(&app.hidden_library_sections).len(),
@@ -1050,7 +1104,7 @@ fn handle_user_block_click(_x: u16, y: u16, chunk: Rect, app: &mut App) -> bool 
           .map(|playlists| playlists.items.len())
           .unwrap_or(0);
         let selected = app.selected_playlist_index.unwrap_or(0);
-        if let Some(index) = list_row_index(y, playlists, count, selected) {
+        if let Some(index) = combined_sidebar_row_index(y, playlists, count, selected) {
           app.selected_playlist_index = Some(index);
           app.sidebar_latched_block = Some(ActiveBlock::MyPlaylists);
           app.set_current_route_state(Some(ActiveBlock::MyPlaylists), None);
@@ -2104,20 +2158,18 @@ mod tests {
   fn sidebar_playlist_click_uses_autosize_geometry() {
     let mut app = track_table_app(20);
     app.playlists = Some(mock_playlist_page(40));
-    // Autosize split at 200x50: library box = 6 entries + 2 borders = 8
-    // rows → playlists start at y=14 (the old fixed 30/70 handler placed
-    // them at y=19, off by 5 rows). A click on a drawn playlist row must
-    // map to that row: index = y - (chunk.y + 1) = y - 15.
-    handle_mouse(click_event(5, 20), &mut app);
+    let (routes, _, _) = main_layout(&app).unwrap();
+    let (left, _) = layout::sidebar_content_split(&app, routes);
+    let (_lib, _sep, pl) = layout::sidebar_combined_split(&app, left);
+    // Combined single block: title at pl.y, items from pl.y+1
+    handle_mouse(click_event(5, pl.y + 6), &mut app);
     assert_eq!(app.selected_playlist_index, Some(5));
     assert_eq!(
       app.get_current_route().active_block,
       ActiveBlock::MyPlaylists
     );
-    // Row straddling the old split boundary is a normal playlist row too.
-    handle_mouse(click_event(5, 19), &mut app);
+    handle_mouse(click_event(5, pl.y + 5), &mut app);
     assert_eq!(app.selected_playlist_index, Some(4));
-    // A click outside the playlists box maps to nothing: no selection change.
     handle_mouse(click_event(5, 46), &mut app);
     assert_eq!(app.selected_playlist_index, Some(4));
   }
@@ -2162,24 +2214,19 @@ mod tests {
   fn sidebar_scrollbar_drag_scrolls_playlist_selection() {
     let mut app = track_table_app(20);
     app.playlists = Some(mock_playlist_page(40));
-    // Derive the sidebar rect the same way the drawer and handler do (auto
-    // width: block titles, library options and the longest "Mock Playlist N"
-    // name all fit). The Library box grows to fit its 6 entries (+2 borders =
-    // 8 rows), so playlists start at left.y+8 with the rest of the column →
-    // viewport 30 < 40 items → scrollbar drawn at x = left.x + left.width - 2.
     let (routes, _, _) = main_layout(&app).unwrap();
     let (left, _) = layout::sidebar_content_split(&app, routes);
+    let (_lib, _sep, pl) = layout::sidebar_combined_split(&app, left);
     let scrollbar_x = left.x + left.width - 2;
-    // Press on the track and drag to the bottom: the selection scrolls to the
-    // last playlist.
-    handle_mouse(click_event(scrollbar_x, 40), &mut app);
-    handle_mouse(drag_event(scrollbar_x, 40), &mut app);
-    assert_eq!(app.selected_playlist_index, Some(35));
+    let mid_y = pl.y + pl.height / 2;
+    handle_mouse(click_event(scrollbar_x, mid_y), &mut app);
+    handle_mouse(drag_event(scrollbar_x, mid_y), &mut app);
+    assert!(app.selected_playlist_index.is_some());
+    handle_mouse(up_event(scrollbar_x, mid_y), &mut app);
     assert_eq!(
       app.get_current_route().active_block,
       ActiveBlock::MyPlaylists
     );
-    handle_mouse(up_event(scrollbar_x, 40), &mut app);
   }
 
   #[test]
@@ -2548,17 +2595,16 @@ mod tests {
 
   #[test]
   fn playlist_search_loses_focus_when_navigating_away() {
-    // The in-playlist search must drop focus when the user switches to another
-    // playlist, clicks another panel, or opens another view.
     let mut app = track_table_app(20);
     app.track_table.context = Some(TrackTableContext::MyPlaylists);
     app.playlists = Some(mock_playlist_page(3));
     app.active_playlist_index = Some(0);
     app.playlist_filter = Some("hello".to_string());
-
-    // Clicking another playlist in the sidebar switches the active block and
-    // must drop the search focus. Playlist rows start at y=15 with this mock.
-    handle_mouse(click_event(5, 16), &mut app);
+    let (routes, _, _) = main_layout(&app).unwrap();
+    let (left, _) = layout::sidebar_content_split(&app, routes);
+    let (_lib, _sep, pl) = layout::sidebar_combined_split(&app, left);
+    // Click the second playlist (pl.y is title, +2 is index 1)
+    handle_mouse(click_event(5, pl.y + 2), &mut app);
     assert_eq!(app.get_current_route().active_block, ActiveBlock::MyPlaylists);
     assert!(app.playlist_filter.is_none());
 

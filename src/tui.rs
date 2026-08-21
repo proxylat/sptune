@@ -444,23 +444,41 @@ pub fn draw_routes(f: &mut Frame, app: &App, layout_chunk: Rect) {
 
   draw_user_block(f, app, sidebar);
   if !app.sidebar_minimized && app.user_config.behavior.enable_animations {
-    let handle = layout::sidebar_handle_rect(app, layout_chunk);
     let style = Style::default().fg(app.user_config.theme.inactive);
-    let (lib_rect, pl_rect) = layout::library_playlists_split(app, sidebar);
-    for r in [lib_rect, pl_rect] {
-      for y in r.y + 1..r.y + r.height.saturating_sub(1) {
+    if app.show_library && app.show_playlists {
+      // Single outer block: vertical handle inside the outer border, horizontal
+      // handle is the separator line itself.
+      let handle = layout::sidebar_handle_rect(app, layout_chunk);
+      for y in sidebar.y + 1..sidebar.y + sidebar.height.saturating_sub(1) {
         if let Some(cell) = f.buffer_mut().cell_mut((handle.x, y)) {
           cell.set_symbol("│");
           cell.set_style(style);
         }
       }
-    }
-    // Horizontal library/playlists divider handle
-    let lib_handle = layout::library_handle_rect(app, sidebar);
-    for x in lib_handle.x + 1..lib_handle.x + lib_handle.width.saturating_sub(1) {
-      if let Some(cell) = f.buffer_mut().cell_mut((x, lib_handle.y)) {
-        cell.set_symbol("─");
-        cell.set_style(style);
+      let sep = layout::sidebar_combined_separator_rect(app, sidebar);
+      for x in sep.x..sep.x + sep.width {
+        if let Some(cell) = f.buffer_mut().cell_mut((x, sep.y)) {
+          cell.set_symbol("─");
+          cell.set_style(style);
+        }
+      }
+    } else {
+      let handle = layout::sidebar_handle_rect(app, layout_chunk);
+      let (lib_rect, pl_rect) = layout::library_playlists_split(app, sidebar);
+      for r in [lib_rect, pl_rect] {
+        for y in r.y + 1..r.y + r.height.saturating_sub(1) {
+          if let Some(cell) = f.buffer_mut().cell_mut((handle.x, y)) {
+            cell.set_symbol("│");
+            cell.set_style(style);
+          }
+        }
+      }
+      let lib_handle = layout::library_handle_rect(app, sidebar);
+      for x in lib_handle.x + 1..lib_handle.x + lib_handle.width.saturating_sub(1) {
+        if let Some(cell) = f.buffer_mut().cell_mut((x, lib_handle.y)) {
+          cell.set_symbol("─");
+          cell.set_style(style);
+        }
       }
     }
   }
@@ -631,14 +649,189 @@ pub fn draw_playlist_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
   });
 }
 
+fn draw_sidebar_section<S>(
+  f: &mut Frame,
+  app: &App,
+  title: &str,
+  items: &[S],
+  highlight_state: (bool, bool),
+  selected_index: Option<usize>,
+  hovered_index: Option<usize>,
+  rect: Rect,
+) where
+  S: AsRef<str>,
+{
+  if rect.height == 0 || rect.width == 0 {
+    return;
+  }
+  let theme = app.user_config.theme;
+  // Title row
+  let title_style = get_color(highlight_state, theme).add_modifier(Modifier::BOLD);
+  let title_area = Rect::new(rect.x, rect.y, rect.width, 1);
+  f.render_widget(
+    Paragraph::new(Span::styled(title.to_string(), title_style)),
+    title_area,
+  );
+  if rect.height <= 1 {
+    return;
+  }
+  let list_rect = Rect::new(rect.x, rect.y + 1, rect.width, rect.height.saturating_sub(1));
+  let viewport = list_rect.height as usize;
+  let offset = match selected_index {
+    Some(s) => s.checked_sub(viewport).unwrap_or(0),
+    None => 0,
+  };
+  let mut state = ListState::default();
+  state.select(selected_index.map(|s| s.saturating_sub(offset)));
+  let lst_items: Vec<ListItem> = items
+    .iter()
+    .enumerate()
+    .skip(offset)
+    .take(viewport)
+    .map(|(i, item)| {
+      let is_load_more =
+        i == items.len().saturating_sub(1) && item.as_ref().trim_start().starts_with("Load more");
+      let mut inner_w = list_rect.width as usize;
+      if title == "Playlists" {
+        inner_w = (inner_w / 2).max(10);
+      }
+      let max_len = app.user_config.behavior.max_display_length as usize;
+      let fit = ellipsize(
+        item.as_ref(),
+        if max_len > 0 {
+          inner_w.min(max_len)
+        } else {
+          inner_w
+        },
+      );
+      let mut it = if is_load_more {
+        ListItem::new(Span::styled(
+          fit,
+          Style::default()
+            .fg(theme.load_more)
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC),
+        ))
+      } else {
+        ListItem::new(Span::raw(fit))
+      };
+      if app.user_config.behavior.enable_animations
+        && hovered_index == Some(i)
+        && selected_index != Some(i)
+      {
+        it = it.style(Style::default().bg(theme.hovered));
+      }
+      it
+    })
+    .collect();
+  let focused = highlight_state.0 || highlight_state.1;
+  let list = List::new(lst_items)
+    .style(Style::default().fg(theme.text))
+    .highlight_style(if focused {
+      get_color(highlight_state, theme).add_modifier(Modifier::BOLD)
+    } else {
+      Style::default().fg(theme.text)
+    });
+  f.render_stateful_widget(list, list_rect, &mut state);
+  draw_scrollbar(f, app, list_rect, items.len(), viewport, offset);
+}
+
 pub fn draw_user_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
-  // The search header is global now (draw_main_layout), so the sidebar just
-  // holds the library and playlists regardless of width
   match (app.show_library, app.show_playlists) {
     (true, true) => {
-      let (library, playlists) = layout::library_playlists_split(app, layout_chunk);
-      draw_library_block(f, app, library);
-      draw_playlist_block(f, app, playlists);
+      // One outer block with a horizontal separator between library and playlists.
+      let cur = app.get_current_route();
+      let lib_active = cur.active_block == ActiveBlock::Library
+        || app.sidebar_latched_block == Some(ActiveBlock::Library);
+      let pl_active = cur.active_block == ActiveBlock::MyPlaylists
+        || app.sidebar_latched_block == Some(ActiveBlock::MyPlaylists);
+      let lib_hovered = cur.hovered_block == ActiveBlock::Library;
+      let pl_hovered = cur.hovered_block == ActiveBlock::MyPlaylists;
+      let outer_active = lib_active || pl_active;
+      let outer_hovered = lib_hovered || pl_hovered;
+      let outer_style = get_color((outer_active, outer_hovered), app.user_config.theme);
+      let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(outer_style);
+      f.render_widget(outer_block, layout_chunk);
+      let (lib_sec, sep, pl_sec) = layout::sidebar_combined_split(app, layout_chunk);
+      // Horizontal line separator
+      if sep.height > 0 && sep.width > 0 {
+        let line = "─".repeat(sep.width as usize);
+        f.buffer_mut()
+          .set_string(sep.x, sep.y, &line, Style::default().fg(app.user_config.theme.inactive));
+      }
+      // Library section
+      let visible = visible_library_options(&app.hidden_library_sections);
+      let (lib_title, lib_items): (String, Vec<String>) = if app.sidebar_minimized {
+        let glyphs = visible
+          .iter()
+          .map(|n| n.chars().next().map(|c| c.to_string()).unwrap_or_default())
+          .collect();
+        ("L".to_string(), glyphs)
+      } else {
+        (
+          crate::app::library_block_title(app),
+          visible.iter().map(|s| s.to_string()).collect(),
+        )
+      };
+      let lib_hl = (lib_active, lib_hovered);
+      draw_sidebar_section(
+        f,
+        app,
+        &lib_title,
+        &lib_items,
+        lib_hl,
+        Some(lib_items.len().saturating_sub(1).min(app.library.selected_index)),
+        app.hovered_library_index,
+        lib_sec,
+      );
+      // Playlist section
+      let pl_title = if app.sidebar_minimized {
+        "P".to_string()
+      } else {
+        crate::app::playlists_block_title()
+      };
+      let pl_hl = (pl_active, pl_hovered);
+      // Reuse cached playlist items
+      PLAYLIST_ITEMS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let key = app
+          .playlists
+          .as_ref()
+          .map(|p| (p as *const _ as usize, p.items.len(), app.sidebar_minimized))
+          .unwrap_or((0, 0, app.sidebar_minimized));
+        if slot.0 != key.0 || slot.1 != key.1 || slot.2 != key.2 {
+          slot.3 = match &app.playlists {
+            Some(p) => p
+              .items
+              .iter()
+              .enumerate()
+              .map(|(i, it)| {
+                if app.sidebar_minimized {
+                  format!("{}", i + 1)
+                } else {
+                  it.name.clone()
+                }
+              })
+              .collect(),
+            None => vec![],
+          };
+          slot.0 = key.0;
+          slot.1 = key.1;
+          slot.2 = key.2;
+        }
+        let items: &Vec<String> = &slot.3;
+        draw_sidebar_section(
+          f,
+          app,
+          &pl_title,
+          items,
+          pl_hl,
+          app.selected_playlist_index,
+          app.hovered_playlist_index,
+          pl_sec,
+        );
+      });
     }
     (true, false) => draw_library_block(f, app, layout_chunk),
     (false, true) => draw_playlist_block(f, app, layout_chunk),
