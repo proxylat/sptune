@@ -47,59 +47,11 @@ fn play_context_from_uri<'a>(uri: &'a str) -> Option<PlayContextId<'a>> {
   Some(id)
 }
 
-/// Generate a 6-digit TOTP code for Spotify's anonymous web-player token
-/// endpoint. Standard RFC 6238: HMAC-SHA1 over the 30s counter, truncated.
-/// The static secret is reverse-engineered from Spotify's web client —
-// ponytail: disclosure — anonymous partner API (open.spotify.com/api/token) is undocumented; gate behind feature flag if terms require removal; no audio features cached, respects 30s TOTP window
-fn totp_code() -> String {
-  let counter = SystemTime::now()
-    .duration_since(SystemTime::UNIX_EPOCH)
-    .map(|d| d.as_secs() / 30)
-    .unwrap_or(0);
-  totp_at(counter)
-}
+// TOTP/anon partner API removed for terms compliance — algorithmic playlists now via Web API only
 
-fn totp_at(counter: u64) -> String {
-  const SECRET: &str =
-    "GM3TMMJTGYZTQNZVGM4DINJZHA4TGOBYGMZTCMRTGEYDSMJRHE4TEOBUG4YTCMRUGQ4DQOJUGQYTAMRRGA2TCMJSHE3TCMBY";
-  let key = base32_decode(SECRET);
-  use hmac::{Hmac, Mac};
-  let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&key).expect("hmac accepts any key");
-  mac.update(&counter.to_be_bytes());
-  let digest = mac.finalize().into_bytes();
-  let off = (digest[19] & 0x0f) as usize;
-  let code = u32::from_be_bytes([
-    digest[off],
-    digest[off + 1],
-    digest[off + 2],
-    digest[off + 3],
-  ]) & 0x7fff_ffff;
-  format!("{:06}", code % 1_000_000)
-}
-
-/// Decode a base32 (RFC 4648, no padding) string to bytes.
-fn base32_decode(input: &str) -> Vec<u8> {
-  const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  let mut out = Vec::new();
-  let mut bits: u32 = 0;
-  let mut nbits: u32 = 0;
-  for ch in input.bytes() {
-    let value = match ALPHABET.iter().position(|&a| a == ch) {
-      Some(v) => v as u32,
-      None => continue,
-    };
-    bits = (bits << 5) | value;
-    nbits += 5;
-    if nbits >= 8 {
-      nbits -= 8;
-      out.push((bits >> nbits) as u8);
-    }
-  }
-  out
-}
-
+// ponytail: partner API removed — below kept as stub for callers, returns error
 /// Map a partner-API `itemV2.data` track object into an internal
-/// [`FullTrack`] by reshaping it into the Web API shape rspotify expects.
+/// [`FullTrack`] by reshaping it into the Web API shape rspotify expects. (removed)
 fn partner_track_from_value(data: &serde_json::Value) -> anyhow::Result<Option<FullTrack>> {
   let uri = match data["uri"].as_str() {
     Some(u) if u.starts_with("spotify:track:") => u.to_string(),
@@ -213,60 +165,8 @@ fn partner_track_from_value(data: &serde_json::Value) -> anyhow::Result<Option<F
     .map_err(|e| anyhow!("partner track mapping failed: {}", e))
 }
 
-/// Anonymous partner-API credentials: an access token (TOTP-gated since
-/// Mar 2025) plus a client token.
 async fn partner_tokens() -> anyhow::Result<(String, String)> {
-  const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
-  let client = reqwest::Client::new();
-
-  let code = totp_code();
-  let url = format!(
-    "https://open.spotify.com/api/token?reason=init&productType=web-player&totp={}&totpVer=61&totpServer={}",
-    code, code
-  );
-  let resp: serde_json::Value = client
-    .get(&url)
-    .header("User-Agent", UA)
-    .send()
-    .await?
-    .json()
-    .await?;
-  let access = resp["accessToken"]
-    .as_str()
-    .ok_or_else(|| anyhow!("no accessToken in partner auth"))?
-    .to_string();
-  let client_id = resp["clientId"]
-    .as_str()
-    .ok_or_else(|| anyhow!("no clientId in partner auth"))?
-    .to_string();
-
-  let body = json!({
-    "client_data": {
-      "client_version": "1.2.45",
-      "client_id": client_id,
-      "js_sdk_data": {
-        "device_brand": "unknown", "device_model": "unknown",
-        "os": "windows", "os_version": "NT 10.0",
-        "device_id": "0000000000000000", "device_type": "computer"
-      }
-    }
-  });
-  let resp: serde_json::Value = client
-    .post("https://clienttoken.spotify.com/v1/clienttoken")
-    .header("Authority", "clienttoken.spotify.com")
-    .header("Content-Type", "application/json")
-    .header("Accept", "application/json")
-    .header("User-Agent", UA)
-    .json(&body)
-    .send()
-    .await?
-    .json()
-    .await?;
-  let client_token = resp["granted_token"]["token"]
-    .as_str()
-    .ok_or_else(|| anyhow!("no granted client token"))?
-    .to_string();
-  Ok((access, client_token))
+  anyhow::bail!("partner API removed for terms compliance — use Web API")
 }
 
 /// Parse a track/episode URI into a [`PlayableId`].
@@ -1557,131 +1457,12 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
   }
 
-  /// Fetch a playlist's name through Spotify's private partner API, for
-  /// algorithmic playlists that 404 on the public metadata endpoint.
-  async fn partner_playlist_name(&self, playlist_id: &str) -> anyhow::Result<String> {
-    const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
-    const FETCH_PLAYLIST_HASH: &str =
-      "86dde7b9d9356e2369414647cf6950cfed96e778e129cfdfc99aea6c1613b3b0";
-    let client = reqwest::Client::new();
-    let (access, client_token) = partner_tokens().await?;
-    let body = json!({
-      "variables": {
-        "uri": format!("spotify:playlist:{}", playlist_id),
-        "offset": 0,
-        "limit": 1,
-        "enableWatchFeedEntrypoint": false
-      },
-      "operationName": "fetchPlaylist",
-      "extensions": { "persistedQuery": { "version": 1, "sha256Hash": FETCH_PLAYLIST_HASH } }
-    });
-    let resp: serde_json::Value = client
-      .post("https://api-partner.spotify.com/pathfinder/v1/query")
-      .header("User-Agent", UA)
-      .header("Authorization", format!("Bearer {}", access))
-      .header("client-token", &client_token)
-      .header("origin", "https://open.spotify.com")
-      .header("referer", "https://open.spotify.com")
-      .header("Content-Type", "application/json")
-      .json(&body)
-      .send()
-      .await?
-      .json()
-      .await?;
-    resp["data"]["playlistV2"]["name"]
-      .as_str()
-      .map(|name| name.to_string())
-      .ok_or_else(|| anyhow!("no name in partner playlist response"))
+  async fn partner_playlist_name(&self, _playlist_id: &str) -> anyhow::Result<String> {
+    anyhow::bail!("partner API removed for terms compliance")
   }
 
-  /// Fetch a playlist's tracks through Spotify's private partner API. The
-  /// public Web API returns 404 for algorithmic playlists (Daily Mixes,
-  /// Discover Weekly), but the web player's GraphQL endpoint serves them.
-  async fn partner_playlist_tracks(
-    &self,
-    playlist_id: &str,
-    offset: u32,
-  ) -> anyhow::Result<(Page<PlaylistItem>, String)> {
-    #[allow(deprecated)]
-    {
-      const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
-      const FETCH_PLAYLIST_HASH: &str =
-        "86dde7b9d9356e2369414647cf6950cfed96e778e129cfdfc99aea6c1613b3b0";
-      let client = reqwest::Client::new();
-
-      // 1. Anonymous access token + client token.
-      let (access, client_token) = partner_tokens().await?;
-
-      // 2. One page at the requested offset (the caller loads more pages the
-      // same way it does for public playlists; fetching every page here made
-      // opens slow and hid the "Load more" row, since all tracks were loaded).
-      let mut items: Vec<PlaylistItem> = Vec::new();
-      let limit = API_MAX_LIMIT;
-      let body = json!({
-        "variables": {
-          "uri": format!("spotify:playlist:{}", playlist_id),
-          "offset": offset,
-          "limit": limit,
-          "enableWatchFeedEntrypoint": false
-        },
-        "operationName": "fetchPlaylist",
-        "extensions": { "persistedQuery": { "version": 1, "sha256Hash": FETCH_PLAYLIST_HASH } }
-      });
-      let resp: serde_json::Value = client
-        .post("https://api-partner.spotify.com/pathfinder/v1/query")
-        .header("User-Agent", UA)
-        .header("Authorization", format!("Bearer {}", access))
-        .header("client-token", &client_token)
-        .header("origin", "https://open.spotify.com")
-        .header("referer", "https://open.spotify.com")
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await?
-        .json()
-        .await?;
-      let content = &resp["data"]["playlistV2"]["content"];
-      let name = resp["data"]["playlistV2"]["name"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-      let total = content["totalCount"].as_u64().unwrap_or(0) as u32;
-      let page = content["items"]
-        .as_array()
-        .ok_or_else(|| anyhow!("no items in partner playlist response"))?;
-      for entry in page {
-        let data = &entry["itemV2"]["data"];
-        if data["__typename"].as_str() != Some("Track") {
-          continue;
-        }
-        if let Some(track) = partner_track_from_value(data)? {
-          let added_at = entry["itemV2"]["addedAt"]["isoString"]
-            .as_str()
-            .or_else(|| entry["addedAt"]["isoString"].as_str())
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&Utc));
-          items.push(PlaylistItem {
-            added_at,
-            added_by: None,
-            is_local: false,
-            track: Some(PlayableItem::Track(track.clone())),
-            item: Some(PlayableItem::Track(track)),
-          });
-        }
-      }
-      Ok((
-        Page {
-          href: String::new(),
-          items,
-          limit,
-          next: None,
-          offset,
-          previous: None,
-          total,
-        },
-        name,
-      ))
-    }
+  async fn partner_playlist_tracks(&self, _playlist_id: &str, _offset: u32) -> anyhow::Result<(Page<PlaylistItem>, String)> {
+    anyhow::bail!("partner API removed for terms compliance")
   }
 
   /// Load every remaining page of a playlist so a column sort spans the
@@ -4678,30 +4459,6 @@ mod tests {
     );
     // Untagged trailing line and metadata tags are dropped.
     assert!(!parsed.iter().any(|(_, w)| w == "no tag line"));
-  }
-
-  #[test]
-  fn totp_code_is_six_digits() {
-    let code = totp_code();
-    assert_eq!(code.len(), 6);
-    assert!(code.chars().all(|c| c.is_ascii_digit()));
-  }
-
-  #[test]
-  fn totp_matches_reference_vectors() {
-    // Cross-checked against a Python RFC-6238 implementation.
-    assert_eq!(totp_at(0), "204513");
-    assert_eq!(totp_at(123456), "969896");
-    assert_eq!(totp_at(9_000_000_000), "621776");
-  }
-
-  #[test]
-  fn base32_decode_matches_known_secret() {
-    // The Spotify secret base32-decodes to 20 bytes (one SHA1 block).
-    let bytes = base32_decode(
-      "GM3TMMJTGYZTQNZVGM4DINJZHA4TGOBYGMZTCMRTGEYDSMJRHE4TEOBUG4YTCMRUGQ4DQOJUGQYTAMRRGA2TCMJSHE3TCMBY",
-    );
-    assert_eq!(bytes.len(), 60);
   }
 
   #[test]
