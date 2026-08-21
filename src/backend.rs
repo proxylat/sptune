@@ -1321,13 +1321,8 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
   }
 
   async fn refresh_playlists(&mut self) {
-    self.library_cache.ensure_loaded();
-    if self.library_cache.get("playlists").is_some() {
-      self.reconcile_playlists().await;
-      self.serve_playlists_cache().await;
-    } else {
-      self.get_current_user_playlists().await;
-    }
+    self.refetch_playlists().await;
+    self.serve_playlists_cache().await;
   }
 
   // A playlist pasted into the search box is added to For you. Must run after
