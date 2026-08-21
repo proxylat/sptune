@@ -28,6 +28,7 @@ pub fn playlist_item_uri(item: &PlaylistItem) -> Option<String> {
 
 /// Cached track list of a playlist, keyed by playlist id. Entries never
 /// expire; the screen is served from cache and merged with a delta probe
+// ponytail: terms — only PlaylistItem/FullTrack metadata, no audio features; reconciled via snapshot_id tail probe (backend.rs:1787); SAVED_CHECK_TTL 300s (backend.rs:643) for ❤️
 /// (tail fetch) on open, so a changed playlist picks up new tracks only.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct CachedPlaylist {
