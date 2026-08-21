@@ -617,6 +617,10 @@ thread_local! {
     std::cell::RefCell::new((0, 0, false, Vec::new())); // (page_ptr, len, minimized, items)
 }
 
+pub fn bust_playlist_items_cache() {
+  PLAYLIST_ITEMS.with(|c| *c.borrow_mut() = (0, 0, false, Vec::new()));
+}
+
 pub fn draw_playlist_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
   let current_route = app.get_current_route();
 
@@ -742,7 +746,13 @@ fn draw_sidebar_section<S>(
         && hovered_index == Some(i)
         && selected_index != Some(i)
       {
-        it = it.style(Style::default().bg(theme.hovered));
+        let w = UnicodeWidthStr::width(fit.as_str());
+        let pad = inner_w.saturating_sub(w);
+        let hovered = Span::styled(
+          format!("{}{}", fit, " ".repeat(pad)),
+          Style::default().fg(theme.text).bg(theme.hovered),
+        );
+        it = ListItem::new(hovered);
       }
       it
     })
@@ -3096,7 +3106,12 @@ fn draw_selectable_list<S>(
         ListItem::new(Span::raw(fit))
       };
       if app.user_config.behavior.enable_animations && hovered_index == Some(i) && selected_index != Some(i) {
-        item = item.style(Style::default().bg(app.user_config.theme.hovered));
+        let w = UnicodeWidthStr::width(fit.as_str());
+        let pad = inner_w.saturating_sub(w);
+        item = ListItem::new(Span::styled(
+          format!("{}{}", fit, " ".repeat(pad)),
+          Style::default().fg(theme.text).bg(theme.hovered),
+        ));
       }
       item
     })
@@ -3421,7 +3436,6 @@ fn draw_table(
         .add_modifier(Modifier::BOLD | Modifier::ITALIC);
     }
 
-    // Hover bg for every panel (herdr-like full-row highlight) — before selection overlay
     if app.user_config.behavior.enable_animations
       && app.hovered_list_index == Some(offset + i)
       && !(app.selection_engaged && selected_index == offset + i)
