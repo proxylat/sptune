@@ -8,17 +8,14 @@
 !rustfmt.toml
 !LICENSE
 !README.md
-!CHANGELOG.md
-!REFACTORING_PLAYBOOK.md
-!REMINDERS.md
+!/chromium_flags.yml.example
 # Source code
 !/src/
 !/vendor/
 !/docs/
-/docs/*
-!/docs/chromium_flags.yml.example
 
 # Secrets / local config (never commit, even if un-ignored later)
+/docs/*
 client.yml
 .env
 .spotify_token_cache.json
