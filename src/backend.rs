@@ -1734,6 +1734,35 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     playlist_track_page: &Page<PlaylistItem>,
     append: bool,
   ) {
+    // Confirm before fix: log raw vs filtered counts for 30→27 diagnosis
+    {
+      let total = playlist_track_page.total;
+      let items_len = playlist_track_page.items.len();
+      let null_count = playlist_track_page
+        .items
+        .iter()
+        .filter(|i| i.item.is_none())
+        .count();
+      let unplayable = playlist_track_page
+        .items
+        .iter()
+        .filter(|i| matches!(i.item.as_ref(), Some(PlayableItem::Track(t)) if t.is_playable == Some(false)))
+        .count();
+      let episodes = playlist_track_page
+        .items
+        .iter()
+        .filter(|i| matches!(i.item.as_ref(), Some(PlayableItem::Episode(_))))
+        .count();
+      eprintln!(
+        "[confirm] playlist total={} items_len={} null={} unplayable={} episodes={} filtered_will_be={}",
+        total,
+        items_len,
+        null_count,
+        unplayable,
+        episodes,
+        items_len - unplayable // episodes+null currently dropped after pos accounting, vs B will show 30
+      );
+    }
     // Spotify's context offset skips explicitly unavailable tracks
     // (is_playable: false); they are hidden from the table and dropped from
     // the offset count. Episodes, unknown items, and empty entries keep their
@@ -1759,7 +1788,20 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     let mut raw_index: Vec<usize> = Vec::new();
     let mut pos = base;
     for item in playlist_track_page.items.iter() {
+      // B fix: show unavailable as disabled grey rows so 30→30 (was 30→27 via _=>{} drop)
       if !Self::playlist_item_counts_for_offset(item) {
+        // is_playable==false still occupies? spec says skip offset, but we show disabled
+        // keep pos not incremented for these per spec, and render as disabled
+        let placeholder: FullTrack = serde_json::from_value(serde_json::json!({
+          "album": { "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "" }], "external_urls": {}, "href": null, "id": null, "images": [], "name": "" },
+          "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "" }],
+          "disc_number": 1, "duration_ms": 0, "explicit": false, "external_ids": {}, "external_urls": {}, "href": null, "id": null, "is_local": false, "name": "— Unavailable —", "preview_url": null, "track_number": 1, "type": "track", "is_playable": false
+        }))
+        .unwrap();
+        added_at.push(item.added_at);
+        tracks.push(placeholder);
+        raw_index.push(pos);
+        // do not pos+=1 for is_playable false per spec? keep spec: pos unchanged
         continue;
       }
       match item.item.as_ref() {
@@ -1768,7 +1810,32 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
           tracks.push(t.clone());
           raw_index.push(pos);
         }
-        _ => {}
+        Some(PlayableItem::Episode(e)) => {
+          let placeholder: FullTrack = serde_json::from_value(serde_json::json!({
+            "album": { "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "" }], "external_urls": {}, "href": null, "id": null, "images": [], "name": "" },
+            "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "" }],
+            "disc_number": 1, "duration_ms": e.duration.num_milliseconds() as u64, "explicit": false, "external_ids": {}, "external_urls": {}, "href": null, "id": null, "is_local": false, "name": format!("Episode: {}", e.name), "preview_url": null, "track_number": 1, "type": "track", "is_playable": false
+          }))
+          .unwrap_or_else(|_| serde_json::from_value(serde_json::json!({
+            "album": { "artists": [], "external_urls": {}, "href": null, "id": null, "images": [], "name": "" },
+            "artists": [], "disc_number": 1, "duration_ms": 0, "explicit": false, "external_ids": {}, "external_urls": {}, "href": null, "id": null, "is_local": false, "name": "— Unavailable —", "preview_url": null, "track_number": 1, "type": "track", "is_playable": false
+          })).unwrap());
+          added_at.push(item.added_at);
+          tracks.push(placeholder);
+          raw_index.push(pos);
+        }
+        _ => {
+          // None / unknown → placeholder so count matches total (30)
+          let placeholder: FullTrack = serde_json::from_value(serde_json::json!({
+            "album": { "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "" }], "external_urls": {}, "href": null, "id": null, "images": [], "name": "" },
+            "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "" }],
+            "disc_number": 1, "duration_ms": 0, "explicit": false, "external_ids": {}, "external_urls": {}, "href": null, "id": null, "is_local": false, "name": "— Unavailable —", "preview_url": null, "track_number": 1, "type": "track", "is_playable": false
+          }))
+          .unwrap();
+          added_at.push(item.added_at);
+          tracks.push(placeholder);
+          raw_index.push(pos);
+        }
       }
       pos += 1;
     }
@@ -4309,10 +4376,11 @@ mod tests {
       network.set_playlist_tracks_to_table(&page, false).await;
     });
     let app = app.try_lock().unwrap();
-    assert_eq!(app.track_table.tracks.len(), 2);
-    assert_eq!(app.track_table_raw_index, vec![0, 1]);
+    assert_eq!(app.track_table.tracks.len(), 3);
+    assert_eq!(app.track_table_raw_index, vec![0, 1, 1]);
     assert_eq!(app.track_table.tracks[0].name, "Mock Song 0");
-    assert_eq!(app.track_table.tracks[1].name, "Mock Song 2");
+    assert_eq!(app.track_table.tracks[1].name, "— Unavailable —");
+    assert_eq!(app.track_table.tracks[2].name, "Mock Song 2");
   }
 
   #[test]
@@ -4355,10 +4423,11 @@ mod tests {
       network.set_playlist_tracks_to_table(&page, false).await;
     });
     let app = app.try_lock().unwrap();
-    assert_eq!(app.track_table.tracks.len(), 2);
-    assert_eq!(app.track_table_raw_index, vec![0, 2]);
+    assert_eq!(app.track_table.tracks.len(), 3);
+    assert_eq!(app.track_table_raw_index, vec![0, 1, 2]);
     assert_eq!(app.track_table.tracks[0].name, "Mock Song 0");
-    assert_eq!(app.track_table.tracks[1].name, "Mock Song 2");
+    assert_eq!(app.track_table.tracks[1].name, "— Unavailable —");
+    assert_eq!(app.track_table.tracks[2].name, "Mock Song 2");
   }
 
   #[test]
