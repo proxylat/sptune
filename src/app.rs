@@ -1634,6 +1634,46 @@ impl App {
       .any(|(id, uris)| uris.contains(uri) && exclude.map(|e| e != id).unwrap_or(true))
   }
 
+  pub fn is_in_any_playlist(&self, uri: &str) -> bool {
+    self.playlist_contains(uri, None)
+  }
+
+  pub fn playlists_containing(&self, uri: &str) -> Vec<String> {
+    let mut names: Vec<String> = self
+      .playlist_uri_map
+      .iter()
+      .filter(|(_, uris)| uris.contains(uri))
+      .filter_map(|(id, _)| {
+        self
+          .playlists
+          .as_ref()?
+          .items
+          .iter()
+          .find(|p| p.id.to_string() == *id || p.id.uri() == *id)
+          .map(|p| p.name.clone())
+      })
+      .collect();
+    names.sort();
+    names.dedup();
+    names
+  }
+
+  pub fn playing_track_uri(&self) -> Option<String> {
+    match &self.current_playback_context.as_ref()?.item {
+      Some(PlayableItem::Track(t)) => t.id.as_ref().map(|id| id.uri()),
+      _ => None,
+    }
+  }
+
+  pub fn open_add_to_playlist_for_uri(&mut self, uri: String) {
+    if !self.user_config.behavior.enable_add_to_playlist {
+      return;
+    }
+    self.pending_track_uri = Some(uri);
+    self.playlist_picker_index = 0;
+    self.push_navigation_stack(RouteId::Dialog, ActiveBlock::Dialog(DialogContext::AddToPlaylist));
+  }
+
   pub fn user_unfollow_playlist_search_result(&mut self) {
     if let (Some(playlists), Some(selected_index), Some(user)) = (
       &self.search_results.playlists,

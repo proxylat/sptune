@@ -985,6 +985,15 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
     }
   }
 
+  // Prefix [+ / ✓] on the song row: + opens add-to-playlist picker
+  if y == playbar_song_row(playbar).y {
+    if let Some(uri) = app.playing_track_uri() {
+      if !app.is_in_any_playlist(&uri) && x == playbar_song_row(playbar).x {
+        app.open_add_to_playlist_for_uri(uri);
+        return;
+      }
+    }
+  }
   // Track name opens the album, artist name opens the artist page. Both
   // zones cover only the text as drawn (shared truncation limits), not the
   // whole row.
