@@ -27,7 +27,7 @@ pub const PLAYBAR_TIME_LEN: u16 = 6;
 // volume ramp bar, mouse interactions, theme preset, seek by typing,
 // resume last song, restore settings, clear cache, dev view, columns,
 // visualizer style
-pub const SETTINGS_ROW_COUNT: u16 = 19;
+pub const SETTINGS_ROW_COUNT: u16 = 20;
 
 // Prefix for list panel titles; clicking the title row refreshes the list.
 pub const REFRESH_GLYPH: &str = "♻ ";
@@ -434,10 +434,19 @@ pub fn sidebar_content_split(app: &App, chunk: Rect) -> (Rect, Rect) {
   (columns[0], columns[1])
 }
 
+pub const SIDEBAR_MIN_WIDTH: u16 = 12;
+
 /// Sidebar width: in expanded mode, sized to the longest rendered line (block
 /// titles, library options, playlist names) + padding; in minimized mode,
-/// sized to the widest playlist number.
+/// sized to the widest playlist number. When `sidebar_width_override` is set
+/// (drag resize, persisted to state.json) it wins over the auto size, clamped
+/// to [SIDEBAR_MIN_WIDTH, chunk.width/2].
 pub fn sidebar_width(app: &App, chunk: Rect) -> u16 {
+  if !app.sidebar_minimized {
+    if let Some(w) = app.sidebar_width_override {
+      return w.clamp(SIDEBAR_MIN_WIDTH, chunk.width / 2);
+    }
+  }
   let playlist_len = app
     .playlists
     .as_ref()
@@ -453,6 +462,12 @@ pub fn sidebar_width(app: &App, chunk: Rect) -> u16 {
   // column, so it needs no extra cell; the expanded one reserves one for it.
   let extra = if app.sidebar_minimized { 0 } else { 1 };
   (content_len as u16 + 2 + extra).min(chunk.width / 2)
+}
+
+pub fn sidebar_handle_rect(app: &App, chunk: Rect) -> Rect {
+  let w = sidebar_width(app, chunk);
+  // 1-col handle at the sidebar's right edge, inside the sidebar column
+  Rect::new(chunk.x + w.saturating_sub(1), chunk.y, 1, chunk.height)
 }
 
 // Sidebar split: the Library box grows to fit its (small) entry list so it

@@ -78,6 +78,18 @@ pub fn playlists_block_title() -> String {
   format!("{}{}", crate::tui::layout::REFRESH_GLYPH, "Playlists")
 }
 
+pub fn library_row_letter(name: &str) -> char {
+  match name {
+    "For you" => 'F',
+    "Recently Played" => 'R',
+    "Liked Songs" => 'L',
+    "Albums" => 'A',
+    "Artists" => 'S',
+    "Podcasts" => 'P',
+    _ => name.chars().next().unwrap_or('•'),
+  }
+}
+
 /// Longest line the sidebar renders right now: both block titles plus every
 /// visible library option and playlist name. Used to size the panel to its
 /// content so nothing clips and no columns are wasted.
@@ -409,6 +421,9 @@ pub struct App {
   // highlight stays visible while browsing the page opened from it, until
   // the user engages something outside the sidebar (search box, gear).
   pub sidebar_latched_block: Option<ActiveBlock>,
+  pub hovered_library_index: Option<usize>,
+  pub hovered_playlist_index: Option<usize>,
+  pub hovered_list_index: Option<usize>,
   pub followed_artist_ids_set: HashSet<String>,
   pub saved_album_ids_set: HashSet<String>,
   pub saved_show_ids_set: HashSet<String>,
@@ -497,6 +512,7 @@ pub struct App {
   pub show_library: bool,
   pub show_playlists: bool,
   pub sidebar_minimized: bool,
+  pub sidebar_width_override: Option<u16>,
   pub hidden_library_sections: Vec<String>,
   pub config_theme: Theme,
   pub theme_preset_index: Option<usize>,
@@ -613,6 +629,10 @@ impl Default for App {
       show_library: true,
       show_playlists: true,
       sidebar_minimized: false,
+      sidebar_width_override: None,
+      hovered_library_index: None,
+      hovered_playlist_index: None,
+      hovered_list_index: None,
       hidden_library_sections: vec![],
       config_theme: Theme::default(),
       theme_preset_index: None,
@@ -2162,14 +2182,17 @@ impl App {
           _ => 0,
         };
       }
+      18 => {
+        self.user_config.behavior.enable_animations = !self.user_config.behavior.enable_animations;
+      }
       // Clear the on-disk playlist/library caches. Danger action: the last
       // settings row is styled red, so this stays the last arm too.
-      18 => {
+      19 => {
         self.dispatch(IoEvent::CleanCache);
       }
       _ => {}
     }
-    if index <= 18 {
+    if index <= 19 {
       self.dispatch(IoEvent::SaveState);
     }
   }

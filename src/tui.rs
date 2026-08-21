@@ -249,6 +249,10 @@ fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'a>> {
         app.user_config.behavior.max_display_length.to_string()
       }
     ),
+    format!(
+      "Animations: {}",
+      on_off(app.user_config.behavior.enable_animations)
+    ),
     // Danger action: styled red and always last in the block.
     match app.user_config.keys.clear_cache {
       Some(key) => format!("Clear cache ({})", key),
@@ -439,6 +443,19 @@ pub fn draw_routes(f: &mut Frame, app: &App, layout_chunk: Rect) {
   let (sidebar, content_rect) = layout::sidebar_content_split(app, layout_chunk);
 
   draw_user_block(f, app, sidebar);
+  if !app.sidebar_minimized {
+    let handle = layout::sidebar_handle_rect(app, layout_chunk);
+    let style = Style::default().fg(app.user_config.theme.inactive);
+    let (lib_rect, pl_rect) = layout::library_playlists_split(app, sidebar);
+    for r in [lib_rect, pl_rect] {
+      for y in r.y + 1..r.y + r.height.saturating_sub(1) {
+        if let Some(cell) = f.buffer_mut().cell_mut((handle.x, y)) {
+          cell.set_symbol("│");
+          cell.set_style(style);
+        }
+      }
+    }
+  }
 
   let current_route = app.get_current_route();
 
@@ -537,6 +554,7 @@ pub fn draw_library_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
         .selected_index
         .min(items.len().saturating_sub(1)),
     ),
+    app.hovered_library_index,
   );
 }
 
@@ -600,6 +618,7 @@ pub fn draw_playlist_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
       items,
       highlight_state,
       app.selected_playlist_index,
+      app.hovered_playlist_index,
     );
   });
 }
@@ -678,6 +697,7 @@ fn draw_request_log(f: &mut Frame, app: &App, layout_chunk: Rect) {
     app
       .request_log_index
       .map(|index| index.min(items.len().saturating_sub(1))),
+    app.hovered_list_index,
   );
 }
 
@@ -711,7 +731,7 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
   match &expanded {
     SearchResultBlock::Empty => {
       let empty: Vec<String> = vec![];
-      draw_selectable_list(f, app, list_rect, "", &empty, (false, false), None);
+      draw_selectable_list(f, app, list_rect, "", &empty, (false, false), None, app.hovered_list_index);
     }
     SearchResultBlock::SongSearch => {
       let b = &app.user_config.behavior;
@@ -836,6 +856,7 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
         &items,
         get_search_results_highlight_state(app, expanded.clone()),
         selected,
+        app.hovered_list_index,
       );
     }
   }
@@ -2352,6 +2373,7 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
         &items,
         get_artist_highlight_state(app, shown),
         selected,
+        app.hovered_list_index,
       );
     }
   }
@@ -2614,6 +2636,7 @@ pub fn draw_made_for_you(f: &mut Frame, app: &App, layout_chunk: Rect) {
     } else {
       None
     },
+    app.hovered_list_index,
   );
 }
 
@@ -2761,6 +2784,7 @@ fn draw_selectable_list<S>(
   items: &[S],
   highlight_state: (bool, bool),
   selected_index: Option<usize>,
+  hovered_index: Option<usize>,
 ) where
   S: std::convert::AsRef<str>,
 {
@@ -2787,9 +2811,12 @@ fn draw_selectable_list<S>(
       // Graceful truncation: keep the head + "..." so long labels never get cut
       // mid-word by the list's hard edge. Inner width = bordered chunk minus 1.
       let max_len = app.user_config.behavior.max_display_length as usize;
-      let inner_w = layout_chunk.width.saturating_sub(1) as usize;
+      let mut inner_w = layout_chunk.width.saturating_sub(1) as usize;
+      if title == "Playlists" {
+        inner_w = (inner_w / 2).max(10);
+      }
       let fit = ellipsize(item.as_ref(), if max_len > 0 { inner_w.min(max_len) } else { inner_w });
-      if is_load_more {
+      let mut item = if is_load_more {
         ListItem::new(Span::styled(
           fit,
           Style::default()
@@ -2798,7 +2825,11 @@ fn draw_selectable_list<S>(
         ))
       } else {
         ListItem::new(Span::raw(fit))
+      };
+      if app.user_config.behavior.enable_animations && hovered_index == Some(i) && selected_index != Some(i) {
+        item = item.style(Style::default().bg(app.user_config.theme.hovered));
       }
+      item
     })
     .collect();
 
@@ -3119,6 +3150,14 @@ fn draw_table(
       style = Style::default()
         .fg(app.user_config.theme.load_more)
         .add_modifier(Modifier::BOLD | Modifier::ITALIC);
+    }
+
+    // Hover bg for every panel (herdr-like full-row highlight) — before selection overlay
+    if app.user_config.behavior.enable_animations
+      && app.hovered_list_index == Some(offset + i)
+      && !(app.selection_engaged && selected_index == offset + i)
+    {
+      style = style.bg(app.user_config.theme.hovered);
     }
 
     // Next check if the item is under selection.
