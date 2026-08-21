@@ -29,6 +29,8 @@ pub fn resolve_binary(cfg: &SpotifyConfig) -> Option<PathBuf> {
   None
 }
 
+// Launcher never hard-codes flags; it delegates to chromium_flags presets
+// (lean/safe/audioOnly) via load_flags(). User yml overrides const entirely.
 pub fn build_args(cfg: &SpotifyConfig) -> Vec<String> {
   if !cfg.use_chromium_flags {
     return vec![];

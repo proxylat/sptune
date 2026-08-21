@@ -350,7 +350,7 @@ impl Default for SpotifyConfig {
       use_chromium_flags: false,
       suspend_children: false,
       trim_working_set: false,
-      memory_limit_mb: 0,
+      memory_limit_mb: 150,
     }
   }
 }
