@@ -732,28 +732,26 @@ fn draw_sidebar_section<S>(
           inner_w
         },
       );
+      let is_hovered = app.user_config.behavior.enable_animations
+        && hovered_index == Some(i)
+        && selected_index != Some(i);
       let mut it = if is_load_more {
         ListItem::new(Span::styled(
-          fit,
+          fit.clone(),
           Style::default()
             .fg(theme.load_more)
             .add_modifier(Modifier::BOLD | Modifier::ITALIC),
         ))
+      } else if is_hovered {
+        let w = UnicodeWidthStr::width(fit.as_str());
+        let pad = inner_w.saturating_sub(w);
+        ListItem::new(Span::styled(
+          format!("{}{}", fit, " ".repeat(pad)),
+          Style::default().fg(theme.text).bg(theme.hovered),
+        ))
       } else {
         ListItem::new(Span::raw(fit))
       };
-      if app.user_config.behavior.enable_animations
-        && hovered_index == Some(i)
-        && selected_index != Some(i)
-      {
-        let w = UnicodeWidthStr::width(fit.as_str());
-        let pad = inner_w.saturating_sub(w);
-        let hovered = Span::styled(
-          format!("{}{}", fit, " ".repeat(pad)),
-          Style::default().fg(theme.text).bg(theme.hovered),
-        );
-        it = ListItem::new(hovered);
-      }
       it
     })
     .collect();
@@ -3095,24 +3093,25 @@ fn draw_selectable_list<S>(
         inner_w = (inner_w / 2).max(10);
       }
       let fit = ellipsize(item.as_ref(), if max_len > 0 { inner_w.min(max_len) } else { inner_w });
+      let is_hovered = app.user_config.behavior.enable_animations && hovered_index == Some(i) && selected_index != Some(i);
       let mut item = if is_load_more {
         ListItem::new(Span::styled(
-          fit,
+          fit.clone(),
           Style::default()
             .fg(app.user_config.theme.load_more)
             .add_modifier(Modifier::BOLD | Modifier::ITALIC),
         ))
+      } else if is_hovered {
+        let w = UnicodeWidthStr::width(fit.as_str());
+        let pad = inner_w.saturating_sub(w);
+        let t = app.user_config.theme;
+        ListItem::new(Span::styled(
+          format!("{}{}", fit, " ".repeat(pad)),
+          Style::default().fg(t.text).bg(t.hovered),
+        ))
       } else {
         ListItem::new(Span::raw(fit))
       };
-      if app.user_config.behavior.enable_animations && hovered_index == Some(i) && selected_index != Some(i) {
-        let w = UnicodeWidthStr::width(fit.as_str());
-        let pad = inner_w.saturating_sub(w);
-        item = ListItem::new(Span::styled(
-          format!("{}{}", fit, " ".repeat(pad)),
-          Style::default().fg(theme.text).bg(theme.hovered),
-        ));
-      }
       item
     })
     .collect();
@@ -3436,12 +3435,9 @@ fn draw_table(
         .add_modifier(Modifier::BOLD | Modifier::ITALIC);
     }
 
-    if app.user_config.behavior.enable_animations
+    let is_hovered = app.user_config.behavior.enable_animations
       && app.hovered_list_index == Some(offset + i)
-      && !(app.selection_engaged && selected_index == offset + i)
-    {
-      style = style.bg(app.user_config.theme.hovered);
-    }
+      && !(app.selection_engaged && selected_index == offset + i);
 
     // Next check if the item is under selection.
     if app.selection_engaged && Some(i) == selected_index.checked_sub(offset) {
@@ -3482,7 +3478,48 @@ fn draw_table(
           col_id,
           Some(ColumnId::Artist | ColumnId::Album | ColumnId::DateAdded | ColumnId::Length)
         );
-        if is_secondary {
+        if is_hovered {
+          // trailing add/remove columns (✓/+ and ✕) should not get hover
+          if matches!(col_id, Some(ColumnId::None)) {
+            if is_secondary {
+              ratatui::widgets::Cell::from(fit).style(dim)
+            } else {
+              ratatui::widgets::Cell::from(fit)
+            }
+          } else {
+            let hover_bg = Style::default().bg(app.user_config.theme.hovered);
+            let full_w = header.items.get(idx).map(|h| h.width as usize).unwrap_or(col_width);
+            // # column: don't cover leading spaces before number
+            if matches!(col_id, Some(ColumnId::Liked)) {
+            let trimmed = fit.trim_start();
+            let leading = fit.len().saturating_sub(trimmed.len());
+            let content_w = UnicodeWidthStr::width(trimmed);
+            let pad = full_w.saturating_sub(content_w + leading);
+            let line = Line::from(vec![
+              Span::raw(" ".repeat(leading)),
+              Span::styled(format!("{}{}", trimmed, " ".repeat(pad)), hover_bg),
+            ]);
+            ratatui::widgets::Cell::from(line)
+          } else if matches!(col_id, Some(ColumnId::Length)) {
+            ratatui::widgets::Cell::from(Line::from(vec![Span::styled(
+              fit.clone(),
+              Style::default().fg(app.user_config.theme.inactive).bg(app.user_config.theme.hovered),
+            )]))
+          } else if is_secondary {
+            let pad = full_w.saturating_sub(UnicodeWidthStr::width(fit.as_str()));
+            ratatui::widgets::Cell::from(Line::from(vec![Span::styled(
+              format!("{}{}", fit, " ".repeat(pad)),
+              dim.patch(hover_bg),
+            )]))
+          } else {
+            let pad = full_w.saturating_sub(UnicodeWidthStr::width(fit.as_str()));
+            ratatui::widgets::Cell::from(Line::from(vec![Span::styled(
+              format!("{}{}", fit, " ".repeat(pad)),
+              hover_bg,
+            )]))
+          }
+          }
+        } else if is_secondary {
           ratatui::widgets::Cell::from(fit).style(dim)
         } else {
           ratatui::widgets::Cell::from(fit)
@@ -3499,6 +3536,7 @@ fn draw_table(
     .collect::<Vec<ratatui::layout::Constraint>>();
 
   let table = Table::new(rows, widths)
+    .column_spacing(0)
     .header(
       Row::new(header.items.iter().map(|h| {
         if matches!(h.id, ColumnId::Liked | ColumnId::None) {
@@ -4371,7 +4409,7 @@ mod tests {
     // visible gap = 1 (# itself) + spacing(1) + gap. Compare char indices
     // (the leading border glyph is multibyte, so byte offsets would skew).
     let gap = crate::tui::layout::NUMBER_TO_TITLE_GAP as usize;
-    let spacing = 1;
+    let spacing = 0;
     let header: String = (0..60)
       .map(|x| buffer.cell((x, 1)).map(|c| c.symbol()).unwrap_or(" "))
       .collect();
