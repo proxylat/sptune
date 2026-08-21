@@ -660,17 +660,9 @@ pub fn playbar_controls_x(playbar: Rect, controls: &[(PlaybarButton, String)]) -
 // separate span rendered after the group (see repeat_label) so the button
 // group keeps a constant width. All strings are fixed-width so the group
 // never re-centers between states; the centering math uses unicode widths.
-// Smart shuffle shows "Smart ⇄" in the shuffle slot.
-pub fn build_playbar_controls(is_playing: bool, smart_shuffle: bool) -> Vec<(PlaybarButton, String)> {
+pub fn build_playbar_controls(is_playing: bool, _smart_shuffle: bool) -> Vec<(PlaybarButton, String)> {
   vec![
-    (
-      PlaybarButton::Shuffle,
-      if smart_shuffle {
-        "Smart ⇄".into()
-      } else {
-        "⇄".into()
-      },
-    ),
+    (PlaybarButton::Shuffle, "⇄".into()),
     (PlaybarButton::Prev, "⏮".into()),
     (
       PlaybarButton::PlayPause,

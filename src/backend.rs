@@ -2898,11 +2898,14 @@ impl<'a> Network<'a> {
   }
 
   async fn next_track(&mut self) {
-    match self
-      .spotify
-      .next_track(self.client_config.device_id.as_deref())
-      .await
-    {
+    let device_id = self.client_config.device_id.clone().or_else(|| {
+      self
+        .app
+        .try_lock()
+        .ok()
+        .and_then(|a| a.current_playback_context.as_ref().and_then(|c| c.device.id.clone()))
+    });
+    match self.spotify.next_track(device_id.as_deref()).await {
       Ok(()) => {
         self.get_current_playback().await;
       }
@@ -2913,11 +2916,14 @@ impl<'a> Network<'a> {
   }
 
   async fn previous_track(&mut self) {
-    match self
-      .spotify
-      .previous_track(self.client_config.device_id.as_deref())
-      .await
-    {
+    let device_id = self.client_config.device_id.clone().or_else(|| {
+      self
+        .app
+        .try_lock()
+        .ok()
+        .and_then(|a| a.current_playback_context.as_ref().and_then(|c| c.device.id.clone()))
+    });
+    match self.spotify.previous_track(device_id.as_deref()).await {
       Ok(()) => {
         self.get_current_playback().await;
       }
