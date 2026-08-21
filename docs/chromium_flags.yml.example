@@ -1,0 +1,11 @@
+# Override entirely: if ~/.config/sptune/chromium_flags.yml exists, these flags replace the built-in lean preset.
+# Copy this file to ~/.config/sptune/chromium_flags.yml and edit.
+flags:
+  - --disable-backgrounding-occluded-windows
+  - --disable-background-timer-throttling
+  - --disable-renderer-backgrounding
+  - --disable-features=CalculateNativeWinOcclusion
+  - --disable-ipc-flooding-protection
+  - --disable-hang-monitor
+  - --disable-breakpad
+  - --disable-crash-reporter

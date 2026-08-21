@@ -8,6 +8,7 @@ mod lcg;
 mod library_cache;
 mod playlist_cache;
 mod redirect_uri;
+mod platform;
 mod tui;
 mod user_config;
 
