@@ -9,10 +9,9 @@ use crate::tui::layout;
 use crate::tui::layout::{
   build_playbar_controls, build_playbar_title, gear_click_rect, header_height, playbar_artist_row,
   playbar_controls_x, playbar_progress_rect, playbar_song_row, playbar_text_click_range,
-  playbar_volume_rect, search_box_rect, settings_section_rect, shortcuts_table_rect,
-  song_table_columns, song_table_viewport, sort_column_for, track_table_with_date, PlaybarButton,
-  PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, SETTINGS_ROW_COUNT, SMALL_TERMINAL_HEIGHT, VOLUME_BAR_LEN,
-  VOLUME_LABEL_LEN,
+  playbar_volume_rect, search_box_rect, song_table_columns, song_table_viewport,
+  sort_column_for, track_table_with_date, PlaybarButton, PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN,
+  SMALL_TERMINAL_HEIGHT, VOLUME_BAR_LEN, VOLUME_LABEL_LEN,
 };
 use crate::tui::ColumnId;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -511,15 +510,70 @@ fn handle_left_click(x: u16, y: u16, app: &mut App) -> bool {
 // Maps a click in the '?' menu's settings section to its toggle row.
 fn handle_settings_click(x: u16, y: u16, app: &mut App) {
   let area = Rect::new(0, 0, app.size.width, app.size.height);
-  let settings = settings_section_rect(area);
+  if app.help_show_shortcuts {
+    // Shortcuts page: click does not toggle settings
+    return;
+  }
+  let settings = crate::tui::layout::help_full_rect(area);
   if x < settings.x
     || x >= settings.x + settings.width
     || y <= settings.y
-    || y > settings.y + SETTINGS_ROW_COUNT
+    || y > settings.y + settings.height.saturating_sub(2)
   {
     return;
   }
-  app.toggle_setting((y - settings.y - 1) as usize);
+  let vis_row = (y - settings.y - 1) as usize;
+  let row = vis_row + app.help_scroll_offset as usize;
+  // Row -> toggle_setting index map for the categorized layout (33 rows):
+  // headers and the Shortcuts link are None.
+  const SHORTCUTS_ROW: usize = 30;
+  if row == SHORTCUTS_ROW {
+    app.help_show_shortcuts = true;
+    app.help_scroll_offset = 0;
+    app.help_menu_page = 0;
+    let vh = app.size.height.saturating_sub(4).saturating_sub(3) as u32;
+    app.help_menu_max_lines = vh.max(1);
+    app.calculate_help_menu_offset();
+    return;
+  }
+  const ROW_TO_TOGGLE: [Option<usize>; 33] = [
+    None,     // 0  ─ Appearance ─
+    Some(0),  // 1  Black theme
+    Some(5),  // 2  Theme
+    Some(18), // 3  Animations
+    Some(3),  // 4  Volume ramp bar
+    None,     // 5  ─ Layout ─
+    Some(1),  // 6  Library block
+    Some(2),  // 7  Playlists block
+    Some(10), // 8  Column Album
+    Some(11), // 9  Column Artist
+    Some(12), // 10 Column Length
+    Some(13), // 11 Column Date Added
+    Some(15), // 12 Liked icon
+    Some(17), // 13 Max name length
+    None,     // 14 ─ Playback ─
+    Some(6),  // 15 Timestamp by typing
+    Some(7),  // 16 Resume last song
+    Some(8),  // 17 Restore settings
+    None,     // 18 ─ Interaction ─
+    Some(4),  // 19 Mouse interactions
+    Some(14), // 20 Add to playlist
+    Some(16), // 21 Remove from playlist
+    Some(9),  // 22 Dev view
+    None,     // 23 ─ Spotify ─
+    Some(20), // 24 Spotify auto launch
+    Some(21), // 25 Spotify chromium flags
+    Some(22), // 26 Spotify suspend children
+    Some(23), // 27 Spotify trim WorkingSet
+    Some(24), // 28 Spotify memory limit
+    None,     // 29 ─ Navigation ─
+    None,     // 30 Shortcuts →
+    None,     // 31 ─ Danger Zone ─
+    Some(19), // 32 Clear cache (always last)
+  ];
+  if let Some(Some(toggle)) = ROW_TO_TOGGLE.get(row).copied() {
+    app.toggle_setting(toggle);
+  }
 }
 
 // View-scroll one row per notch, clamped at the ends; the selection stays
@@ -541,16 +595,26 @@ fn handle_wheel(up: bool, mouse: MouseEvent, app: &mut App) {
   }
   match app.get_current_route().active_block {
     ActiveBlock::HelpMenu => {
-      // Same as the track list: wheel scrolls the VIEW one row per notch,
-      // clamped at the ends; the scrollbar thumb follows the offset.
-      let shortcuts = shortcuts_table_rect(Rect::new(0, 0, app.size.width, app.size.height));
-      if y < shortcuts.y {
+      let rect = crate::tui::layout::help_full_rect(Rect::new(0, 0, app.size.width, app.size.height));
+      if y < rect.y || y >= rect.y + rect.height {
         return;
       }
-      let viewport = shortcuts.height.saturating_sub(3) as usize;
-      let mut offset = app.help_scroll_offset as usize;
-      scroll_view(up, &mut offset, app.help_docs_size as usize, viewport);
-      app.help_scroll_offset = offset as u32;
+      if app.help_show_shortcuts {
+        let viewport = rect.height.saturating_sub(3) as usize;
+        let mut offset = app.help_scroll_offset as usize;
+        scroll_view(up, &mut offset, app.help_docs_size as usize, viewport);
+        app.help_scroll_offset = offset as u32;
+      } else {
+        let viewport = rect.height.saturating_sub(2) as usize;
+        let mut offset = app.help_scroll_offset as usize;
+        scroll_view(
+          up,
+          &mut offset,
+          crate::tui::layout::SETTINGS_ROW_COUNT as usize,
+          viewport,
+        );
+        app.help_scroll_offset = offset as u32;
+      }
       return;
     }
     ActiveBlock::Error | ActiveBlock::SelectDevice => return,
@@ -697,8 +761,8 @@ fn handle_scrollbar_down(x: u16, y: u16, app: &mut App) -> bool {
     return false;
   }
   if app.get_current_route().active_block == ActiveBlock::HelpMenu {
-    let shortcuts = shortcuts_table_rect(Rect::new(0, 0, app.size.width, app.size.height));
-    return arm_scrollbar(x, y, app, ActiveBlock::HelpMenu, shortcuts);
+    let rect = crate::tui::layout::help_full_rect(Rect::new(0, 0, app.size.width, app.size.height));
+    return arm_scrollbar(x, y, app, ActiveBlock::HelpMenu, rect);
   }
   let Some((routes, playbar, input_box)) = main_layout(app) else {
     return false;
@@ -1054,6 +1118,10 @@ fn handle_hover(x: u16, y: u16, app: &mut App) {
       let (count, sel) = match shown {
         ArtistBlock::TopTracks => (artist.top_tracks.len() + usize::from(artist.top_tracks_has_more), artist.selected_top_track_index),
         ArtistBlock::Albums => (artist.albums.items.len() + usize::from((artist.albums.items.len() as u32) < artist.albums.total), artist.selected_album_index),
+        ArtistBlock::Singles => (artist.singles.items.len() + usize::from((artist.singles.items.len() as u32) < artist.singles.total), artist.selected_singles_index),
+        ArtistBlock::EPs => (artist.eps.items.len(), artist.selected_eps_index),
+        ArtistBlock::AppearsOn => (artist.appears_on.items.len() + usize::from((artist.appears_on.items.len() as u32) < artist.appears_on.total), artist.selected_appears_on_index),
+        ArtistBlock::DiscoveredOn => (artist.discovered_on.items.len() + usize::from((artist.discovered_on.items.len() as u32) < artist.discovered_on.total), artist.selected_discovered_on_index),
         _ => (0,0),
       };
       let list_rect = Rect { x: right.x, y: right.y + 1, width: right.width, height: right.height.saturating_sub(1) };
@@ -1322,16 +1390,22 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
     (true, true) => {
       let (library, _sep, playlists) = layout::sidebar_combined_split(app, chunk);
       if y == library.y {
+        if app.sidebar_minimized {
+          app.sidebar_minimized = !app.sidebar_minimized;
+          return false;
+        }
         if x < library.x + 3 {
+          // ♻ at left refreshes
           app.dispatch(IoEvent::RefreshUser);
           app.dispatch(IoEvent::RefreshSavedTracks);
           app.dispatch(IoEvent::RefreshSavedAlbums);
           return false;
         }
+        // Library text or Library≡ toggles minimize (hitbox = rest of title row)
         app.sidebar_minimized = !app.sidebar_minimized;
         return false;
       }
-      if y >= library.y && y < library.y + library.height {
+       if y >= library.y + 1 && y < library.y + library.height {
         if let Some(index) = combined_sidebar_row_index(
           y,
           library,
@@ -1348,7 +1422,6 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           app.dispatch(IoEvent::RefreshPlaylists);
           return false;
         }
-        app.sidebar_minimized = !app.sidebar_minimized;
         return false;
       } else if y >= playlists.y && y < playlists.y + playlists.height {
         let count = app
@@ -1368,6 +1441,10 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
     (true, false) => {
       let count = visible_library_options(&app.hidden_library_sections).len();
       if y == chunk.y {
+        if app.sidebar_minimized {
+          app.sidebar_minimized = !app.sidebar_minimized;
+          return false;
+        }
         if x < chunk.x + 3 {
           app.dispatch(IoEvent::RefreshUser);
           app.dispatch(IoEvent::RefreshSavedTracks);
@@ -1377,7 +1454,7 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
         app.sidebar_minimized = !app.sidebar_minimized;
         return false;
       }
-      if y >= chunk.y && y < chunk.y + chunk.height {
+      if y >= chunk.y + 1 && y < chunk.y + chunk.height {
         if let Some(index) = list_row_index(y, chunk, count, app.library.selected_index) {
           app.library.selected_index = index;
           app.sidebar_latched_block = Some(ActiveBlock::Library);
@@ -1398,7 +1475,6 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           app.dispatch(IoEvent::RefreshPlaylists);
           return false;
         }
-        app.sidebar_minimized = !app.sidebar_minimized;
         return false;
       }
       if y >= chunk.y && y < chunk.y + chunk.height {
@@ -1911,12 +1987,19 @@ fn handle_search_wheel(up: bool, app: &mut App) {
 
 fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
   if y == chunk.y {
-    let cell_w = chunk.width / 2;
-    let tab = if x < chunk.x + cell_w {
-      ArtistBlock::TopTracks
-    } else {
-      ArtistBlock::Albums
-    };
+    let tabs = [
+      ArtistBlock::About,
+      ArtistBlock::TopTracks,
+      ArtistBlock::Albums,
+      ArtistBlock::Singles,
+      ArtistBlock::EPs,
+      ArtistBlock::AppearsOn,
+      ArtistBlock::DiscoveredOn,
+    ];
+    let n = tabs.len() as u16;
+    let cell_w = if n > 0 { chunk.width / n } else { chunk.width };
+    let idx = ((x.saturating_sub(chunk.x)) / cell_w.max(1)) as usize;
+    let tab = tabs.get(idx.min(tabs.len() - 1)).cloned().unwrap_or(ArtistBlock::TopTracks);
     app.artist_select_tab(tab);
     app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
     // Return false: a tab click only switches tabs. The caller's
@@ -1932,7 +2015,7 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
     height: chunk.height.saturating_sub(1),
   };
 
-  let (shown, top_has_more, albums_has_more, count, selected) = {
+  let (shown, top_has_more, albums_has_more, singles_has_more, appears_has_more, discovered_has_more, count, selected) = {
     let Some(artist) = &app.artist else {
       return false;
     };
@@ -1943,6 +2026,9 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
     };
     let top_has_more = artist.top_tracks_has_more;
     let albums_has_more = artist.albums.items.len() < artist.albums.total as usize;
+    let singles_has_more = artist.singles.items.len() < artist.singles.total as usize;
+    let appears_has_more = artist.appears_on.items.len() < artist.appears_on.total as usize;
+    let discovered_has_more = artist.discovered_on.items.len() < artist.discovered_on.total as usize;
     let (count, selected) = match shown {
       ArtistBlock::TopTracks => (
         artist.top_tracks.len() + usize::from(top_has_more),
@@ -1952,16 +2038,38 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
         artist.albums.items.len() + usize::from(albums_has_more),
         artist.selected_album_index,
       ),
-      ArtistBlock::Empty => (0, 0),
+      ArtistBlock::Singles => (
+        artist.singles.items.len() + usize::from(singles_has_more),
+        artist.selected_singles_index,
+      ),
+      ArtistBlock::EPs => (artist.eps.items.len(), artist.selected_eps_index),
+      ArtistBlock::AppearsOn => (
+        artist.appears_on.items.len() + usize::from(appears_has_more),
+        artist.selected_appears_on_index,
+      ),
+      ArtistBlock::DiscoveredOn => (
+        artist.discovered_on.items.len() + usize::from(discovered_has_more),
+        artist.selected_discovered_on_index,
+      ),
+      ArtistBlock::About | ArtistBlock::Empty => (0, 0),
     };
-    (shown, top_has_more, albums_has_more, count, selected)
+    (
+      shown,
+      top_has_more,
+      albums_has_more,
+      singles_has_more,
+      appears_has_more,
+      discovered_has_more,
+      count,
+      selected,
+    )
   };
-  if shown == ArtistBlock::Empty {
+  if shown == ArtistBlock::Empty || shown == ArtistBlock::About {
     return false;
   }
 
   // The top-tracks tab renders a real table (header row at list_rect.y+1,
-  // rows from list_rect.y+2); the albums tab keeps the plain list.
+  // rows from list_rect.y+2); the other tabs keep the plain list.
   let index = if shown == ArtistBlock::TopTracks {
     table_row_index(y, list_rect, count, selected)
   } else {
@@ -2037,12 +2145,40 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
     app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
     return false;
   }
+  if shown == ArtistBlock::Singles && singles_has_more && index == count - 1 {
+    app.load_more_singles();
+    if let Some(artist) = &mut app.artist {
+      artist.selected_singles_index = index;
+    }
+    app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
+    return false;
+  }
+  if shown == ArtistBlock::AppearsOn && appears_has_more && index == count - 1 {
+    app.load_more_appears_on();
+    if let Some(artist) = &mut app.artist {
+      artist.selected_appears_on_index = index;
+    }
+    app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
+    return false;
+  }
+  if shown == ArtistBlock::DiscoveredOn && discovered_has_more && index == count - 1 {
+    app.load_more_discovered_on();
+    if let Some(artist) = &mut app.artist {
+      artist.selected_discovered_on_index = index;
+    }
+    app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
+    return false;
+  }
 
   if let Some(artist) = &mut app.artist {
     match shown {
       ArtistBlock::TopTracks => artist.selected_top_track_index = index,
       ArtistBlock::Albums => artist.selected_album_index = index,
-      ArtistBlock::Empty => return false,
+      ArtistBlock::Singles => artist.selected_singles_index = index,
+      ArtistBlock::EPs => artist.selected_eps_index = index,
+      ArtistBlock::AppearsOn => artist.selected_appears_on_index = index,
+      ArtistBlock::DiscoveredOn => artist.selected_discovered_on_index = index,
+      ArtistBlock::About | ArtistBlock::Empty => return false,
     }
     app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
     return true;
@@ -2363,14 +2499,13 @@ mod tests {
 
   #[test]
   fn click_dev_view_row_toggles_request_log() {
-    // settings rect = (2,2,196,13) with margin 2; Dev view row
-    // sits at y=12.
+    // help_full_rect = (2,2,196,46); 33 rows categorized — Dev view row 22 sits at y=25.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.dev_view);
-    handle_mouse(click_event(10, 12), &mut app);
+    handle_mouse(click_event(10, 25), &mut app);
     assert!(app.dev_view);
-    handle_mouse(click_event(10, 12), &mut app);
+    handle_mouse(click_event(10, 25), &mut app);
     assert!(!app.dev_view);
   }
 
@@ -3127,58 +3262,55 @@ mod tests {
 
   #[test]
   fn click_volume_ramp_bar_row_toggles_setting() {
-    // settings rect = (2,2,196,6) with margin 2; row 3 (Volume ramp bar)
-    // is the last settings row at y=6.
+    // help_full_rect (2,2,196,46); Volume ramp bar row 4 at y=7.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.user_config.behavior.volume_ramp_bar);
-    handle_mouse(click_event(10, 6), &mut app);
+    handle_mouse(click_event(10, 7), &mut app);
     assert!(app.user_config.behavior.volume_ramp_bar);
-    handle_mouse(click_event(10, 6), &mut app);
+    handle_mouse(click_event(10, 7), &mut app);
     assert!(!app.user_config.behavior.volume_ramp_bar);
   }
 
   #[test]
   fn click_playlists_row_toggles_show_playlists() {
-    // settings rect = (2,2,196,6) with margin 2; row 2 (Playlists block)
-    // sits at y=5.
+    // help_full_rect (2,2,196,46); Playlists block row 7 at y=10.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(app.show_playlists);
-    handle_mouse(click_event(10, 5), &mut app);
+    handle_mouse(click_event(10, 10), &mut app);
     assert!(!app.show_playlists);
-    handle_mouse(click_event(10, 5), &mut app);
+    handle_mouse(click_event(10, 10), &mut app);
     assert!(app.show_playlists);
   }
 
   #[test]
   fn click_mouse_settings_row_toggles_enable_mouse() {
-    // settings rect = (2,2,196,8) with margin 2; row 4 (Mouse interactions)
-    // sits at y=7.
+    // help_full_rect (2,2,196,46); Mouse interactions row 19 at y=22.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(app.user_config.behavior.enable_mouse);
-    handle_mouse(click_event(10, 7), &mut app);
+    handle_mouse(click_event(10, 22), &mut app);
     assert!(!app.user_config.behavior.enable_mouse);
-    handle_mouse(click_event(10, 7), &mut app);
+    handle_mouse(click_event(10, 22), &mut app);
     assert!(app.user_config.behavior.enable_mouse);
   }
 
   #[test]
   fn click_theme_row_cycles_presets_then_back_to_custom() {
-    // Row 5 (Theme) sits at y=8 in the settings rect (2,2,196,8).
+    // Theme row 2 at y=5 in help_full_rect (2,2,196,46).
     use crate::user_config::theme_presets;
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     let presets = theme_presets();
     assert_eq!(app.theme_preset_index, None);
-    handle_mouse(click_event(10, 8), &mut app);
+    handle_mouse(click_event(10, 5), &mut app);
     assert_eq!(app.theme_preset_index, Some(0));
     assert_eq!(app.user_config.theme.background, presets[0].1.background);
-    handle_mouse(click_event(10, 8), &mut app);
+    handle_mouse(click_event(10, 5), &mut app);
     assert_eq!(app.theme_preset_index, Some(1));
     assert_eq!(app.user_config.theme.background, presets[1].1.background);
-    handle_mouse(click_event(10, 8), &mut app);
+    handle_mouse(click_event(10, 5), &mut app);
     assert_eq!(app.theme_preset_index, None);
     assert_eq!(
       app.user_config.theme.background,
@@ -3188,40 +3320,37 @@ mod tests {
 
   #[test]
   fn click_seek_by_typing_row_toggles_setting() {
-    // settings rect = (2,2,196,9) with margin 2; row 6 (Seek by typing)
-    // sits at y=9.
+    // help_full_rect (2,2,196,46); Seek by typing row 15 at y=18.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.user_config.behavior.seek_by_typing);
-    handle_mouse(click_event(10, 9), &mut app);
+    handle_mouse(click_event(10, 18), &mut app);
     assert!(app.user_config.behavior.seek_by_typing);
-    handle_mouse(click_event(10, 9), &mut app);
+    handle_mouse(click_event(10, 18), &mut app);
     assert!(!app.user_config.behavior.seek_by_typing);
   }
 
   #[test]
   fn click_resume_track_row_toggles_setting() {
-    // settings rect = (2,2,196,10) with margin 2; row 7 (Resume last song)
-    // sits at y=10.
+    // help_full_rect (2,2,196,46); Resume last song row 16 at y=19.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.user_config.behavior.resume_track);
-    handle_mouse(click_event(10, 10), &mut app);
+    handle_mouse(click_event(10, 19), &mut app);
     assert!(app.user_config.behavior.resume_track);
-    handle_mouse(click_event(10, 10), &mut app);
+    handle_mouse(click_event(10, 19), &mut app);
     assert!(!app.user_config.behavior.resume_track);
   }
 
   #[test]
   fn click_restore_settings_row_toggles_setting() {
-    // settings rect = (2,2,196,11) with margin 2; row 8 (Restore settings
-    // on start) sits at y=11.
+    // help_full_rect (2,2,196,46); Restore settings row 17 at y=20.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.user_config.behavior.restore_settings);
-    handle_mouse(click_event(10, 11), &mut app);
+    handle_mouse(click_event(10, 20), &mut app);
     assert!(app.user_config.behavior.restore_settings);
-    handle_mouse(click_event(10, 11), &mut app);
+    handle_mouse(click_event(10, 20), &mut app);
     assert!(!app.user_config.behavior.restore_settings);
   }
 

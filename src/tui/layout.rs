@@ -27,11 +27,21 @@ pub const PLAYBAR_TIME_LEN: u16 = 6;
 // volume ramp bar, mouse interactions, theme preset, seek by typing,
 // resume last song, restore settings, clear cache, dev view, columns,
 // visualizer style
-pub const SETTINGS_ROW_COUNT: u16 = 20;
+pub const SETTINGS_ROW_COUNT: u16 = 33;
 
 // Prefix for list panel titles; clicking the title row refreshes the list.
 pub const REFRESH_GLYPH: &str = "♻ ";
+pub const SIDEBAR_TOGGLE_GLYPH: &str = "≡";
 pub const NUMBER_TO_TITLE_GAP: u16 = 2;
+
+pub fn help_full_rect(area: Rect) -> Rect {
+  Rect::new(
+    area.x + 2,
+    area.y + 2,
+    area.width.saturating_sub(4),
+    area.height.saturating_sub(4),
+  )
+}
 
 // The volume bar: 1 row, right-aligned inside the playbar, on the same row
 // as the music bar. Shared by drawer and mouse hit-test.
@@ -102,6 +112,7 @@ pub fn playbar_progress_rect(playbar: Rect) -> Option<Rect> {
 
 // Geometry of the clickable settings section at the top of the '?' menu,
 // shared between the drawer and the mouse hit-test.
+#[allow(dead_code)]
 pub fn settings_section_rect(area: Rect) -> Rect {
   Layout::default()
     .direction(Direction::Vertical)
@@ -118,6 +129,7 @@ pub fn settings_section_rect(area: Rect) -> Rect {
 
 // Geometry of the shortcuts table below the settings rows, shared between
 // the drawer, the mouse hit-test and the scrollbar.
+#[allow(dead_code)]
 pub fn shortcuts_table_rect(area: Rect) -> Rect {
   Layout::default()
     .direction(Direction::Vertical)
@@ -341,7 +353,7 @@ pub fn search_layout(
 }
 
 /// Artist page layout, mirroring the search page: a single-row tab bar
-/// (Top tracks / Albums) and the active tab's list below.
+/// (About / Top tracks / Albums / Singles / EPs / Featuring / Discovered) and the active tab's list below.
 /// Shared with the mouse hit-testing so the two never drift.
 /// Returns (tab_bar_rect, tab_cells, list_rect).
 pub fn artist_layout(chunk: Rect, expanded: ArtistBlock) -> (Rect, Vec<(ArtistBlock, Rect)>, Rect) {
@@ -351,11 +363,17 @@ pub fn artist_layout(chunk: Rect, expanded: ArtistBlock) -> (Rect, Vec<(ArtistBl
     width: chunk.width,
     height: 1,
   };
-  let cell_w = chunk.width / 2;
   let tabs = [
+    (ArtistBlock::About, "About"),
     (ArtistBlock::TopTracks, "Top tracks"),
     (ArtistBlock::Albums, "Albums"),
+    (ArtistBlock::Singles, "Singles"),
+    (ArtistBlock::EPs, "EPs"),
+    (ArtistBlock::AppearsOn, "Featuring"),
+    (ArtistBlock::DiscoveredOn, "Discovered"),
   ];
+  let n = tabs.len() as u16;
+  let cell_w = if n > 0 { chunk.width / n } else { chunk.width };
   let tab_cells = tabs
     .iter()
     .enumerate()
