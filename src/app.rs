@@ -78,19 +78,6 @@ pub fn playlists_block_title() -> String {
   format!("{}{}", crate::tui::layout::REFRESH_GLYPH, "Playlists")
 }
 
-#[allow(dead_code)]
-pub fn library_row_letter(name: &str) -> char {
-  match name {
-    "For you" => 'F',
-    "Recently Played" => 'R',
-    "Liked Songs" => 'L',
-    "Albums" => 'A',
-    "Artists" => 'S',
-    "Podcasts" => 'P',
-    _ => name.chars().next().unwrap_or('•'),
-  }
-}
-
 /// Longest line the sidebar renders right now: both block titles plus every
 /// visible library option and playlist name. Used to size the panel to its
 /// content so nothing clips and no columns are wasted.
@@ -518,6 +505,7 @@ pub struct App {
   pub help_menu_page: u32,
   pub help_menu_max_lines: u32,
   pub help_scroll_offset: u32,
+  pub help_show_shortcuts: bool,
   pub is_loading: bool,
   pub io_tx: Option<Sender<IoEvent>>,
   pub is_fetching_current_playback: bool,
@@ -646,6 +634,7 @@ impl Default for App {
       help_menu_page: 0,
       help_menu_max_lines: 0,
       help_scroll_offset: 0,
+      help_show_shortcuts: false,
       is_loading: false,
       io_tx: None,
       is_fetching_current_playback: false,
@@ -925,7 +914,7 @@ impl App {
     }
   }
 
-  pub fn update_on_tick(&mut self) {
+  pub fn update_on_tick(&mut self) -> bool {
     self.poll_current_playback();
     if let Some(CurrentPlaybackContext {
       item: Some(item),
@@ -952,12 +941,16 @@ impl App {
         _ => 0,
       };
 
-      if elapsed < duration_ms {
-        self.song_progress_ms = elapsed;
+      let new_progress = if elapsed < duration_ms {
+        elapsed
       } else {
-        self.song_progress_ms = duration_ms.into();
-      }
+        duration_ms.into()
+      };
+      let changed = new_progress != self.song_progress_ms;
+      self.song_progress_ms = new_progress;
+      return *is_playing || changed;
     }
+    false
   }
 
   pub fn seek_forwards(&mut self) {
@@ -1635,31 +1628,6 @@ impl App {
       RouteId::Dialog,
       ActiveBlock::Dialog(DialogContext::AddToPlaylist),
     );
-  }
-
-  /// Remove the selected track from the playlist currently being viewed.
-  /// Enforces the 5-second cooldown and the `enable_remove_from_playlist`
-  /// flag here, in the single shared entry point, so no UI path (keyboard,
-  /// mouse, command) can bypass the guard.
-  pub fn remove_selected_track_from_playlist(&mut self) {
-    if !self.user_config.behavior.enable_remove_from_playlist {
-      return;
-    }
-    if self
-      .last_remove_time
-      .map(|t| t.elapsed() < Duration::from_secs(5))
-      .unwrap_or(false)
-    {
-      return;
-    }
-    let Some(track_uri) = self.selected_track_uri() else {
-      return;
-    };
-    let Some(playlist_uri) = self.track_table_playlist_uri() else {
-      return;
-    };
-    self.last_remove_time = Some(Instant::now());
-    self.dispatch(IoEvent::RemoveTrackFromPlaylist(track_uri, playlist_uri));
   }
 
   pub fn prompt_remove_selected_track_from_playlist(&mut self) {

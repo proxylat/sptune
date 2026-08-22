@@ -115,10 +115,13 @@ pub fn draw_help_menu(f: &mut Frame, app: &App) {
   let help_menu_style = Style::default().fg(app.user_config.theme.text);
   if app.help_show_shortcuts {
     let rect = layout::help_full_rect(f.area());
+    // ponytail: cache formatted header, avoids 3 allocs per frame
+    static HELP_HEADER: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let header = HELP_HEADER
+      .get_or_init(|| vec![format!("{:50}{:40}{:20}", "Description", "Event", "Context")])
+      .clone();
     let format_row =
       |r: Vec<String>| -> Vec<String> { vec![format!("{:50}{:40}{:20}", r[0], r[1], r[2])] };
-    let header = ["Description", "Event", "Context"];
-    let header = format_row(header.iter().map(|s| s.to_string()).collect());
     let help_docs = get_help_docs(&app.user_config.keys);
     let help_docs = help_docs
       .into_iter()

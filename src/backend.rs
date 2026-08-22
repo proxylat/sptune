@@ -23,6 +23,7 @@ use rspotify::{
   AuthCodeSpotify, Config, Credentials, OAuth,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::json;
 use std::{
   collections::HashMap,
@@ -50,7 +51,7 @@ fn play_context_from_uri<'a>(uri: &'a str) -> Option<PlayContextId<'a>> {
 // TOTP/anon partner API removed for terms compliance — algorithmic playlists now via Web API only
 
 // ponytail: partner API removed — below kept as stub for callers, returns error
-#[allow(dead_code)]
+#[cfg(test)]
 /// Map a partner-API `itemV2.data` track object into an internal
 /// [`FullTrack`] by reshaping it into the Web API shape rspotify expects. (removed)
 fn partner_track_from_value(data: &serde_json::Value) -> anyhow::Result<Option<FullTrack>> {
