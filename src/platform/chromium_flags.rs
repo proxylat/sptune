@@ -156,7 +156,7 @@ pub fn load_flags() -> Vec<String> {
       }
     }
   }
-  preset_lean().into_iter().map(|s| s.to_string()).collect()
+  preset_by_name("lean").into_iter().map(|s| s.to_string()).collect()
 }
 
 pub fn flags_to_arg_string(flags: &[String]) -> String {

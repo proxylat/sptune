@@ -715,7 +715,7 @@ impl UserConfig {
   }
 
   pub fn padded_in_playlist_icon(&self) -> String {
-    format!("{} ", &self.behavior.in_playlist_icon)
+    format!(" {} ", &self.behavior.in_playlist_icon)
   }
 
   pub fn load_spotify_config(&mut self, s: SpotifyConfigString) {

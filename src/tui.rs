@@ -739,7 +739,7 @@ fn draw_sidebar_section<S>(
       let is_hovered = app.user_config.behavior.enable_animations
         && hovered_index == Some(i)
         && selected_index != Some(i);
-      let mut it = if is_load_more {
+      let it = if is_load_more {
         ListItem::new(Span::styled(
           fit.clone(),
           Style::default()
@@ -1040,7 +1040,7 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
                   .map(|id| app.playlist_contains(&id.uri(), None))
                   .unwrap_or(false);
                 if in_pl {
-                  cells.push(format!(" {} ", app.user_config.behavior.in_playlist_icon));
+                  cells.push(app.user_config.padded_in_playlist_icon());
                 } else {
                   cells.push(" + ".to_string());
                 }
@@ -1394,7 +1394,7 @@ pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
                       .map(|id| app.playlist_contains(&id.uri(), None))
                       .unwrap_or(false);
                     if in_pl {
-                      cells.push(format!(" {} ", app.user_config.behavior.in_playlist_icon));
+                      cells.push(app.user_config.padded_in_playlist_icon());
                     } else {
                       cells.push(" + ".to_string());
                     }
@@ -1465,7 +1465,7 @@ pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
                   .map(|id| app.playlist_contains(&id.uri(), None))
                   .unwrap_or(false);
                 if in_pl {
-                  cells.push(format!(" {} ", app.user_config.behavior.in_playlist_icon));
+                  cells.push(app.user_config.padded_in_playlist_icon());
                 } else {
                   cells.push(" + ".to_string());
                 }
@@ -1760,7 +1760,7 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
             .map(|id| app.playlist_contains(&id.uri(), None))
             .unwrap_or(false);
           if in_pl {
-            cells.push(format!(" {} ", app.user_config.behavior.in_playlist_icon));
+            cells.push(app.user_config.padded_in_playlist_icon());
           } else {
             cells.push(" + ".to_string());
           }
@@ -1922,7 +1922,7 @@ fn draw_playlist_search_box(f: &mut Frame, app: &App, layout_chunk: Rect, title:
     if query.is_empty() {
       vec![cursor_span]
     } else {
-      use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+      use unicode_width::UnicodeWidthChar;
       let (visible, vis_cursor) = crate::tui::layout::search_input_visible(
         query,
         app.playlist_filter_cursor_position as usize,
@@ -2632,7 +2632,7 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
               .map(|id| app.playlist_contains(&id.uri(), None))
               .unwrap_or(false);
             if in_pl {
-            cells.push(format!(" {} ", app.user_config.behavior.in_playlist_icon));
+            cells.push(app.user_config.padded_in_playlist_icon());
             } else {
               cells.push(" + ".to_string());
             }
@@ -3168,7 +3168,7 @@ fn draw_selectable_list<S>(
       }
       let fit = ellipsize(item.as_ref(), if max_len > 0 { inner_w.min(max_len) } else { inner_w });
       let is_hovered = app.user_config.behavior.enable_animations && hovered_index == Some(i) && selected_index != Some(i);
-      let mut item = if is_load_more {
+      let item = if is_load_more {
         ListItem::new(Span::styled(
           fit.clone(),
           Style::default()
