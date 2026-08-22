@@ -262,6 +262,9 @@ pub enum IoEvent {
   GetTrackCredits(String),
   GetQueue,
   GetArtistAlbumsMore(String, u32),
+  GetArtistSinglesMore(String, u32),
+  GetArtistAppearsOnMore(String, u32),
+  GetArtistDiscoveredOnMore(String, String, u32),
   GetArtistTopTracksMore(String, String, u32),
   GetUser,
   RefreshUser,
@@ -901,6 +904,17 @@ impl<'a> Network<'a> {
       }
       IoEvent::GetArtistAlbumsMore(artist_id, offset) => {
         self.get_artist_albums_more(artist_id, offset).await;
+      }
+      IoEvent::GetArtistSinglesMore(artist_id, offset) => {
+        self.get_artist_singles_more(artist_id, offset).await;
+      }
+      IoEvent::GetArtistAppearsOnMore(artist_id, offset) => {
+        self.get_artist_appears_on_more(artist_id, offset).await;
+      }
+      IoEvent::GetArtistDiscoveredOnMore(artist_id, artist_name, offset) => {
+        self
+          .get_artist_discovered_on_more(artist_id, artist_name, offset)
+          .await;
       }
       IoEvent::GetArtistTopTracksMore(artist_id, artist_name, offset) => {
         self
@@ -2854,14 +2868,23 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     // 2026 (related artists 403s); top tracks come from a track search on
     // the artist name, and albums are only fetched when the user opens that
     // tab (GetArtistAlbumsMore), so opening an artist stays a single request.
+    // Fetch FullArtist for About (images/followers/genres/popularity) — always try,
+    // fall back to input name if the fetch fails (rate limit / token expired).
+    let mut fetched: Option<FullArtist> = None;
     let artist_name = if input_artist_name.is_empty() {
-      self
-        .spotify
-        .artist(cloneable_artist_id.clone())
-        .await
-        .map(|full_artist| full_artist.name)
-        .unwrap_or_default()
+      match self.spotify.artist(cloneable_artist_id.clone()).await {
+        Ok(fa) => {
+          let name = fa.name.clone();
+          fetched = Some(fa);
+          name
+        }
+        Err(_) => String::new(),
+      }
     } else {
+      // still fetch for About fields, but don't block top-tracks search on failure
+      if let Ok(fa) = self.spotify.artist(cloneable_artist_id.clone()).await {
+        fetched = Some(fa);
+      }
       input_artist_name
     };
     let query = format!("artist:\"{}\"", artist_name);
@@ -2889,44 +2912,155 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     let top_tracks_has_more = true;
     {
       let mut app = self.app.lock().await;
+      let image_url = fetched
+        .as_ref()
+        .and_then(|fa| fa.images.first().map(|i| i.url.clone()));
+      // Followers/popularity/genres are deprecated in model (Spotify removed) — default to None/empty if missing
+      #[allow(deprecated)]
+      let followers_total = fetched.as_ref().map(|fa| fa.followers.total);
+      #[allow(deprecated)]
+      let popularity = fetched.as_ref().map(|fa| fa.popularity);
+      #[allow(deprecated)]
+      let genres = fetched
+        .as_ref()
+        .map(|fa| fa.genres.clone())
+        .unwrap_or_default();
       app.artist = Some(Artist {
         artist_id,
         artist_name,
         albums: Self::empty_page(),
+        singles: Self::empty_page(),
+        eps: Self::empty_page(),
+        appears_on: Self::empty_page(),
+        discovered_on: Self::empty_page(),
         related_artists: Vec::new(),
         top_tracks,
         top_tracks_total,
         top_tracks_has_more,
         selected_album_index: 0,
+        selected_singles_index: 0,
+        selected_eps_index: 0,
+        selected_appears_on_index: 0,
+        selected_discovered_on_index: 0,
         selected_related_artist_index: 0,
         selected_top_track_index: 0,
         artist_hovered_block: ArtistBlock::TopTracks,
         artist_selected_block: ArtistBlock::TopTracks,
+        image_url,
+        followers_total,
+        popularity,
+        genres,
       });
     }
   }
 
   async fn get_artist_albums_more(&mut self, artist_id: String, offset: u32) {
+    self
+      .get_artist_albums_by_type(artist_id, vec![AlbumType::Album], offset, |a, p| {
+        a.albums.items.append(&mut p.items);
+        a.albums.offset = p.offset;
+        a.albums.total = p.total;
+      })
+      .await;
+  }
+
+  async fn get_artist_singles_more(&mut self, artist_id: String, offset: u32) {
+    self
+      .get_artist_albums_by_type(artist_id, vec![AlbumType::Single], offset, |a, p| {
+        a.singles.items.append(&mut p.items);
+        a.singles.offset = p.offset;
+        a.singles.total = p.total;
+        // derive EPs: SimplifiedAlbum no longer has total_tracks (removed 0.16); use name/EP hint
+        let eps_new = p
+          .items
+          .iter()
+          .filter(|al| {
+            #[allow(deprecated)]
+            let is_ep = al
+              .album_group
+              .as_deref()
+              .map(|g| g.eq_ignore_ascii_case("ep"))
+              .unwrap_or(false);
+            al.name.to_lowercase().contains("ep") || is_ep
+          })
+          .cloned()
+          .collect::<Vec<_>>();
+        a.eps.items.extend(eps_new);
+        a.eps.total = a.eps.items.len() as u32;
+      })
+      .await;
+  }
+
+  async fn get_artist_appears_on_more(&mut self, artist_id: String, offset: u32) {
+    self
+      .get_artist_albums_by_type(
+        artist_id,
+        vec![AlbumType::AppearsOn],
+        offset,
+        |a, p| {
+          a.appears_on.items.append(&mut p.items);
+          a.appears_on.offset = p.offset;
+          a.appears_on.total = p.total;
+        },
+      )
+      .await;
+  }
+
+  async fn get_artist_albums_by_type<F>(&mut self, artist_id: String, types: Vec<AlbumType>, offset: u32, apply: F)
+  where
+    F: FnOnce(&mut Artist, &mut Page<SimplifiedAlbum>),
+  {
     let cloneable_artist_id = ArtistId::from_id_or_uri(&artist_id).unwrap();
     match self
       .spotify
-      .artist_albums_manual(
-        cloneable_artist_id,
-        std::iter::empty::<AlbumType>(),
+      .artist_albums_manual(cloneable_artist_id, types, None, Some(10), Some(offset))
+      .await
+    {
+      Ok(mut page) => {
+        let mut app = self.app.lock().await;
+        if let Some(artist) = &mut app.artist {
+          apply(artist, &mut page);
+        }
+      }
+      Err(e) => {
+        self.handle_error(anyhow!(e)).await;
+      }
+    }
+  }
+
+  async fn get_artist_discovered_on_more(
+    &mut self,
+    _artist_id: String,
+    artist_name: String,
+    offset: u32,
+  ) {
+    let country = {
+      let app = self.app.lock().await;
+      app.get_user_country()
+    };
+    let query = format!("artist:\"{}\"", artist_name);
+    match self
+      .spotify
+      .search(
+        &query,
+        SearchType::Playlist,
+        country.map(Market::Country),
         None,
         Some(10),
         Some(offset),
       )
       .await
     {
-      Ok(mut page) => {
+      Ok(SearchResult::Playlists(page)) => {
         let mut app = self.app.lock().await;
         if let Some(artist) = &mut app.artist {
-          artist.albums.items.append(&mut page.items);
-          artist.albums.offset = page.offset;
-          artist.albums.total = page.total;
+          let mut page = page;
+          artist.discovered_on.items.append(&mut page.items);
+          artist.discovered_on.offset = page.offset;
+          artist.discovered_on.total = page.total;
         }
       }
+      Ok(_) => {}
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
       }

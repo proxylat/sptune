@@ -218,8 +218,13 @@ fn page_has_more<T: serde::de::DeserializeOwned>(page: &Page<T>) -> bool {
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum ArtistBlock {
+  About,
   TopTracks,
   Albums,
+  Singles,
+  EPs,
+  AppearsOn,
+  DiscoveredOn,
   Empty,
 }
 
@@ -377,6 +382,10 @@ pub struct Artist {
   pub artist_id: String,
   pub artist_name: String,
   pub albums: Page<SimplifiedAlbum>,
+  pub singles: Page<SimplifiedAlbum>,
+  pub eps: Page<SimplifiedAlbum>,
+  pub appears_on: Page<SimplifiedAlbum>,
+  pub discovered_on: Page<SimplifiedPlaylist>,
   pub related_artists: Vec<FullArtist>,
   pub top_tracks: Vec<FullTrack>,
   pub top_tracks_total: usize,
@@ -385,10 +394,19 @@ pub struct Artist {
   // load-more row keys off this instead.
   pub top_tracks_has_more: bool,
   pub selected_album_index: usize,
+  pub selected_singles_index: usize,
+  pub selected_eps_index: usize,
+  pub selected_appears_on_index: usize,
+  pub selected_discovered_on_index: usize,
   pub selected_related_artist_index: usize,
   pub selected_top_track_index: usize,
   pub artist_hovered_block: ArtistBlock,
   pub artist_selected_block: ArtistBlock,
+  // About header (from GET /v1/artists/{id})
+  pub image_url: Option<String>,
+  pub followers_total: Option<u32>,
+  pub popularity: Option<u32>,
+  pub genres: Vec<String>,
 }
 
 pub struct App {
@@ -1919,19 +1937,89 @@ impl App {
 
   /// Activate an artist tab, lazily fetching its data on first use.
   pub fn artist_select_tab(&mut self, tab: ArtistBlock) {
-    let needs_albums = match &self.artist {
-      Some(artist) => tab == ArtistBlock::Albums && artist.albums.items.is_empty(),
+    let (needs_albums, needs_singles, needs_appears_on, needs_discovered) = match &self.artist {
+      Some(artist) => (
+        tab == ArtistBlock::Albums && artist.albums.items.is_empty(),
+        tab == ArtistBlock::Singles && artist.singles.items.is_empty(),
+        tab == ArtistBlock::AppearsOn && artist.appears_on.items.is_empty(),
+        tab == ArtistBlock::DiscoveredOn && artist.discovered_on.items.is_empty(),
+      ),
       None => return,
     };
     let artist_id = self.artist.as_ref().map(|artist| artist.artist_id.clone());
+    let artist_name = self.artist.as_ref().map(|artist| artist.artist_name.clone());
     if let Some(artist) = &mut self.artist {
       artist.artist_selected_block = tab;
       artist.artist_hovered_block = tab;
     }
     if needs_albums {
-      if let Some(artist_id) = artist_id {
+      if let Some(artist_id) = artist_id.clone() {
         self.dispatch(IoEvent::GetArtistAlbumsMore(artist_id, 0));
       }
+    }
+    if needs_singles {
+      if let Some(artist_id) = artist_id.clone() {
+        self.dispatch(IoEvent::GetArtistSinglesMore(artist_id, 0));
+      }
+    }
+    if needs_appears_on {
+      if let Some(artist_id) = artist_id.clone() {
+        self.dispatch(IoEvent::GetArtistAppearsOnMore(artist_id, 0));
+      }
+    }
+    if needs_discovered {
+      if let (Some(artist_id), Some(artist_name)) = (artist_id, artist_name) {
+        self.dispatch(IoEvent::GetArtistDiscoveredOnMore(
+          artist_id,
+          artist_name,
+          0,
+        ));
+      }
+    }
+    if tab == ArtistBlock::EPs {
+      // EPs derived from singles (total_tracks <= 6); ensure singles loaded
+      if needs_singles {
+        // already dispatched above; EPs will render filtered view once singles arrive
+      }
+      // if singles not empty but eps empty, derive immediately
+      if let Some(artist) = &mut self.artist {
+        if artist.eps.items.is_empty() && !artist.singles.items.is_empty() {
+          self.derive_eps_from_singles();
+        }
+      }
+    }
+  }
+
+  fn derive_eps_from_singles(&mut self) {
+    if let Some(artist) = &mut self.artist {
+      // SimplifiedAlbum no longer has total_tracks in rspotify 0.16 (removed Feb 2026);
+      // heuristic: name contains EP or album_group single (deprecated) — fallback clone all singles
+      // and filter by name hint. Tracks count unavailable without FullAlbum fetch.
+      let eps_items = artist
+        .singles
+        .items
+        .iter()
+        .filter(|a| {
+          #[allow(deprecated)]
+          let is_ep_group = a
+            .album_group
+            .as_deref()
+            .map(|g| g.eq_ignore_ascii_case("ep"))
+            .unwrap_or(false);
+          a.name.to_lowercase().contains("ep") || is_ep_group
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+      // If no EP-named items, leave EPs empty (not faking singles as EPs)
+      let total = eps_items.len() as u32;
+      artist.eps.items = eps_items;
+      artist.eps.total = total;
+      artist.eps.offset = 0;
+      // Keep limit/next consistent with source page shape
+      artist.eps.limit = artist.singles.limit;
+      artist.eps.next = None;
+      artist.eps.previous = None;
+      artist.eps.href = artist.singles.href.clone();
     }
   }
 
@@ -1950,6 +2038,43 @@ impl App {
         artist.albums.items.len(),
         artist.albums.total as usize,
         IoEvent::GetArtistAlbumsMore(artist.artist_id.clone(), loaded),
+      );
+    }
+  }
+
+  pub fn load_more_singles(&mut self) {
+    if let Some(artist) = &self.artist {
+      self.load_more_page(
+        artist.singles.items.len(),
+        artist.singles.total as usize,
+        IoEvent::GetArtistSinglesMore(artist.artist_id.clone(), artist.singles.items.len() as u32),
+      );
+    }
+  }
+
+  pub fn load_more_appears_on(&mut self) {
+    if let Some(artist) = &self.artist {
+      self.load_more_page(
+        artist.appears_on.items.len(),
+        artist.appears_on.total as usize,
+        IoEvent::GetArtistAppearsOnMore(
+          artist.artist_id.clone(),
+          artist.appears_on.items.len() as u32,
+        ),
+      );
+    }
+  }
+
+  pub fn load_more_discovered_on(&mut self) {
+    if let Some(artist) = &self.artist {
+      self.load_more_page(
+        artist.discovered_on.items.len(),
+        artist.discovered_on.total as usize,
+        IoEvent::GetArtistDiscoveredOnMore(
+          artist.artist_id.clone(),
+          artist.artist_name.clone(),
+          artist.discovered_on.items.len() as u32,
+        ),
       );
     }
   }
@@ -2528,10 +2653,23 @@ mod tests {
   #[test]
   fn load_more_artist_top_tracks_dispatches_past_the_search_total() {
     let mut app = App::default();
+    let empty = Page {
+      href: String::new(),
+      items: vec![],
+      limit: 0,
+      next: None,
+      offset: 0,
+      previous: None,
+      total: 0,
+    };
     app.artist = Some(Artist {
       artist_id: "mockartist1".to_string(),
       artist_name: "Mock Artist".to_string(),
-      albums: Page {
+      albums: empty.clone(),
+      singles: empty.clone(),
+      eps: empty.clone(),
+      appears_on: empty.clone(),
+      discovered_on: Page {
         href: String::new(),
         items: vec![],
         limit: 0,
@@ -2545,10 +2683,18 @@ mod tests {
       top_tracks_total: 26,
       top_tracks_has_more: true,
       selected_album_index: 0,
+      selected_singles_index: 0,
+      selected_eps_index: 0,
+      selected_appears_on_index: 0,
+      selected_discovered_on_index: 0,
       selected_related_artist_index: 0,
       selected_top_track_index: 0,
       artist_hovered_block: ArtistBlock::TopTracks,
       artist_selected_block: ArtistBlock::Empty,
+      image_url: None,
+      followers_total: None,
+      popularity: None,
+      genres: vec![],
     });
     let (tx, rx) = std::sync::mpsc::channel();
     app.io_tx = Some(tx);
@@ -2583,10 +2729,23 @@ mod tests {
   #[test]
   fn artist_select_tab_fetches_albums_and_related_only_on_first_use() {
     let mut app = App::default();
+    let empty2 = Page {
+      href: String::new(),
+      items: vec![],
+      limit: 0,
+      next: None,
+      offset: 0,
+      previous: None,
+      total: 0,
+    };
     app.artist = Some(Artist {
       artist_id: "mockartist1".to_string(),
       artist_name: "Mock Artist".to_string(),
-      albums: Page {
+      albums: empty2.clone(),
+      singles: empty2.clone(),
+      eps: empty2.clone(),
+      appears_on: empty2.clone(),
+      discovered_on: Page {
         href: String::new(),
         items: vec![],
         limit: 0,
@@ -2600,10 +2759,18 @@ mod tests {
       top_tracks_total: 26,
       top_tracks_has_more: true,
       selected_album_index: 0,
+      selected_singles_index: 0,
+      selected_eps_index: 0,
+      selected_appears_on_index: 0,
+      selected_discovered_on_index: 0,
       selected_related_artist_index: 0,
       selected_top_track_index: 0,
       artist_hovered_block: ArtistBlock::TopTracks,
       artist_selected_block: ArtistBlock::TopTracks,
+      image_url: None,
+      followers_total: None,
+      popularity: None,
+      genres: vec![],
     });
     let (tx, rx) = std::sync::mpsc::channel();
     app.io_tx = Some(tx);

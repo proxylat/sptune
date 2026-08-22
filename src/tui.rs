@@ -112,190 +112,206 @@ fn ellipsize(input: &str, max_width: usize) -> String {
 }
 
 pub fn draw_help_menu(f: &mut Frame, app: &App) {
-  let settings_rect = layout::settings_section_rect(f.area());
-  let shortcuts_rect = layout::shortcuts_table_rect(f.area());
-
   let help_menu_style = Style::default().fg(app.user_config.theme.text);
-
-  let settings_rows = settings_rows_text(app, &help_menu_style);
-  let settings_list = List::new(settings_rows)
-    .block(
-      Block::default()
-        .borders(Borders::ALL)
-        .style(help_menu_style)
-        .title(Span::styled(
-          "Settings (click a row to toggle, <Esc> to go back)",
-          help_menu_style,
-        ))
-        .border_style(help_menu_style),
-    )
-    .style(help_menu_style);
-  f.render_widget(settings_list, settings_rect);
-
-  // Create a one-column table to avoid flickering due to non-determinism when
-  // resolving constraints on widths of table columns.
-  let format_row =
-    |r: Vec<String>| -> Vec<String> { vec![format!("{:50}{:40}{:20}", r[0], r[1], r[2])] };
-
-  let header = ["Description", "Event", "Context"];
-  let header = format_row(header.iter().map(|s| s.to_string()).collect());
-
-  let help_docs = get_help_docs(&app.user_config.keys);
-  let help_docs = help_docs
-    .into_iter()
-    .map(format_row)
-    .collect::<Vec<Vec<String>>>();
-  let help_docs = &help_docs[app.help_scroll_offset as usize..];
-
-  let rows = help_docs
-    .iter()
-    .map(|item| Row::new(item.clone()).style(help_menu_style));
-
-  let help_menu = Table::new(rows, [Constraint::Percentage(100)])
-    .header(Row::new(header).style(help_menu_style))
-    .block(
-      Block::default()
-        .borders(Borders::ALL)
-        .style(help_menu_style)
-        .title(Span::styled("Shortcuts", help_menu_style))
-        .border_style(help_menu_style),
-    )
-    .style(help_menu_style)
-    .widths(&[Constraint::Percentage(100)]);
-  f.render_widget(help_menu, shortcuts_rect);
-
-  // website-style scrollbar just inside the right border, only when
-  // `count` overflows `viewport`; geometry shared with the mouse drag arm
-  // (src/handlers/mouse.rs arm_scrollbar).
-  let viewport = shortcuts_rect.height.saturating_sub(3) as usize;
-  draw_scrollbar(
-    f,
-    app,
-    shortcuts_rect,
-    app.help_docs_size as usize,
-    viewport,
-    app.help_scroll_offset as usize,
-  );
+  if app.help_show_shortcuts {
+    let rect = layout::help_full_rect(f.area());
+    let format_row =
+      |r: Vec<String>| -> Vec<String> { vec![format!("{:50}{:40}{:20}", r[0], r[1], r[2])] };
+    let header = ["Description", "Event", "Context"];
+    let header = format_row(header.iter().map(|s| s.to_string()).collect());
+    let help_docs = get_help_docs(&app.user_config.keys);
+    let help_docs = help_docs
+      .into_iter()
+      .map(format_row)
+      .collect::<Vec<Vec<String>>>();
+    let help_docs = &help_docs[app.help_scroll_offset as usize..];
+    let rows = help_docs
+      .iter()
+      .map(|item| Row::new(item.clone()).style(help_menu_style));
+    let help_menu = Table::new(rows, [Constraint::Percentage(100)])
+      .header(Row::new(header).style(help_menu_style))
+      .block(
+        Block::default()
+          .borders(Borders::ALL)
+          .style(help_menu_style)
+          .title(Span::styled(
+            "Shortcuts (Esc to go back)",
+            help_menu_style,
+          ))
+          .border_style(help_menu_style),
+      )
+      .style(help_menu_style)
+      .widths(&[Constraint::Percentage(100)]);
+    f.render_widget(help_menu, rect);
+    let viewport = rect.height.saturating_sub(3) as usize;
+    draw_scrollbar(
+      f,
+      app,
+      rect,
+      app.help_docs_size as usize,
+      viewport,
+      app.help_scroll_offset as usize,
+    );
+  } else {
+    let rect = layout::help_full_rect(f.area());
+    let all_rows = settings_rows_text(app, &help_menu_style);
+    let count = all_rows.len();
+    let viewport = rect.height.saturating_sub(2) as usize;
+    let offset = (app.help_scroll_offset as usize).min(count.saturating_sub(viewport.min(count)));
+    let visible = all_rows.into_iter().skip(offset).take(viewport).collect::<Vec<_>>();
+    let settings_list = List::new(visible)
+      .block(
+        Block::default()
+          .borders(Borders::ALL)
+          .style(help_menu_style)
+          .title(Span::styled(
+            "Settings (click row to toggle, Esc close \u{2022} Shortcuts \u{2192} Enter)",
+            help_menu_style,
+          ))
+          .border_style(help_menu_style),
+      )
+      .style(help_menu_style);
+    f.render_widget(settings_list, rect);
+    draw_scrollbar(f, app, rect, count, viewport, offset);
+  }
 }
 
 fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'a>> {
   let black_theme = app.user_config.theme.background == Color::Rgb(0, 0, 0);
   let on_off = |on: bool| if on { "on" } else { "off" };
-  let rows = vec![
-    format!("Black theme: {}", on_off(black_theme)),
-    format!("Library block: {}", on_off(app.show_library)),
-    format!("Playlists block: {}", on_off(app.show_playlists)),
-    format!(
-      "Volume ramp bar: {}",
-      on_off(app.user_config.behavior.volume_ramp_bar)
-    ),
-    format!(
-      "Mouse interactions: {} (m)",
-      on_off(app.user_config.behavior.enable_mouse)
-    ),
-    format!(
-      "Theme: {} (P)",
-      app.theme_preset_index.map_or_else(
-        || "Custom".to_string(),
-        |i| theme_presets()[i].0.to_string()
-      )
-    ),
-    format!(
-      "Timestamp by typing: {}",
-      on_off(app.user_config.behavior.seek_by_typing)
-    ),
-    format!(
-      "Resume last song: {}",
-      on_off(app.user_config.behavior.resume_track)
-    ),
-    format!(
-      "Restore settings on start: {}",
-      on_off(app.user_config.behavior.restore_settings)
-    ),
-    format!("Dev view: {} (request log)", on_off(app.dev_view)),
-    format!(
-      "Column Album: {}",
-      on_off(app.user_config.behavior.show_album_column)
-    ),
-    format!(
-      "Column Artist: {}",
-      on_off(app.user_config.behavior.show_artist_column)
-    ),
-    format!(
-      "Column Length: {}",
-      on_off(app.user_config.behavior.show_length_column)
-    ),
-    format!(
-      "Column Date Added: {}",
-      on_off(app.user_config.behavior.show_date_added_column)
-    ),
-    format!(
-      "Add to playlist: {} (a)",
-      on_off(app.user_config.behavior.enable_add_to_playlist)
-    ),
-    format!(
-      "Liked icon: {}",
-      on_off(app.user_config.behavior.show_liked_icon)
-    ),
-    format!(
-      "Remove from playlist: {}",
-      on_off(app.user_config.behavior.enable_remove_from_playlist)
-    ),
-    format!(
-      "Max name length: {}",
-      if app.user_config.behavior.max_display_length == 0 {
-        "off".to_string()
-      } else {
-        app.user_config.behavior.max_display_length.to_string()
-      }
-    ),
-    format!(
-      "Animations: {}",
-      on_off(app.user_config.behavior.enable_animations)
-    ),
-    format!(
-      "Spotify auto launch: {}",
-      on_off(app.user_config.spotify.auto_launch)
-    ),
-    format!(
-      "Spotify chromium flags: {}",
-      on_off(app.user_config.spotify.use_chromium_flags)
-    ),
-    format!(
-      "Spotify suspend children: {}",
-      on_off(app.user_config.spotify.suspend_children)
-    ),
-    format!(
-      "Spotify trim WorkingSet: {}",
-      on_off(app.user_config.spotify.trim_working_set)
-    ),
-    format!(
-      "Spotify memory limit: {}",
-      if app.user_config.spotify.memory_limit_mb == 0 {
-        "off".to_string()
-      } else {
-        format!("{} MB", app.user_config.spotify.memory_limit_mb)
-      }
-    ),
-    // Danger action: styled red and always last in the block.
-    match app.user_config.keys.clear_cache {
-      Some(key) => format!("Clear cache ({})", key),
-      None => "Clear cache".to_string(),
-    },
-  ];
-  let total = rows.len();
+  // 33 rows: 7 headers + 25 toggles + Shortcuts link, matching mouse.rs ROW_TO_TOGGLE
+  let header_style = Style::default()
+    .fg(app.user_config.theme.text)
+    .add_modifier(Modifier::BOLD);
+  let danger_header_style = Style::default()
+    .fg(app.user_config.theme.error_text)
+    .add_modifier(Modifier::BOLD);
+  let mk_header = |s: &str, st: Style| ListItem::new(Span::styled(s.to_string(), st));
+  let mk_row = |s: String| ListItem::new(Span::styled(s, *style));
+  let mk_clear = |s: String| {
+    ListItem::new(Span::styled(s, Style::default().fg(app.user_config.theme.error_text)))
+  };
+  let theme_name = app.theme_preset_index.map_or_else(
+    || "Custom".to_string(),
+    |i| theme_presets()[i].0.to_string(),
+  );
+  let mut rows: Vec<ListItem<'a>> = Vec::with_capacity(33);
+  rows.push(mk_header("─ Appearance ─", header_style));
+  rows.push(mk_row(format!("Black theme: {}", on_off(black_theme))));
+  rows.push(mk_row(format!("Theme: {} (P)", theme_name)));
+  rows.push(mk_row(format!(
+    "Animations: {}",
+    on_off(app.user_config.behavior.enable_animations)
+  )));
+  rows.push(mk_row(format!(
+    "Volume ramp bar: {}",
+    on_off(app.user_config.behavior.volume_ramp_bar)
+  )));
+  rows.push(mk_header("─ Layout ─", header_style));
+  rows.push(mk_row(format!(
+    "Library block: {}",
+    on_off(app.show_library)
+  )));
+  rows.push(mk_row(format!(
+    "Playlists block: {}",
+    on_off(app.show_playlists)
+  )));
+  rows.push(mk_row(format!(
+    "Column Album: {}",
+    on_off(app.user_config.behavior.show_album_column)
+  )));
+  rows.push(mk_row(format!(
+    "Column Artist: {}",
+    on_off(app.user_config.behavior.show_artist_column)
+  )));
+  rows.push(mk_row(format!(
+    "Column Length: {}",
+    on_off(app.user_config.behavior.show_length_column)
+  )));
+  rows.push(mk_row(format!(
+    "Column Date Added: {}",
+    on_off(app.user_config.behavior.show_date_added_column)
+  )));
+  rows.push(mk_row(format!(
+    "Liked icon: {}",
+    on_off(app.user_config.behavior.show_liked_icon)
+  )));
+  rows.push(mk_row(format!(
+    "Max name length: {}",
+    if app.user_config.behavior.max_display_length == 0 {
+      "off".to_string()
+    } else {
+      app.user_config.behavior.max_display_length.to_string()
+    }
+  )));
+  rows.push(mk_header("─ Playback ─", header_style));
+  rows.push(mk_row(format!(
+    "Timestamp by typing: {}",
+    on_off(app.user_config.behavior.seek_by_typing)
+  )));
+  rows.push(mk_row(format!(
+    "Resume last song: {}",
+    on_off(app.user_config.behavior.resume_track)
+  )));
+  rows.push(mk_row(format!(
+    "Restore settings on start: {}",
+    on_off(app.user_config.behavior.restore_settings)
+  )));
+  rows.push(mk_header("─ Interaction ─", header_style));
+  rows.push(mk_row(format!(
+    "Mouse interactions: {} (m)",
+    on_off(app.user_config.behavior.enable_mouse)
+  )));
+  rows.push(mk_row(format!(
+    "Add to playlist: {} (a)",
+    on_off(app.user_config.behavior.enable_add_to_playlist)
+  )));
+  rows.push(mk_row(format!(
+    "Remove from playlist: {}",
+    on_off(app.user_config.behavior.enable_remove_from_playlist)
+  )));
+  rows.push(mk_row(format!(
+    "Dev view: {} (request log)",
+    on_off(app.dev_view)
+  )));
+  rows.push(mk_header("─ Spotify ─", header_style));
+  rows.push(mk_row(format!(
+    "Spotify auto launch: {}",
+    on_off(app.user_config.spotify.auto_launch)
+  )));
+  rows.push(mk_row(format!(
+    "Spotify chromium flags: {}",
+    on_off(app.user_config.spotify.use_chromium_flags)
+  )));
+  rows.push(mk_row(format!(
+    "Spotify suspend children: {}",
+    on_off(app.user_config.spotify.suspend_children)
+  )));
+  rows.push(mk_row(format!(
+    "Spotify trim WorkingSet: {}",
+    on_off(app.user_config.spotify.trim_working_set)
+  )));
+  rows.push(mk_row(format!(
+    "Spotify memory limit: {}",
+    if app.user_config.spotify.memory_limit_mb == 0 {
+      "off".to_string()
+    } else {
+      format!("{} MB", app.user_config.spotify.memory_limit_mb)
+    }
+  )));
+  rows.push(mk_header("─ Navigation ─", header_style));
+  rows.push(ListItem::new(Span::styled(
+    "Shortcuts \u{2192}".to_string(),
+    Style::default()
+      .fg(app.user_config.theme.text)
+      .add_modifier(Modifier::UNDERLINED),
+  )));
+  rows.push(mk_header("─ Danger Zone ─", danger_header_style));
+  rows.push(mk_clear(match app.user_config.keys.clear_cache {
+    Some(key) => format!("Clear cache ({})", key),
+    None => "Clear cache".to_string(),
+  }));
   rows
-    .into_iter()
-    .enumerate()
-    .map(|(i, row)| {
-      let span = if i + 1 == total {
-        Span::styled(row, Style::default().fg(app.user_config.theme.error_text))
-      } else {
-        Span::styled(row, *style)
-      };
-      ListItem::new(span)
-    })
-    .collect()
 }
 
 pub fn draw_input_and_help_box(f: &mut Frame, app: &App, layout_chunk: Rect) {
@@ -588,7 +604,7 @@ pub fn draw_library_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
       .iter()
       .map(|name| name.chars().next().map(|c| c.to_string()).unwrap_or_default())
       .collect();
-    ("L".to_string(), glyphs)
+    (crate::tui::layout::SIDEBAR_TOGGLE_GLYPH.to_string(), glyphs)
   } else {
     (
       crate::app::library_block_title(app),
@@ -697,8 +713,83 @@ fn draw_sidebar_section<S>(
     return;
   }
   let theme = app.user_config.theme;
-  // Title row
   let title_style = get_color(highlight_state, theme).add_modifier(Modifier::BOLD);
+  let is_lib_expanded = title.contains("Library") && !app.sidebar_minimized && rect.width >= 4;
+  if is_lib_expanded {
+    // Single-row header: Library≡ — ≡ immediately after Library (at title width).
+    let toggle = crate::tui::layout::SIDEBAR_TOGGLE_GLYPH;
+    let title_w = UnicodeWidthStr::width(title) as u16;
+    f.render_widget(
+      Paragraph::new(Span::styled(title.to_string(), title_style)),
+      Rect::new(rect.x, rect.y, title_w.min(rect.width.saturating_sub(1)), 1),
+    );
+    if title_w < rect.width {
+      f.render_widget(
+        Paragraph::new(Span::styled(toggle.to_string(), title_style)),
+        Rect::new(rect.x + title_w, rect.y, 1, 1),
+      );
+    }
+    if rect.height <= 1 {
+      return;
+    }
+    let list_rect = Rect::new(rect.x, rect.y + 1, rect.width, rect.height.saturating_sub(1));
+    let viewport = list_rect.height as usize;
+    let offset = match selected_index {
+      Some(s) => s.checked_sub(viewport).unwrap_or(0),
+      None => 0,
+    };
+    let mut state = ListState::default();
+    state.select(selected_index.map(|s| s.saturating_sub(offset)));
+    let lst_items: Vec<ListItem> = items
+      .iter()
+      .enumerate()
+      .skip(offset)
+      .take(viewport)
+      .map(|(i, item)| {
+        let is_load_more =
+          i == items.len().saturating_sub(1) && item.as_ref().trim_start().starts_with("Load more");
+        let mut inner_w = list_rect.width as usize;
+        if title == "Playlists" {
+          inner_w = (inner_w / 2).max(10);
+        }
+        let max_len = app.user_config.behavior.max_display_length as usize;
+        let fit = ellipsize(
+          item.as_ref(),
+          if max_len > 0 { inner_w.min(max_len) } else { inner_w },
+        );
+        let is_hovered = app.user_config.behavior.enable_animations
+          && hovered_index == Some(i)
+          && selected_index != Some(i);
+        let it = if is_load_more {
+          ListItem::new(Span::styled(
+            fit.clone(),
+            Style::default().fg(theme.load_more).add_modifier(Modifier::BOLD | Modifier::ITALIC),
+          ))
+        } else if is_hovered {
+          let w = UnicodeWidthStr::width(fit.as_str());
+          let pad = inner_w.saturating_sub(w);
+          ListItem::new(Span::styled(
+            format!("{}{}", fit, " ".repeat(pad)),
+            Style::default().fg(theme.text).bg(theme.hovered),
+          ))
+        } else {
+          ListItem::new(Span::raw(fit))
+        };
+        it
+      })
+      .collect();
+    let focused = highlight_state.0 || highlight_state.1;
+    let list = List::new(lst_items)
+      .style(Style::default().fg(theme.text))
+      .highlight_style(if focused {
+        get_color(highlight_state, theme).add_modifier(Modifier::BOLD)
+      } else {
+        Style::default().fg(theme.text)
+      });
+    f.render_stateful_widget(list, list_rect, &mut state);
+    draw_scrollbar(f, app, list_rect, items.len(), viewport, offset);
+    return;
+  }
   let title_area = Rect::new(rect.x, rect.y, rect.width, 1);
   f.render_widget(
     Paragraph::new(Span::styled(title.to_string(), title_style)),
@@ -803,7 +894,7 @@ pub fn draw_user_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
           .iter()
           .map(|n| n.chars().next().map(|c| c.to_string()).unwrap_or_default())
           .collect();
-        ("L".to_string(), glyphs)
+        (crate::tui::layout::SIDEBAR_TOGGLE_GLYPH.to_string(), glyphs)
       } else {
         (
           crate::app::library_block_title(app),
@@ -2565,8 +2656,13 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
 
   for (block, rect) in tab_cells {
     let label = match block {
+      ArtistBlock::About => " About ",
       ArtistBlock::TopTracks => " Top tracks ",
       ArtistBlock::Albums => " Albums ",
+      ArtistBlock::Singles => " Singles ",
+      ArtistBlock::EPs => " EPs ",
+      ArtistBlock::AppearsOn => " Featuring ",
+      ArtistBlock::DiscoveredOn => " Discovered ",
       ArtistBlock::Empty => "",
     };
     let mut style = get_color(get_artist_highlight_state(app, block), theme);
@@ -2677,6 +2773,55 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
         None,
       );
     }
+    ArtistBlock::About => {
+      let lines = vec![
+        Line::from(vec![Span::styled(
+          artist.artist_name.clone(),
+          Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(format!(
+          "Followers: {}",
+          artist
+            .followers_total
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".to_string())
+        )),
+        Line::from(format!(
+          "Popularity: {}",
+          artist
+            .popularity
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".to_string())
+        )),
+        Line::from(format!(
+          "Genres: {}",
+          if artist.genres.is_empty() {
+            "—".to_string()
+          } else {
+            artist.genres.join(", ")
+          }
+        )),
+        Line::from(format!(
+          "Monthly listeners: {}",
+          app
+            .monthly_listeners
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".to_string())
+        )),
+        Line::from(format!(
+          "Image: {}",
+          artist.image_url.clone().unwrap_or_else(|| "—".to_string())
+        )),
+      ];
+      let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!("About {}", artist.artist_name))
+        .border_style(get_color(get_artist_highlight_state(app, shown), theme));
+      let p = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: true });
+      f.render_widget(p, list_rect);
+    }
     _ => {
       let (items, title, selected) = match shown {
         ArtistBlock::Albums => {
@@ -2710,7 +2855,115 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
             Some(artist.selected_album_index),
           )
         }
-        ArtistBlock::Empty | ArtistBlock::TopTracks => {
+        ArtistBlock::Singles => {
+          let mut singles = artist
+            .singles
+            .items
+            .iter()
+            .map(|item| {
+              let mut s = String::new();
+              if let Some(album_id) = &item.id {
+                if app.saved_album_ids_set.contains(&album_id.to_string()) {
+                  s.push_str(&app.user_config.padded_liked_icon());
+                }
+              }
+              s.push_str(&format!(
+                "{} - {} ({})",
+                item.name,
+                create_artist_string(&item.artists),
+                item.album_type.as_deref().unwrap_or("single")
+              ));
+              s
+            })
+            .collect::<Vec<String>>();
+          if artist.singles.items.len() < artist.singles.total as usize {
+            let remaining = artist.singles.total as usize - artist.singles.items.len();
+            singles.push(load_more_label("Load more singles...", Some(remaining)));
+          }
+          (singles, "Singles".to_string(), Some(artist.selected_singles_index))
+        }
+        ArtistBlock::EPs => {
+          let mut eps = artist
+            .eps
+            .items
+            .iter()
+            .map(|item| {
+              let mut s = String::new();
+              if let Some(album_id) = &item.id {
+                if app.saved_album_ids_set.contains(&album_id.to_string()) {
+                  s.push_str(&app.user_config.padded_liked_icon());
+                }
+              }
+              s.push_str(&format!(
+                "{} - {} (EP)",
+                item.name,
+                create_artist_string(&item.artists)
+              ));
+              s
+            })
+            .collect::<Vec<String>>();
+          if artist.eps.items.len() < artist.eps.total as usize {
+            let remaining = artist.eps.total as usize - artist.eps.items.len();
+            eps.push(load_more_label("Load more EPs...", Some(remaining)));
+          }
+          (eps, "EPs".to_string(), Some(artist.selected_eps_index))
+        }
+        ArtistBlock::AppearsOn => {
+          let mut items = artist
+            .appears_on
+            .items
+            .iter()
+            .map(|item| {
+              let mut s = String::new();
+              if let Some(album_id) = &item.id {
+                if app.saved_album_ids_set.contains(&album_id.to_string()) {
+                  s.push_str(&app.user_config.padded_liked_icon());
+                }
+              }
+              s.push_str(&format!(
+                "{} - {}",
+                item.name,
+                create_artist_string(&item.artists)
+              ));
+              s
+            })
+            .collect::<Vec<String>>();
+          if artist.appears_on.items.len() < artist.appears_on.total as usize {
+            let remaining = artist.appears_on.total as usize - artist.appears_on.items.len();
+            items.push(load_more_label("Load more featuring...", Some(remaining)));
+          }
+          (
+            items,
+            "Featuring".to_string(),
+            Some(artist.selected_appears_on_index),
+          )
+        }
+        ArtistBlock::DiscoveredOn => {
+          let mut items = artist
+            .discovered_on
+            .items
+            .iter()
+            .map(|pl| {
+              format!(
+                "{} - by {} ({} tracks)",
+                pl.name,
+                pl.owner.display_name.clone().unwrap_or_else(|| pl.owner.id.to_string()),
+                pl.items.total
+              )
+            })
+            .collect::<Vec<String>>();
+          if artist.discovered_on.items.len() < artist.discovered_on.total as usize {
+            let remaining =
+              artist.discovered_on.total as usize - artist.discovered_on.items.len();
+            items.push(load_more_label("Load more playlists...", Some(remaining)));
+          }
+          (
+            items,
+            "Discovered On".to_string(),
+            Some(artist.selected_discovered_on_index),
+          )
+        }
+        ArtistBlock::Empty | ArtistBlock::TopTracks | ArtistBlock::About => {
           (vec![], String::new(), None)
         }
       };
@@ -4223,11 +4476,24 @@ mod tests {
       }))
       .unwrap()
     }
+    let empty_page = rspotify::model::Page {
+      href: String::new(),
+      items: vec![],
+      limit: 0,
+      next: None,
+      offset: 0,
+      previous: None,
+      total: 0,
+    };
     let mut app = App::default();
     app.artist = Some(crate::app::Artist {
       artist_id: "mockartist1".to_string(),
       artist_name: "Mock Artist".to_string(),
-      albums: rspotify::model::Page {
+      albums: empty_page.clone(),
+      singles: empty_page.clone(),
+      eps: empty_page.clone(),
+      appears_on: empty_page.clone(),
+      discovered_on: rspotify::model::Page {
         href: String::new(),
         items: vec![],
         limit: 0,
@@ -4241,10 +4507,18 @@ mod tests {
       top_tracks_total: 26,
       top_tracks_has_more: true,
       selected_album_index: 0,
+      selected_singles_index: 0,
+      selected_eps_index: 0,
+      selected_appears_on_index: 0,
+      selected_discovered_on_index: 0,
       selected_related_artist_index: 0,
       selected_top_track_index: 0,
       artist_hovered_block: ArtistBlock::TopTracks,
       artist_selected_block: ArtistBlock::Empty,
+      image_url: None,
+      followers_total: None,
+      popularity: None,
+      genres: vec![],
     });
 
     let backend = TestBackend::new(180, 40);
@@ -4299,11 +4573,24 @@ mod tests {
       }))
       .unwrap()
     }
+    let empty_page2 = rspotify::model::Page {
+      href: String::new(),
+      items: vec![],
+      limit: 0,
+      next: None,
+      offset: 0,
+      previous: None,
+      total: 0,
+    };
     let mut app = App::default();
     app.artist = Some(crate::app::Artist {
       artist_id: "mockartist1".to_string(),
       artist_name: "Mock Artist".to_string(),
-      albums: rspotify::model::Page {
+      albums: empty_page2.clone(),
+      singles: empty_page2.clone(),
+      eps: empty_page2.clone(),
+      appears_on: empty_page2.clone(),
+      discovered_on: rspotify::model::Page {
         href: String::new(),
         items: vec![],
         limit: 0,
@@ -4317,10 +4604,18 @@ mod tests {
       top_tracks_total: 15,
       top_tracks_has_more: false,
       selected_album_index: 0,
+      selected_singles_index: 0,
+      selected_eps_index: 0,
+      selected_appears_on_index: 0,
+      selected_discovered_on_index: 0,
       selected_related_artist_index: 0,
       selected_top_track_index: 12,
       artist_hovered_block: ArtistBlock::TopTracks,
       artist_selected_block: ArtistBlock::TopTracks,
+      image_url: None,
+      followers_total: None,
+      popularity: None,
+      genres: vec![],
     });
 
     let backend = TestBackend::new(80, 8);
