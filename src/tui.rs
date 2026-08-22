@@ -1889,32 +1889,78 @@ fn draw_playlist_search_box(f: &mut Frame, app: &App, layout_chunk: Rect, title:
   let theme = app.user_config.theme;
   let query = app.playlist_filter.as_deref().unwrap_or("");
   let focused = app.playlist_search_active();
-  let cursor = Span::styled("│", Style::default().fg(theme.active));
-  let clear_style = Style::default().fg(theme.active).add_modifier(Modifier::BOLD);
-  let (spans, content_w): (Vec<Span>, u16) = if focused {
-    if query.is_empty() {
-      (vec![cursor], 1)
-    } else {
-      let clear = Span::styled(" ✕", clear_style);
-      (vec![Span::raw(query), cursor, clear], query.chars().count() as u16 + 3)
-    }
-  } else if query.is_empty() {
-    let placeholder = Span::styled("", Style::default().fg(theme.inactive));
-    let w = placeholder.content.width() as u16;
-    (vec![placeholder], w)
-  } else {
-    (vec![Span::raw(query)], query.chars().count() as u16)
-  };
-  let box_width = content_w.saturating_add(2);
   let title_chars = title.chars().count() as u16;
   let x = layout_chunk
     .x
     .saturating_add(1)
     .saturating_add(title_chars)
     .saturating_add(2);
-  if x + box_width > layout_chunk.x + layout_chunk.width {
+  let avail = layout_chunk.x.saturating_add(layout_chunk.width).saturating_sub(x);
+  if avail < 4 {
     return;
   }
+  // Ideal width hugging content; cap to available so long queries scroll
+  // instead of clipping with "..." or disappearing.
+  let ideal_content_w: u16 = if focused {
+    if query.is_empty() { 1 } else { query.chars().count() as u16 + 3 }
+  } else if query.is_empty() {
+    use unicode_width::UnicodeWidthStr;
+    let placeholder = "";
+    UnicodeWidthStr::width(placeholder) as u16
+  } else {
+    query.chars().count() as u16
+  };
+  let ideal_box_w = ideal_content_w.saturating_add(2);
+  let box_width = ideal_box_w.min(avail);
+  let inner_w = box_width.saturating_sub(2) as usize;
+  let reserve = if focused && !query.is_empty() { 3 } else { 0 };
+  let viewport_w = inner_w.saturating_sub(reserve);
+
+  let cursor_span = Span::styled("│", Style::default().fg(theme.active));
+  let clear_style = Style::default().fg(theme.active).add_modifier(Modifier::BOLD);
+  let spans: Vec<Span> = if focused {
+    if query.is_empty() {
+      vec![cursor_span]
+    } else {
+      use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+      let (visible, vis_cursor) = crate::tui::layout::search_input_visible(
+        query,
+        app.playlist_filter_cursor_position as usize,
+        viewport_w,
+      );
+      // Split visible at cursor width
+      let mut left = String::new();
+      let mut right = String::new();
+      let mut w = 0usize;
+      for c in visible.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if w < vis_cursor {
+          left.push(c);
+          w += cw;
+        } else {
+          right.push(c);
+        }
+      }
+      // If cursor is past the visible tail (at end), left already holds all
+      let clear = Span::styled(" ✕", clear_style);
+      if left.is_empty() && right.is_empty() {
+        // should not happen when query non-empty, but guard
+        vec![cursor_span, clear]
+      } else if left.is_empty() {
+        vec![cursor_span, Span::raw(right), clear]
+      } else if right.is_empty() {
+        vec![Span::raw(left), cursor_span, clear]
+      } else {
+        vec![Span::raw(left), cursor_span, Span::raw(right), clear]
+      }
+    }
+  } else if query.is_empty() {
+    let placeholder = Span::styled("", Style::default().fg(theme.inactive));
+    vec![placeholder]
+  } else {
+    let (visible, _) = crate::tui::layout::search_input_visible(query, 0, viewport_w);
+    vec![Span::raw(visible)]
+  };
   let rect = Rect::new(x, layout_chunk.y, box_width, 1);
   let box_widget = Paragraph::new(Line::from(spans))
     .style(Style::default().fg(theme.text))
