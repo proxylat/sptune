@@ -979,6 +979,7 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
     }
     SearchResultBlock::SongSearch => {
       let b = &app.user_config.behavior;
+      let show_in_playlist = b.enable_add_to_playlist;
   let columns = song_table_columns(
     layout_chunk.width.saturating_sub(2),
     false,
@@ -987,7 +988,7 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
     b.show_length_column,
     b.show_date_added_column,
     false,
-    true,
+    show_in_playlist,
   );
   let header = TableHeader {
         id: TableId::Song,
@@ -1008,7 +1009,7 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
           })
           .collect(),
       };
-      let show_in_playlist = true;
+      let show_in_playlist = b.enable_add_to_playlist;
       let mut items = match &app.search_results.tracks {
         Some(tracks) => tracks
           .items
@@ -1028,14 +1029,17 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
                 b,
               );
               cells[0] = track_index_cell(app, &track_id, index + 1);
-              if show_in_playlist
-                && item
+              if show_in_playlist {
+                let in_pl = item
                   .id
                   .as_ref()
                   .map(|id| app.playlist_contains(&id.uri(), None))
-                  .unwrap_or(false)
-              {
-                cells.push(app.user_config.padded_in_playlist_icon());
+                  .unwrap_or(false);
+                if in_pl {
+                  cells.push(format!(" {} ", app.user_config.behavior.in_playlist_icon));
+                } else {
+                  cells.push(" + ".to_string());
+                }
               }
               cells
             },
@@ -1316,7 +1320,7 @@ pub fn draw_podcast_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
 
 pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
   let b = &app.user_config.behavior;
-  let show_in_playlist = true;
+  let show_in_playlist = b.enable_add_to_playlist;
   let columns = song_table_columns(
     layout_chunk.width.saturating_sub(2),
     false,
@@ -1325,7 +1329,7 @@ pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
     b.show_length_column,
     b.show_date_added_column,
     false,
-    true,
+    show_in_playlist,
   );
   let header = TableHeader {
     id: TableId::Album,
@@ -1379,14 +1383,17 @@ pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
                     b,
                   );
                   cells[0] = track_index_cell(app, &track_id, index + 1);
-                  if show_in_playlist
-                    && item
+                  if show_in_playlist {
+                    let in_pl = item
                       .id
                       .as_ref()
                       .map(|id| app.playlist_contains(&id.uri(), None))
-                      .unwrap_or(false)
-                  {
-                    cells.push(app.user_config.padded_in_playlist_icon());
+                      .unwrap_or(false);
+                    if in_pl {
+                      cells.push(format!(" {} ", app.user_config.behavior.in_playlist_icon));
+                    } else {
+                      cells.push(" + ".to_string());
+                    }
                   }
                   cells
                 },
@@ -1447,14 +1454,17 @@ pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
                 b,
               );
               cells[0] = track_index_cell(app, &track_id, index + 1);
-              if show_in_playlist
-                && item
+              if show_in_playlist {
+                let in_pl = item
                   .id
                   .as_ref()
                   .map(|id| app.playlist_contains(&id.uri(), None))
-                  .unwrap_or(false)
-              {
-                cells.push(app.user_config.padded_in_playlist_icon());
+                  .unwrap_or(false);
+                if in_pl {
+                  cells.push(format!(" {} ", app.user_config.behavior.in_playlist_icon));
+                } else {
+                  cells.push(" + ".to_string());
+                }
               }
               cells
             },
@@ -1647,7 +1657,7 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
       app.track_table.context,
       Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
     );
-  let show_in_playlist = false;
+  let show_in_playlist = !show_remove && b.enable_add_to_playlist;
       let columns = song_table_columns(
         layout_chunk.width.saturating_sub(2),
         with_date,
@@ -1738,7 +1748,18 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
         let track_id = item.id.clone().map(|id| id.to_string());
         cells[0] = track_index_cell(app, &track_id, index + 1);
         if show_remove {
-          cells.push(" ✕".to_string());
+          cells.push(" ✕ ".to_string());
+        } else if show_in_playlist {
+          let in_pl = item
+            .id
+            .as_ref()
+            .map(|id| app.playlist_contains(&id.uri(), None))
+            .unwrap_or(false);
+          if in_pl {
+            cells.push(format!(" {} ", app.user_config.behavior.in_playlist_icon));
+          } else {
+            cells.push(" + ".to_string());
+          }
         }
         cells
       },
@@ -1778,7 +1799,7 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
     if b.show_length_column {
       load_more_format.push(String::new());
     }
-    if show_remove {
+    if show_remove || show_in_playlist {
       load_more_format.push(String::new());
     }
     items.push(TableItem {
@@ -2508,7 +2529,7 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
   match shown {
     ArtistBlock::TopTracks => {
       let b = &app.user_config.behavior;
-      let show_in_playlist = true;
+      let show_in_playlist = b.enable_add_to_playlist;
       let columns = song_table_columns(
         layout_chunk.width.saturating_sub(2),
         false,
@@ -2517,7 +2538,7 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
         b.show_length_column,
         b.show_date_added_column,
         false,
-        true,
+        show_in_playlist,
       );
       let header = TableHeader {
         id: TableId::Song,
@@ -2554,14 +2575,17 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
             b,
           );
           cells[0] = track_index_cell(app, &track_id, index + 1);
-          if show_in_playlist
-            && item
+          if show_in_playlist {
+            let in_pl = item
               .id
               .as_ref()
               .map(|id| app.playlist_contains(&id.uri(), None))
-              .unwrap_or(false)
-          {
-            cells.push(app.user_config.padded_in_playlist_icon());
+              .unwrap_or(false);
+            if in_pl {
+            cells.push(format!(" {} ", app.user_config.behavior.in_playlist_icon));
+            } else {
+              cells.push(" + ".to_string());
+            }
           }
           TableItem {
             id: item.id.clone().map(|id| id.to_string()).unwrap_or_default(),
