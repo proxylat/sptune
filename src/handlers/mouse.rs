@@ -1089,7 +1089,7 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           return false;
         }
         app.sidebar_minimized = !app.sidebar_minimized;
-        return true;
+        return false;
       }
       if y >= library.y && y < library.y + library.height {
         if let Some(index) = combined_sidebar_row_index(
@@ -1109,7 +1109,7 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           return false;
         }
         app.sidebar_minimized = !app.sidebar_minimized;
-        return true;
+        return false;
       } else if y >= playlists.y && y < playlists.y + playlists.height {
         let count = app
           .playlists
@@ -1135,7 +1135,7 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           return false;
         }
         app.sidebar_minimized = !app.sidebar_minimized;
-        return true;
+        return false;
       }
       if y >= chunk.y && y < chunk.y + chunk.height {
         if let Some(index) = list_row_index(y, chunk, count, app.library.selected_index) {
@@ -1159,7 +1159,7 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           return false;
         }
         app.sidebar_minimized = !app.sidebar_minimized;
-        return true;
+        return false;
       }
       if y >= chunk.y && y < chunk.y + chunk.height {
         if let Some(index) = list_row_index(y, chunk, count, selected) {

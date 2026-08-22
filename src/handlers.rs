@@ -29,10 +29,11 @@ pub use mouse::handle_mouse;
 pub use search_input::handler as input_handler;
 
 pub fn handle_app(key: Key, app: &mut App) {
-  // When the in-playlist search is focused, capture every key there: no
-  // global hotkeys, no playback controls, nothing else. The track_table
-  // handler owns the filter and types/moves/closes accordingly.
-  if app.playlist_search_active() {
+  // When the in-playlist search bar has text (playlist_filter Some),
+  // capture every key in the filter handler so typing never triggers
+  // global shortcuts. playlist_search_active checks ActiveBlock but the
+  // filter outlives the block switch, so check is_some() directly.
+  if app.playlist_filter.is_some() {
     track_table::handler(key, app);
     return;
   }
