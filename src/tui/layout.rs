@@ -132,6 +132,46 @@ pub fn shortcuts_table_rect(area: Rect) -> Rect {
     .split(area)[1]
 }
 
+// Visible slice of the header search input that keeps the cursor in view.
+// Returns (visible_text, cursor_offset_in_visible).
+pub fn search_input_visible(input: &str, cursor: usize, viewport: usize) -> (String, usize) {
+  use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+  if viewport == 0 {
+    return (String::new(), 0);
+  }
+  let total = UnicodeWidthStr::width(input);
+  if total <= viewport {
+    return (input.to_string(), cursor.min(total));
+  }
+  let max_start = total.saturating_sub(viewport);
+  let desired = cursor.saturating_sub(viewport.saturating_sub(1));
+  let start = desired.min(max_start);
+  let mut out = String::new();
+  let mut w = 0usize;
+  let mut visible_w = 0usize;
+  for c in input.chars() {
+    let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+    let char_start = w;
+    let char_end = w + cw;
+    w = char_end;
+    if char_start >= start && char_start < start + viewport {
+      // char starts inside window; if it would overflow window, still include
+      // as long as its start is inside (wide chars may spill 1 cell, ok)
+      if visible_w + cw <= viewport + 1 {
+        out.push(c);
+        visible_w += cw;
+      }
+    } else if char_start < start && char_end > start {
+      // start cuts inside a wide char (shouldn't happen for cursor-aligned
+      // starts but guard): include the char
+      out.push(c);
+      visible_w += cw;
+    }
+  }
+  let cursor_in_view = cursor.saturating_sub(start).min(viewport);
+  (out, cursor_in_view)
+}
+
 // Header height: tall enough for the 5-line figlet banner in every mode.
 pub fn header_height(_app: &App) -> u16 {
   5
