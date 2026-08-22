@@ -16,6 +16,7 @@ const APP_CONFIG_DIR: &str = "sptune";
 // v2: entries written before the added_at parse fix have no dates; bumping
 // the filename drops them so every playlist refetches with dates.
 const CACHE_FILE: &str = "playlist_cache_v2.json";
+const MAX_CACHED_PLAYLISTS: usize = 20;
 
 /// Stable identity of a playlist item (track or episode uri).
 pub fn playlist_item_uri(item: &PlaylistItem) -> Option<String> {
@@ -59,7 +60,7 @@ impl PlaylistCache {
   }
 
   /// Redirect the backing file (used by tests; the field is private).
-  #[allow(dead_code)]
+  #[cfg(test)]
   pub(crate) fn set_path(&mut self, path: std::path::PathBuf) {
     self.path = path;
     self.loaded = false;
@@ -94,6 +95,17 @@ impl PlaylistCache {
       return;
     }
     self.ensure_loaded();
+    // ponytail: cap playlists (LRU by fetched_at), prevents unbounded HashMap growth
+    if !self.map.contains_key(playlist_id) && self.map.len() >= MAX_CACHED_PLAYLISTS {
+      if let Some(oldest) = self
+        .map
+        .iter()
+        .min_by_key(|(_, v)| v.fetched_at)
+        .map(|(k, _)| k.clone())
+      {
+        self.map.remove(&oldest);
+      }
+    }
     let entry = self.map.entry(playlist_id.to_string()).or_default();
     entry.fetched_at = now_secs();
     if append {
@@ -179,7 +191,15 @@ impl PlaylistCache {
 
   fn save(&self) {
     if let Ok(json) = serde_json::to_string(&self.map) {
-      let _ = fs::write(&self.path, json);
+      // ponytail: async disk to not block Network thread; sync in tests for determinism
+      if cfg!(test) {
+        let _ = fs::write(&self.path, json);
+      } else {
+        let path = self.path.clone();
+        std::thread::spawn(move || {
+          let _ = fs::write(path, json);
+        });
+      }
     }
   }
 }

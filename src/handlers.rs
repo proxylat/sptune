@@ -228,6 +228,15 @@ fn handle_escape(app: &mut App) {
     ActiveBlock::MusicView => {
       app.pop_navigation_stack();
     }
+    ActiveBlock::HelpMenu => {
+      if app.help_show_shortcuts {
+        app.help_show_shortcuts = false;
+        app.help_scroll_offset = 0;
+        app.help_menu_page = 0;
+      } else {
+        app.set_current_route_state(Some(ActiveBlock::Empty), None);
+      }
+    }
     // These are global views that have no active/inactive distinction so do nothing
     ActiveBlock::SelectDevice => {}
     _ => {

@@ -148,7 +148,14 @@ impl LibraryCache {
 
   fn save(&self) {
     if let Ok(json) = serde_json::to_string(&self.map) {
-      let _ = fs::write(&self.path, json);
+      if cfg!(test) {
+        let _ = fs::write(&self.path, json);
+      } else {
+        let path = self.path.clone();
+        std::thread::spawn(move || {
+          let _ = fs::write(path, json);
+        });
+      }
     }
   }
 }

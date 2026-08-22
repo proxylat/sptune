@@ -490,6 +490,7 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     }
 
     let mut app = app.lock().await;
+    let mut needs_redraw = is_first_render;
     // Get the size of the screen on each loop to account for resize event
     if let Ok(size) = terminal.backend().size() {
       let size = Rect::from(size);
@@ -500,6 +501,7 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
         app.help_menu_page = 0;
 
         app.size = size;
+        needs_redraw = true;
 
         // Page size is the API max regardless of terminal size; the screen
         // renders a viewport of what fits, so bigger pages stay invisible.
@@ -512,12 +514,9 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
           ));
         }
 
-        // Based on the size of the terminal, adjust how many lines are
-        // displayed in the settings menu (8 = margins + borders + header,
-        // plus the fixed settings section on top)
-        if app.size.height > 8 {
-          app.help_menu_max_lines = (app.size.height as u32)
-            .saturating_sub(8 + crate::tui::layout::SETTINGS_ROW_COUNT as u32 + 2);
+        // Shortcuts page fills help_full_rect (height-4); table reserves 3 for borders+header
+        if app.size.height > 7 {
+          app.help_menu_max_lines = (app.size.height as u32).saturating_sub(7);
         } else {
           app.help_menu_max_lines = 0;
         }
@@ -539,48 +538,58 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
       }
 
       match event {
-        event::Event::Input(input) => match input {
-          event::InputEvent::Key(key) => {
-            if key == Key::Ctrl('c') {
-              quit = true;
-              break;
-            }
-
-            let current_active_block = app.get_current_route().active_block;
-
-            // To avoid swallowing the global key presses `q` and `-` make a special
-            // case for the input handler
-            if current_active_block == ActiveBlock::Input {
-              handlers::input_handler(key, &mut app);
-            } else if key == app.user_config.keys.back {
-              if app.get_current_route().active_block != ActiveBlock::Input {
-                // Go back through navigation stack when not in search input mode and exit the app if there are no more places to back to
-
-                let pop_result = match app.pop_navigation_stack() {
-                  Some(ref x) if x.id == RouteId::Search => app.pop_navigation_stack(),
-                  Some(x) => Some(x),
-                  None => None,
-                };
-                if pop_result.is_none() {
-                  quit = true;
-                  break;
-                }
+        event::Event::Input(input) => {
+          needs_redraw = true;
+          match input {
+            event::InputEvent::Key(key) => {
+              if key == Key::Ctrl('c') {
+                quit = true;
+                break;
               }
-            } else {
-              handlers::handle_app(key, &mut app);
+
+              let current_active_block = app.get_current_route().active_block;
+
+              // To avoid swallowing the global key presses `q` and `-` make a special
+              // case for the input handler
+              if current_active_block == ActiveBlock::Input {
+                handlers::input_handler(key, &mut app);
+              } else if key == app.user_config.keys.back {
+                if app.get_current_route().active_block != ActiveBlock::Input {
+                  // Go back through navigation stack when not in search input mode and exit the app if there are no more places to back to
+
+                  let pop_result = match app.pop_navigation_stack() {
+                    Some(ref x) if x.id == RouteId::Search => app.pop_navigation_stack(),
+                    Some(x) => Some(x),
+                    None => None,
+                  };
+                  if pop_result.is_none() {
+                    quit = true;
+                    break;
+                  }
+                }
+              } else {
+                handlers::handle_app(key, &mut app);
+              }
+            }
+            event::InputEvent::Mouse(mouse) => {
+              handlers::handle_mouse(mouse, &mut app);
             }
           }
-          event::InputEvent::Mouse(mouse) => {
-            handlers::handle_mouse(mouse, &mut app);
-          }
-        },
+        }
         event::Event::Tick => {
-          app.update_on_tick();
+          if app.update_on_tick() {
+            needs_redraw = true;
+          }
         }
       }
     }
     if quit {
       break;
+    }
+    // ponytail: idle throttle — skip full redraw when paused and no input; cuts 4 fps wake-ups to 0 when idle
+    if !needs_redraw {
+      drop(app);
+      continue;
     }
 
     let current_route = app.get_current_route();
