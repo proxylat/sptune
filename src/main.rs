@@ -626,12 +626,18 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     );
     let search_box = tui::layout::search_box_rect(&app, input_box);
     let w = terminal.backend_mut();
-    // Clamp the cursor to the search box (the input string may be longer
-    // than the box; the drawer ellipsizes the tail). The ellipsized text
-    // ends at x+width-5 (3 dots; the ✕ button starts at x+width-4), so the
-    // cursor sits one cell past the text, before the ✕.
-    let cursor_col = (search_box.x + 1 + app.input_cursor_position)
-      .min(search_box.x + search_box.width.saturating_sub(4));
+    // Scroll the input so the cursor stays in view; drawer uses the same
+    // viewport (inner width minus the clear ✕ reserve).
+    let input_string: String = app.input.iter().collect();
+    let inner_w = search_box.width.saturating_sub(2) as usize;
+    let reserve = if app.input.is_empty() { 0 } else { 3 };
+    let viewport_w = inner_w.saturating_sub(reserve);
+    let (_, vis_cursor) = tui::layout::search_input_visible(
+      &input_string,
+      app.input_cursor_position as usize,
+      viewport_w,
+    );
+    let cursor_col = search_box.x + 1 + vis_cursor as u16;
     execute!(w, MoveTo(cursor_col, search_box.y + 1))?;
 
     // Delay spotify request until first render, will have the effect of improving

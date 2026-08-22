@@ -373,13 +373,17 @@ pub fn draw_input_and_help_box(f: &mut Frame, app: &App, layout_chunk: Rect) {
   );
 
   let input_string: String = app.input.iter().collect();
-  // Keep the tail of a long input (e.g. a pasted playlist link) visible;
-  // reserve 3 cells for the clear button when there is input.
-  let input_string = ellipsize(
+  // Scroll the input so the cursor stays visible instead of truncating with
+  // "...". Reserve 3 cells for the clear ✕ when there is input.
+  let inner_w = chunks[1].width.saturating_sub(2) as usize;
+  let reserve = if app.input.is_empty() { 0 } else { 3 };
+  let viewport_w = inner_w.saturating_sub(reserve);
+  let (visible, _) = crate::tui::layout::search_input_visible(
     &input_string,
-    (chunks[1].width as usize / 2).saturating_sub(if app.input.is_empty() { 1 } else { 3 }),
+    app.input_cursor_position as usize,
+    viewport_w,
   );
-  let lines = Text::from(input_string);
+  let lines = Text::from(visible);
   let input = Paragraph::new(lines).block(
     Block::default()
       .borders(Borders::ALL)
