@@ -1277,15 +1277,12 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
   }
 
   /// Manual refresh (from a refresh control), never on screen open: probe for
-  /// changes when cached, else cold-fetch. See `refresh_saved_tracks`.
+  /// Manual refresh: always do a full refetch bypassing the snapshot/tail
+  /// probe. The reconcile path is for background opens, not user-requested
+  /// refresh.
   async fn refresh_playlist_tracks(&mut self, playlist_id: &str) {
-    self.playlist_cache.ensure_loaded();
-    if self.playlist_cache.lookup(playlist_id).is_some() {
-      self.reconcile_playlist_tracks(playlist_id).await;
-      self.serve_playlist_cache(playlist_id).await;
-    } else {
-      self.get_playlist_tracks(playlist_id.to_string(), 0).await;
-    }
+    self.playlist_cache.remove(playlist_id);
+    self.get_playlist_tracks(playlist_id.to_string(), 0).await;
   }
 
   /// Refresh one of the cached library lists. Opening a screen serves the
@@ -4051,11 +4048,8 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       .playlist_add_items(playlist_id.clone(), vec![item], None)
       .await
     {
-      Ok(result) => {
+      Ok(_result) => {
         let mut app = self.app.lock().await;
-        self
-          .playlist_cache
-          .add_item(&playlist_id_str, &uri, result.snapshot_id.clone());
         // Keep the sidebar count in sync without refetching the whole library.
         if let Some(page) = app.playlists.as_mut() {
           if let Some(pl) = page
@@ -4066,14 +4060,30 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
             pl.items.total = pl.items.total.saturating_add(1);
           }
         }
-        self.sync_playlist_uris(&mut app);
-        // When cache is disabled add_item is a no-op, so ensure the ✓ marker
-        // appears without waiting for a background fetch.
+        // Optimistic ✓ marker so the track flips to ✓ without waiting for a
+        // background fetch; the cache is invalidated so the next open sees the
+        // real track metadata (placeholder name would be wrong).
         app
           .playlist_uri_map
           .entry(playlist_id_str.clone())
           .or_default()
           .insert(uri.clone());
+        let current_view_is_target = app
+          .track_table
+          .context
+          .as_ref()
+          .is_some_and(|c| *c == crate::app::TrackTableContext::MyPlaylists)
+          && app
+            .active_playlist_index
+            .and_then(|idx| app.playlists.as_ref()?.items.get(idx))
+            .is_some_and(|pl| pl.id.id().to_string() == playlist_id_str);
+        drop(app);
+        // Invalidate cache so the next open (or an immediate refresh if this
+        // playlist is already on screen) fetches the true PlaylistItem.
+        self.playlist_cache.remove(&playlist_id_str);
+        if current_view_is_target {
+          self.get_playlist_tracks(playlist_id_str.clone(), 0).await;
+        }
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -4099,7 +4109,32 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         self
           .playlist_cache
           .remove_item(&playlist_id_str, &uri, result.snapshot_id);
+        if let Some(page) = app.playlists.as_mut() {
+          if let Some(pl) = page
+            .items
+            .iter_mut()
+            .find(|p| p.id.id().to_string() == playlist_id_str)
+          {
+            pl.items.total = pl.items.total.saturating_sub(1);
+          }
+        }
         self.sync_playlist_uris(&mut app);
+        // If the removed playlist is on screen, refresh the table so the row
+        // disappears without a manual refresh.
+        let still_viewing = app
+          .track_table
+          .context
+          .as_ref()
+          .is_some_and(|c| *c == crate::app::TrackTableContext::MyPlaylists)
+          && app
+            .active_playlist_index
+            .and_then(|idx| app.playlists.as_ref()?.items.get(idx))
+            .is_some_and(|pl| pl.id.id().to_string() == playlist_id_str);
+        drop(app);
+        if still_viewing {
+          // Serve already updated the cache; just re-serve the truncated list.
+          self.serve_playlist_cache(&playlist_id_str).await;
+        }
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
