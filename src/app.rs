@@ -229,6 +229,7 @@ pub enum DialogContext {
   PlaylistSearch,
   SeekTime,
   AddToPlaylist,
+  ConfirmRemoveFromPlaylist,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -513,6 +514,10 @@ pub struct App {
   /// navigation must not change which track gets added.
   pub pending_track_uri: Option<String>,
   pub playlist_picker_index: usize,
+  pub pending_remove_track_uri: Option<String>,
+  pub pending_remove_playlist_id: Option<String>,
+  pub pending_remove_track_name: Option<String>,
+  pub pending_remove_playlist_name: Option<String>,
   pub show_library: bool,
   pub show_playlists: bool,
   pub sidebar_minimized: bool,
@@ -633,6 +638,10 @@ impl Default for App {
       playlist_uri_map: HashMap::new(),
       pending_track_uri: None,
       playlist_picker_index: 0,
+      pending_remove_track_uri: None,
+      pending_remove_playlist_id: None,
+      pending_remove_track_name: None,
+      pending_remove_playlist_name: None,
       show_library: true,
       show_playlists: true,
       sidebar_minimized: false,
@@ -1633,6 +1642,64 @@ impl App {
     };
     self.last_remove_time = Some(Instant::now());
     self.dispatch(IoEvent::RemoveTrackFromPlaylist(track_uri, playlist_uri));
+  }
+
+  pub fn prompt_remove_selected_track_from_playlist(&mut self) {
+    if !self.user_config.behavior.enable_remove_from_playlist {
+      return;
+    }
+    let Some(track_uri) = self.selected_track_uri() else {
+      return;
+    };
+    let Some(playlist_uri) = self.track_table_playlist_uri() else {
+      return;
+    };
+    let track_name = self
+      .track_table
+      .tracks
+      .get(self.track_table.selected_index)
+      .map(|t| t.name.clone())
+      .unwrap_or_default();
+    let playlist_name = self
+      .playlists
+      .as_ref()
+      .and_then(|p| {
+        let idx = self.selected_playlist_index.or(self.active_playlist_index)?;
+        p.items.get(idx).map(|pl| pl.name.clone())
+      })
+      .unwrap_or_default();
+    self.pending_remove_track_uri = Some(track_uri);
+    self.pending_remove_playlist_id = Some(playlist_uri);
+    self.pending_remove_track_name = Some(track_name);
+    self.pending_remove_playlist_name = Some(playlist_name);
+    self.confirm = false;
+    self.push_navigation_stack(
+      RouteId::Dialog,
+      ActiveBlock::Dialog(DialogContext::ConfirmRemoveFromPlaylist),
+    );
+  }
+
+  pub fn confirm_pending_remove(&mut self) {
+    if self
+      .last_remove_time
+      .map(|t| t.elapsed() < Duration::from_secs(5))
+      .unwrap_or(false)
+    {
+      self.pending_remove_track_uri = None;
+      self.pending_remove_playlist_id = None;
+      self.pending_remove_track_name = None;
+      self.pending_remove_playlist_name = None;
+      return;
+    }
+    if let (Some(uri), Some(pid)) = (
+      self.pending_remove_track_uri.take(),
+      self.pending_remove_playlist_id.take(),
+    ) {
+      self.pending_remove_track_name = None;
+      self.pending_remove_playlist_name = None;
+      self.last_remove_time = Some(Instant::now());
+      self.dispatch(IoEvent::RemoveTrackFromPlaylist(uri, pid));
+    }
   }
 
   /// True when the uri appears in any cached playlist other than `exclude`

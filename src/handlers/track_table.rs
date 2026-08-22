@@ -101,7 +101,7 @@ pub fn handler(key: Key, app: &mut App) {
       app.open_add_to_playlist();
     }
     k if Some(k) == app.user_config.keys.remove_from_playlist => {
-      app.remove_selected_track_from_playlist();
+      app.prompt_remove_selected_track_from_playlist();
     }
     k if common_key_events::left_event(k) => common_key_events::handle_left_event(app),
     k if common_key_events::down_event(k) => {
