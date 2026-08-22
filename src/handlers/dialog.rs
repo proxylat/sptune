@@ -18,6 +18,11 @@ pub fn handler(key: Key, app: &mut App) {
     return;
   }
 
+  if context == DialogContext::ConfirmRemoveFromPlaylist {
+    handle_confirm_remove_dialog(key, app);
+    return;
+  }
+
   match key {
     Key::Enter => {
       if let Some(route) = app.pop_navigation_stack() {
@@ -28,6 +33,7 @@ pub fn handler(key: Key, app: &mut App) {
               DialogContext::PlaylistSearch => handle_playlist_search_dialog(app),
               DialogContext::SeekTime => {}
               DialogContext::AddToPlaylist => {}
+              DialogContext::ConfirmRemoveFromPlaylist => {}
             }
           }
         }
@@ -180,4 +186,30 @@ fn handle_add_to_playlist_dialog(key: Key, app: &mut App) {
 
 fn handle_playlist_search_dialog(app: &mut App) {
   app.user_unfollow_playlist_search_result()
+}
+
+fn handle_confirm_remove_dialog(key: Key, app: &mut App) {
+  match key {
+    Key::Left | Key::Right => app.confirm = !app.confirm,
+    Key::Char('q') | Key::Esc => {
+      app.pending_remove_track_uri = None;
+      app.pending_remove_playlist_id = None;
+      app.pending_remove_track_name = None;
+      app.pending_remove_playlist_name = None;
+      app.pop_navigation_stack();
+    }
+    Key::Enter => {
+      let yes = app.confirm;
+      app.pop_navigation_stack();
+      if yes {
+        app.confirm_pending_remove();
+      } else {
+        app.pending_remove_track_uri = None;
+        app.pending_remove_playlist_id = None;
+        app.pending_remove_track_name = None;
+        app.pending_remove_playlist_name = None;
+      }
+    }
+    _ => {}
+  }
 }

@@ -1,7 +1,7 @@
 use super::handle_app;
 use crate::app::{
-  visible_library_options, ActiveBlock, AlbumTableContext, App, ArtistBlock, RouteId,
-  SearchResultBlock, TrackSortColumn, TrackTableContext,
+  visible_library_options, ActiveBlock, AlbumTableContext, App, ArtistBlock, DialogContext,
+  RouteId, SearchResultBlock, TrackSortColumn, TrackTableContext,
 };
 use crate::backend::IoEvent;
 use crate::event::Key;
@@ -62,14 +62,26 @@ struct SidebarDrag {
 pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
   match mouse.kind {
     MouseEventKind::ScrollUp => {
+      if handle_add_to_playlist_scroll(true, app) {
+        return;
+      }
       handle_wheel(true, mouse, app);
     }
     MouseEventKind::ScrollDown => {
+      if handle_add_to_playlist_scroll(false, app) {
+        return;
+      }
       handle_wheel(false, mouse, app);
     }
     MouseEventKind::Down(MouseButton::Left) => {
       let (x, y) = (mouse.column, mouse.row);
       if x >= app.size.width || y >= app.size.height {
+        return;
+      }
+      if handle_confirm_remove_dialog_click(x, y, app) {
+        return;
+      }
+      if handle_add_to_playlist_dialog_click(x, y, app) {
         return;
       }
       if handle_library_drag_down(x, y, app) {
@@ -128,6 +140,12 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
       handle_scrollbar_drag(mouse.row, app);
     }
     MouseEventKind::Moved => {
+      if handle_confirm_remove_hover(mouse.column, mouse.row, app) {
+        return;
+      }
+      if handle_add_to_playlist_hover(mouse.column, mouse.row, app) {
+        return;
+      }
       handle_hover(mouse.column, mouse.row, app);
     }
     MouseEventKind::Up(MouseButton::Left) => {
@@ -164,6 +182,228 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
     }
     _ => {}
   }
+}
+
+fn handle_confirm_remove_dialog_click(x: u16, y: u16, app: &mut App) -> bool {
+  if !matches!(
+    app.get_current_route().active_block,
+    ActiveBlock::Dialog(DialogContext::ConfirmRemoveFromPlaylist)
+  ) {
+    return false;
+  }
+  let bounds = Rect::new(0, 0, app.size.width, app.size.height);
+  let width = std::cmp::min(bounds.width.saturating_sub(2), 65);
+  let height = 8;
+  if width == 0 {
+    return true;
+  }
+  let left = bounds.width.saturating_sub(width) / 2;
+  let top = bounds.height / 4;
+  let rect = Rect::new(left, top, width, height);
+  // Click outside dialog swallows but does not dismiss (avoid accidental close)
+  if x < rect.x || x >= rect.x + rect.width || y < rect.y || y >= rect.y + rect.height {
+    return true;
+  }
+  let vchunks = Layout::default()
+    .direction(Direction::Vertical)
+    .margin(2)
+    .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
+    .split(rect);
+  if vchunks.len() < 2 {
+    return true;
+  }
+  let hchunks = Layout::default()
+    .direction(Direction::Horizontal)
+    .horizontal_margin(3)
+    .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)].as_ref())
+    .split(vchunks[1]);
+  if hchunks.len() < 2 {
+    return true;
+  }
+  let no_rect = hchunks[0];
+  let yes_rect = hchunks[1];
+  if x >= no_rect.x && x < no_rect.x + no_rect.width && y >= no_rect.y && y < no_rect.y + no_rect.height
+  {
+    app.pending_remove_track_uri = None;
+    app.pending_remove_playlist_id = None;
+    app.pending_remove_track_name = None;
+    app.pending_remove_playlist_name = None;
+    app.pop_navigation_stack();
+    return true;
+  }
+  if x >= yes_rect.x
+    && x < yes_rect.x + yes_rect.width
+    && y >= yes_rect.y
+    && y < yes_rect.y + yes_rect.height
+  {
+    app.pop_navigation_stack();
+    app.confirm_pending_remove();
+    return true;
+  }
+  true
+}
+
+fn handle_confirm_remove_hover(x: u16, y: u16, app: &mut App) -> bool {
+  if !matches!(
+    app.get_current_route().active_block,
+    ActiveBlock::Dialog(DialogContext::ConfirmRemoveFromPlaylist)
+  ) {
+    return false;
+  }
+  let bounds = Rect::new(0, 0, app.size.width, app.size.height);
+  let width = std::cmp::min(bounds.width.saturating_sub(2), 65);
+  let height = 8;
+  if width == 0 {
+    return true;
+  }
+  let left = bounds.width.saturating_sub(width) / 2;
+  let top = bounds.height / 4;
+  let rect = Rect::new(left, top, width, height);
+  let vchunks = Layout::default()
+    .direction(Direction::Vertical)
+    .margin(2)
+    .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
+    .split(rect);
+  if vchunks.len() < 2 {
+    return true;
+  }
+  let hchunks = Layout::default()
+    .direction(Direction::Horizontal)
+    .horizontal_margin(3)
+    .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)].as_ref())
+    .split(vchunks[1]);
+  if hchunks.len() < 2 {
+    return true;
+  }
+  let no_rect = hchunks[0];
+  let yes_rect = hchunks[1];
+  if x >= no_rect.x && x < no_rect.x + no_rect.width && y >= no_rect.y && y < no_rect.y + no_rect.height {
+    app.confirm = false;
+  } else if x >= yes_rect.x && x < yes_rect.x + yes_rect.width && y >= yes_rect.y && y < yes_rect.y + yes_rect.height {
+    app.confirm = true;
+  }
+  true
+}
+
+fn handle_add_to_playlist_dialog_click(x: u16, y: u16, app: &mut App) -> bool {
+  if !matches!(
+    app.get_current_route().active_block,
+    ActiveBlock::Dialog(DialogContext::AddToPlaylist)
+  ) {
+    return false;
+  }
+  let bounds = Rect::new(0, 0, app.size.width, app.size.height);
+  let width = std::cmp::min(bounds.width.saturating_sub(2), 45);
+  let count = app.playlists.as_ref().map_or(0, |p| p.items.len()) as u16;
+  let height = std::cmp::min(count as usize + 6, bounds.height as usize - 2) as u16;
+  if width == 0 || height == 0 {
+    return true;
+  }
+  let left = bounds.width.saturating_sub(width) / 2;
+  let top = bounds.height / 4;
+  let rect = Rect::new(left, top, width, height);
+  if x < rect.x || x >= rect.x + rect.width || y < rect.y || y >= rect.y + rect.height {
+    return true;
+  }
+  // Inner list rect matches tui.rs draw_add_to_playlist_dialog inner Margin 2,2
+  let inner = Rect::new(
+    rect.x + 2,
+    rect.y + 2,
+    rect.width.saturating_sub(4),
+    rect.height.saturating_sub(4),
+  );
+  let viewport = height.saturating_sub(4) as usize;
+  let offset = app.playlist_picker_index.saturating_sub(viewport / 2);
+  if y < inner.y || y >= inner.y + inner.height {
+    return true;
+  }
+  if x < inner.x || x >= inner.x + inner.width {
+    return true;
+  }
+  let row = (y - inner.y) as usize;
+  let idx = offset + row;
+  let total = app.playlists.as_ref().map_or(0, |p| p.items.len());
+  if idx >= total {
+    return true;
+  }
+  // Select the hovered playlist and confirm (same as keyboard Enter)
+  app.playlist_picker_index = idx;
+  let Some(uri) = app.pending_track_uri.take() else {
+    app.pop_navigation_stack();
+    return true;
+  };
+  let playlist_id = app
+    .playlists
+    .as_ref()
+    .and_then(|p| p.items.get(idx))
+    .map(|pl| pl.id.to_string());
+  app.pop_navigation_stack();
+  if let Some(playlist_id) = playlist_id {
+    app.dispatch(IoEvent::AddTrackToPlaylist(uri, playlist_id));
+  }
+  true
+}
+
+fn handle_add_to_playlist_hover(x: u16, y: u16, app: &mut App) -> bool {
+  if !matches!(
+    app.get_current_route().active_block,
+    ActiveBlock::Dialog(DialogContext::AddToPlaylist)
+  ) {
+    return false;
+  }
+  let bounds = Rect::new(0, 0, app.size.width, app.size.height);
+  let width = std::cmp::min(bounds.width.saturating_sub(2), 45);
+  let count = app.playlists.as_ref().map_or(0, |p| p.items.len()) as u16;
+  let height = std::cmp::min(count as usize + 6, bounds.height as usize - 2) as u16;
+  if width == 0 || height == 0 {
+    return true;
+  }
+  let left = bounds.width.saturating_sub(width) / 2;
+  let top = bounds.height / 4;
+  let rect = Rect::new(left, top, width, height);
+  let inner = Rect::new(
+    rect.x + 2,
+    rect.y + 2,
+    rect.width.saturating_sub(4),
+    rect.height.saturating_sub(4),
+  );
+  let viewport = height.saturating_sub(4) as usize;
+  let offset = app.playlist_picker_index.saturating_sub(viewport / 2);
+  if x < inner.x || x >= inner.x + inner.width || y < inner.y || y >= inner.y + inner.height {
+    return true;
+  }
+  let row = (y - inner.y) as usize;
+  let idx = offset + row;
+  let total = app.playlists.as_ref().map_or(0, |p| p.items.len());
+  if idx < total {
+    app.playlist_picker_index = idx;
+  }
+  true
+}
+
+fn handle_add_to_playlist_scroll(up: bool, app: &mut App) -> bool {
+  if !matches!(
+    app.get_current_route().active_block,
+    ActiveBlock::Dialog(DialogContext::AddToPlaylist)
+  ) {
+    return false;
+  }
+  let count = app.playlists.as_ref().map_or(0, |p| p.items.len());
+  if count == 0 {
+    return true;
+  }
+  if up {
+    app.playlist_picker_index = app.playlist_picker_index.saturating_sub(1);
+    if app.playlist_picker_index == usize::MAX {
+      app.playlist_picker_index = count - 1;
+    }
+    if app.playlist_picker_index >= count {
+      app.playlist_picker_index = count - 1;
+    }
+  } else {
+    app.playlist_picker_index = (app.playlist_picker_index + 1) % count;
+  }
+  true
 }
 
 // Returns true when the click landed on a row of a list (so a double-click
@@ -1266,12 +1506,30 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           );
         if show_remove
           && index < app.track_table.tracks.len()
-          && x >= chunk.x + chunk.width.saturating_sub(2)
+          && x >= chunk.x + chunk.width.saturating_sub(6)
         {
           app.track_table.selected_index = index;
           app.set_current_route_state(Some(ActiveBlock::TrackTable), None);
-          app.remove_selected_track_from_playlist();
+          app.prompt_remove_selected_track_from_playlist();
           return false;
+        }
+        // The add +/✓ column (same rightmost 6 cells) opens the playlist picker
+        // when the track is not already in any playlist.
+        let show_add = app.user_config.behavior.enable_add_to_playlist;
+        if show_add
+          && index < app.track_table.tracks.len()
+          && x >= chunk.x + chunk.width.saturating_sub(6)
+        {
+          if let Some(track) = app.track_table.tracks.get(index) {
+            if let Some(id) = track.id.as_ref().map(|id| id.uri()) {
+              if !app.is_in_any_playlist(&id) {
+                app.track_table.selected_index = index;
+                app.set_current_route_state(Some(ActiveBlock::TrackTable), None);
+                app.open_add_to_playlist_for_uri(id);
+                return false;
+              }
+            }
+          }
         }
         app.track_table.selected_index = index;
         // Clicking a track row while the in-playlist search is active must

@@ -4045,14 +4045,35 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     let Ok(playlist_id) = PlaylistId::from_id_or_uri(&playlist_id) else {
       return;
     };
+    let playlist_id_str = playlist_id.id().to_string();
     match self
       .spotify
-      .playlist_add_items(playlist_id, vec![item], None)
+      .playlist_add_items(playlist_id.clone(), vec![item], None)
       .await
     {
-      Ok(_) => {
+      Ok(result) => {
         let mut app = self.app.lock().await;
+        self
+          .playlist_cache
+          .add_item(&playlist_id_str, &uri, result.snapshot_id.clone());
+        // Keep the sidebar count in sync without refetching the whole library.
+        if let Some(page) = app.playlists.as_mut() {
+          if let Some(pl) = page
+            .items
+            .iter_mut()
+            .find(|p| p.id.id().to_string() == playlist_id_str)
+          {
+            pl.items.total = pl.items.total.saturating_add(1);
+          }
+        }
         self.sync_playlist_uris(&mut app);
+        // When cache is disabled add_item is a no-op, so ensure the ✓ marker
+        // appears without waiting for a background fetch.
+        app
+          .playlist_uri_map
+          .entry(playlist_id_str.clone())
+          .or_default()
+          .insert(uri.clone());
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;

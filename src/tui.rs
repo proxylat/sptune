@@ -3221,6 +3221,7 @@ fn draw_dialog(f: &mut Frame, app: &App) {
     match context {
       DialogContext::SeekTime => draw_seek_dialog(f, app),
       DialogContext::AddToPlaylist => draw_add_to_playlist_dialog(f, app),
+      DialogContext::ConfirmRemoveFromPlaylist => draw_confirm_remove_dialog(f, app),
       _ => {
         if let Some(playlist) = app.dialog.as_ref() {
           let bounds = f.area();
@@ -3294,6 +3295,66 @@ fn draw_dialog(f: &mut Frame, app: &App) {
       }
     }
   }
+}
+
+fn draw_confirm_remove_dialog(f: &mut Frame, app: &App) {
+  let bounds = f.area();
+  let width = std::cmp::min(bounds.width - 2, 65);
+  let height = 8;
+  let left = (bounds.width - width) / 2;
+  let top = bounds.height / 4;
+  let rect = Rect::new(left, top, width, height);
+  f.render_widget(Clear, rect);
+  let block = Block::default()
+    .borders(Borders::ALL)
+    .border_style(Style::default().fg(app.user_config.theme.inactive));
+  f.render_widget(block, rect);
+  let vchunks = Layout::default()
+    .direction(Direction::Vertical)
+    .margin(2)
+    .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
+    .split(rect);
+  let track = app
+    .pending_remove_track_name
+    .as_deref()
+    .unwrap_or("this song");
+  let playlist = app
+    .pending_remove_playlist_name
+    .as_deref()
+    .unwrap_or("this playlist");
+  let text = vec![
+    Line::from(Span::raw(format!(
+      "Are you sure you want to remove \"{}\"",
+      track
+    ))),
+    Line::from(Span::raw(format!("from the playlist \"{}\"?", playlist))),
+  ];
+  let paragraph = Paragraph::new(text)
+    .wrap(Wrap { trim: true })
+    .alignment(Alignment::Center);
+  f.render_widget(paragraph, vchunks[0]);
+  let hchunks = Layout::default()
+    .direction(Direction::Horizontal)
+    .horizontal_margin(3)
+    .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)].as_ref())
+    .split(vchunks[1]);
+  // No is left, Yes is right. confirm==true means Yes is hovered.
+  let no = Paragraph::new(Span::raw("No"))
+    .style(Style::default().fg(if app.confirm {
+      app.user_config.theme.inactive
+    } else {
+      app.user_config.theme.hovered
+    }))
+    .alignment(Alignment::Center);
+  f.render_widget(no, hchunks[0]);
+  let yes = Paragraph::new(Span::raw("Yes"))
+    .style(Style::default().fg(if app.confirm {
+      app.user_config.theme.hovered
+    } else {
+      app.user_config.theme.inactive
+    }))
+    .alignment(Alignment::Center);
+  f.render_widget(yes, hchunks[1]);
 }
 
 // Playlist picker: the user's own playlists, arrows to move, Enter to add
