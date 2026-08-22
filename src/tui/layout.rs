@@ -771,7 +771,7 @@ pub fn song_table_columns(
   } else {
     0
   };
-  let right = if show_remove || show_in_playlist { 2 } else { 0 };
+  let right = if show_remove || show_in_playlist { 4 } else { 0 };
   // Number column stays 4 wide (anchored). Title is GAP narrower than the
   // flex share so draw_table can pad its cell with leading spaces, pushing the
   // song names right without moving the track numbers.
@@ -804,7 +804,7 @@ pub fn song_table_columns(
     x += length;
   }
   if show_remove || show_in_playlist {
-    columns.push((ColumnId::None, x, 2));
+    columns.push((ColumnId::None, x, 4));
   }
   columns
 }
