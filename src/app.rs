@@ -946,9 +946,11 @@ impl App {
       } else {
         duration_ms.into()
       };
-      let changed = new_progress != self.song_progress_ms;
+      let prev = self.song_progress_ms;
       self.song_progress_ms = new_progress;
-      return *is_playing || changed;
+      // ponytail: playbar renders whole seconds — redraw only when the visible
+      // second flips (1 Hz while playing, 0 when paused) instead of every 250ms tick
+      return (new_progress / 1000) != (prev / 1000);
     }
     false
   }
