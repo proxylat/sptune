@@ -12,22 +12,77 @@ pub fn handler(key: Key, app: &mut App) {
   // When the in-playlist search bar is active, capture ALL keys here so
   // typing doesn't move the cursor, play songs, or trigger other actions.
   if app.playlist_filter.is_some() {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let cw = |c: char| UnicodeWidthChar::width(c).unwrap_or(0) as u16;
     match key {
       k if Some(k) == app.user_config.keys.search_in_playlist => {
         app.playlist_filter = None;
+        app.playlist_filter_idx = 0;
+        app.playlist_filter_cursor_position = 0;
       }
       Key::Char(c) => {
         if let Some(query) = app.playlist_filter.as_mut() {
-          query.push(c);
+          let idx = app.playlist_filter_idx.min(query.chars().count());
+          let byte_idx = query.chars().take(idx).map(|ch| ch.len_utf8()).sum::<usize>();
+          query.insert(byte_idx, c);
+          app.playlist_filter_idx += 1;
+          app.playlist_filter_cursor_position += cw(c);
         }
       }
-      Key::Backspace => {
+      Key::Backspace | Key::Ctrl('h') => {
+        if app.playlist_filter_idx > 0 {
+          if let Some(query) = app.playlist_filter.as_mut() {
+            let idx = app.playlist_filter_idx - 1;
+            let mut chars: Vec<char> = query.chars().collect();
+            let removed = chars.remove(idx);
+            *query = chars.into_iter().collect();
+            app.playlist_filter_idx -= 1;
+            app.playlist_filter_cursor_position = app.playlist_filter_cursor_position.saturating_sub(cw(removed));
+          }
+        }
+      }
+      Key::Delete | Key::Ctrl('d') => {
         if let Some(query) = app.playlist_filter.as_mut() {
-          query.pop();
+          let idx = app.playlist_filter_idx;
+          if idx < query.chars().count() {
+            let mut chars: Vec<char> = query.chars().collect();
+            chars.remove(idx);
+            *query = chars.into_iter().collect();
+          }
+        }
+      }
+      Key::Left | Key::Ctrl('b') => {
+        if app.playlist_filter_idx > 0 {
+          if let Some(query) = app.playlist_filter.as_deref() {
+            let ch = query.chars().nth(app.playlist_filter_idx - 1).unwrap();
+            app.playlist_filter_idx -= 1;
+            app.playlist_filter_cursor_position = app.playlist_filter_cursor_position.saturating_sub(cw(ch));
+          }
+        }
+      }
+      Key::Right | Key::Ctrl('f') => {
+        if let Some(query) = app.playlist_filter.as_deref() {
+          if app.playlist_filter_idx < query.chars().count() {
+            let ch = query.chars().nth(app.playlist_filter_idx).unwrap();
+            app.playlist_filter_idx += 1;
+            app.playlist_filter_cursor_position += cw(ch);
+          }
+        }
+      }
+      Key::Home | Key::Ctrl('a') => {
+        app.playlist_filter_idx = 0;
+        app.playlist_filter_cursor_position = 0;
+      }
+      Key::End | Key::Ctrl('e') => {
+        if let Some(query) = app.playlist_filter.as_deref() {
+          app.playlist_filter_idx = query.chars().count();
+          app.playlist_filter_cursor_position = UnicodeWidthStr::width(query) as u16;
         }
       }
       Key::Esc => {
         app.playlist_filter = None;
+        app.playlist_filter_idx = 0;
+        app.playlist_filter_cursor_position = 0;
       }
       _ => {}
     }
@@ -112,6 +167,8 @@ pub fn handler(key: Key, app: &mut App) {
         Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
       ) {
         app.playlist_filter = Some(String::new());
+        app.playlist_filter_idx = 0;
+        app.playlist_filter_cursor_position = 0;
       }
     }
     // Scroll down

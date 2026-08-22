@@ -1215,6 +1215,8 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
         ) {
           app.playlist_filter = Some(String::new());
+          app.playlist_filter_idx = 0;
+          app.playlist_filter_cursor_position = 0;
           app.set_current_route_state(Some(ActiveBlock::TrackTable), None);
           return false;
         }
@@ -1276,6 +1278,8 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
         // dismiss the filter so the subsequent Enter can trigger playback.
         // (handle_app captures ALL keys when playlist_search_active.)
         app.playlist_filter = None;
+        app.playlist_filter_idx = 0;
+        app.playlist_filter_cursor_position = 0;
         app.set_current_route_state(Some(ActiveBlock::TrackTable), None);
         if has_more && index == app.track_table.tracks.len() {
           app.load_more_tracks();

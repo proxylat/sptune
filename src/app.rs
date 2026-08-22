@@ -465,6 +465,8 @@ pub struct App {
   // None hides the bar and clears the filter. Toggled by the configurable
   // `search_in_playlist` key (default: no key bound).
   pub playlist_filter: Option<String>,
+  pub playlist_filter_idx: usize,
+  pub playlist_filter_cursor_position: u16,
   // When the last remove-from-playlist request was dispatched; enforces the
   // 5-second cooldown so a user cannot mass-delete tracks.
   pub last_remove_time: Option<Instant>,
@@ -602,6 +604,8 @@ impl Default for App {
       track_table: Default::default(),
       track_table_sort: None,
       playlist_filter: None,
+      playlist_filter_idx: 0,
+      playlist_filter_cursor_position: 0,
       last_remove_time: None,
       last_load_more: None,
       api_tokens: 5.0,
@@ -1045,6 +1049,8 @@ impl App {
   pub fn push_navigation_stack(&mut self, next_route_id: RouteId, next_active_block: ActiveBlock) {
     // Leaving the current view (tabs, other pages) drops the in-playlist search.
     self.playlist_filter = None;
+    self.playlist_filter_idx = 0;
+    self.playlist_filter_cursor_position = 0;
     if !self
       .navigation_stack
       .last()
@@ -1061,6 +1067,8 @@ impl App {
 
   pub fn pop_navigation_stack(&mut self) -> Option<Route> {
     self.playlist_filter = None;
+    self.playlist_filter_idx = 0;
+    self.playlist_filter_cursor_position = 0;
     if self.navigation_stack.len() == 1 {
       None
     } else {
@@ -1106,6 +1114,8 @@ impl App {
       // in-playlist search focus.
       if active_block != ActiveBlock::TrackTable {
         self.playlist_filter = None;
+        self.playlist_filter_idx = 0;
+        self.playlist_filter_cursor_position = 0;
       }
       // Engaging a sidebar panel latches its highlight: the row stays marked
       // while browsing the page opened from it, until the user engages
