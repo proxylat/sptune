@@ -57,28 +57,50 @@ impl Events {
       let mut batch: Vec<Event<InputEvent>> = Vec::new();
       loop {
         // poll for tick rate duration, if no event, sent tick event.
-        if event::poll(config.tick_rate).unwrap() {
+        // poll/read failures mean terminal is closing; exit thread instead of panicking.
+        let has_event = match event::poll(config.tick_rate) {
+          Ok(v) => v,
+          Err(_) => {
+            if event_tx.send(Event::Tick).is_err() {
+              break;
+            }
+            continue;
+          }
+        };
+        if has_event {
           // Drain everything waiting in one batch. Every event triggers a full
           // redraw, so a busy pointer (drag/move flood) would otherwise queue
           // hundreds of frames and lag the screen by seconds.
           batch.clear();
           loop {
-            let ev = match event::read().unwrap() {
-              event::Event::Key(key) => Event::Input(InputEvent::Key(Key::from(key))),
-              event::Event::Mouse(mouse) => Event::Input(InputEvent::Mouse(mouse)),
-              _ => continue,
+            let ev = match event::read() {
+              Ok(ev) => match ev {
+                event::Event::Key(key) => Event::Input(InputEvent::Key(Key::from(key))),
+                event::Event::Mouse(mouse) => Event::Input(InputEvent::Mouse(mouse)),
+                _ => continue,
+              },
+              Err(_) => break,
             };
             push_coalesced(&mut batch, ev);
-            if !event::poll(Duration::from_millis(0)).unwrap() {
-              break;
+            match event::poll(Duration::from_millis(0)) {
+              Ok(more) => {
+                if !more {
+                  break;
+                }
+              }
+              Err(_) => break,
             }
           }
           for ev in batch.drain(..) {
-            event_tx.send(ev).unwrap();
+            if event_tx.send(ev).is_err() {
+              return;
+            }
           }
         }
 
-        event_tx.send(Event::Tick).unwrap();
+        if event_tx.send(Event::Tick).is_err() {
+          break;
+        }
       }
     });
 

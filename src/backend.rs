@@ -3817,48 +3817,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     true
   }
 
-  /// Delta probe on launch; see `reconcile_saved_tracks`.
-  async fn reconcile_playlists(&mut self) {
-    let Some((cached, total)) = self
-      .library_cache
-      .get_typed::<SimplifiedPlaylist>("playlists")
-    else {
-      return;
-    };
-    if cached.len() as u32 != total {
-      return;
-    }
-    let page = match self
-      .spotify
-      .current_user_playlists_manual(Some(API_MAX_LIMIT), None)
-      .await
-    {
-      Ok(p) => p,
-      Err(_) => return,
-    };
-    if page.total < total {
-      self.refetch_playlists().await;
-      return;
-    }
-    let cached_ids: std::collections::HashSet<String> =
-      cached.iter().map(|p| p.id.to_string()).collect();
-    let new_head: Vec<SimplifiedPlaylist> = page
-      .items
-      .into_iter()
-      .take_while(|p| !cached_ids.contains(&p.id.to_string()))
-      .collect();
-    if new_head.is_empty() {
-      return;
-    }
-    if page.total == total + new_head.len() as u32 {
-      self
-        .library_cache
-        .prepend("playlists", &new_head, page.total);
-    } else {
-      self.refetch_playlists().await;
-    }
-  }
-
   /// Full sequential refetch of the playlists list; see `refetch_saved_tracks`.
   async fn refetch_playlists(&mut self) {
     let mut all: Vec<SimplifiedPlaylist> = Vec::new();
