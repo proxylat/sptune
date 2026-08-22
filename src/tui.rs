@@ -3841,10 +3841,11 @@ mod tests {
   }
 
   #[test]
-  fn song_row_cells_match_hidden_columns() {
+   fn song_row_cells_match_hidden_columns() {
     // Cell shape must mirror song_table_columns: a hidden column drops its
     // cells too (ratatui zips cells to widths by position).
     let mut b = crate::user_config::UserConfig::new().behavior;
+    b.show_artist_column = true;
     let full = song_row_cells("T", "A", "AL", "2024-01-01", 180_000, true, &b);
     assert_eq!(
       full,

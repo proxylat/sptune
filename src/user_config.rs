@@ -430,7 +430,7 @@ impl UserConfig {
         set_window_title: true,
         enable_mouse: true,
         show_album_column: true,
-        show_artist_column: true,
+        show_artist_column: false,
         show_length_column: true,
         show_date_added_column: true,
         enable_add_to_playlist: true,
