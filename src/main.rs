@@ -411,9 +411,12 @@ of the app. Beware that this comes at a CPU cost!",
   app_guard.clamp_library_selection();
   let should_auto_launch = app_guard.user_config.spotify.auto_launch;
   let spotify_cfg = app_guard.user_config.spotify.clone();
+  app_guard.spotify_launched_by_sptune = should_auto_launch;
   drop(app_guard);
   if should_auto_launch {
-    let _ = crate::platform::spotify::launch(&spotify_cfg);
+    let launched = crate::platform::spotify::launch(&spotify_cfg).is_ok();
+    let mut guard = app.lock().await;
+    guard.spotify_launched_by_sptune = launched;
   }
 
   // Work with the cli (not really async)
@@ -687,6 +690,24 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
   }
 
   terminal.show_cursor()?;
+
+  // Exit policy: Spotify that sptune launched dies with sptune; a player the
+  // user brought themselves is left running — but never frozen, so anything
+  // we suspended is CONTed on the way out.
+  let (launched_by_sptune, suspended) = {
+    let guard = app.lock().await;
+    (guard.spotify_launched_by_sptune, guard.processes_suspended)
+  };
+  if launched_by_sptune {
+    if let Some(root) = crate::platform::spotify::find_root_pid() {
+      crate::platform::spotify::kill_tree(root);
+    }
+  } else if suspended {
+    if let Some(root) = crate::platform::spotify::find_root_pid() {
+      crate::platform::spotify::resume_processes(root);
+    }
+  }
+
   close_application(
     user_config.terminal.alt_screen,
     user_config.terminal.enable_mouse,

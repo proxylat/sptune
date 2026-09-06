@@ -124,6 +124,61 @@ pub fn suspend_children_of(root: u32, do_suspend: bool, do_trim: bool) {
   }
 }
 
+// Manual suspend (no trim): STOP only, so Resume restores exactly the prior state.
+#[cfg(target_os = "linux")]
+pub fn suspend_only(pid: u32, cmd: &str) {
+  if is_network_service(cmd) {
+    return;
+  }
+  let _ = std::process::Command::new("kill")
+    .args(["-STOP", &pid.to_string()])
+    .output();
+}
+
+// CONT is a no-op on running processes, so sweeping every descendant (even
+// ones sptune never stopped) is safe.
+#[cfg(target_os = "linux")]
+pub fn resume_children_of(root: u32) {
+  for (pid, _) in descendants_of(root) {
+    let _ = std::process::Command::new("kill")
+      .args(["-CONT", &pid.to_string()])
+      .output();
+  }
+}
+
+#[cfg(target_os = "linux")]
+pub fn kill_tree(root: u32) {
+  for (pid, _) in descendants_of(root) {
+    let _ = std::process::Command::new("kill")
+      .args(["-TERM", &pid.to_string()])
+      .output();
+  }
+  let _ = std::process::Command::new("kill")
+    .args(["-TERM", &root.to_string()])
+    .output();
+}
+
+// Topmost process whose cmdline mentions spotify (its parent's does not) —
+// the Chromium browser process sptune would have launched.
+#[cfg(target_os = "linux")]
+pub fn find_root_pid() -> Option<u32> {
+  let mut candidates: Vec<u32> = Vec::new();
+  let entries = std::fs::read_dir("/proc").ok()?;
+  for entry in entries.flatten() {
+    if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
+      if cmdline_of(pid).to_lowercase().contains("spotify") {
+        candidates.push(pid);
+      }
+    }
+  }
+  candidates.sort_unstable();
+  candidates.into_iter().find(|&pid| {
+    ppid_of(pid)
+      .map(|ppid| !cmdline_of(ppid).to_lowercase().contains("spotify"))
+      .unwrap_or(true)
+  })
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn apply_memory_limits(_pids: &[(u32, String)]) {}
 

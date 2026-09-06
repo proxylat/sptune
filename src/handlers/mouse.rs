@@ -539,9 +539,9 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
   let vis_row = (y - settings.y - 1) as usize;
   let row = vis_row + app.help_scroll_offset as usize;
 
-  // Row -> toggle_setting index map for the categorized layout (33 rows):
+  // Row -> toggle_setting index map for the categorized layout (34 rows):
   // headers and the Shortcuts link are None.
-  const SHORTCUTS_ROW: usize = 29;
+  const SHORTCUTS_ROW: usize = 30;
   if row == SHORTCUTS_ROW {
     app.help_show_shortcuts = true;
     app.help_scroll_offset = 0;
@@ -551,7 +551,7 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
     app.calculate_help_menu_offset();
     return;
   }
-  const ROW_TO_TOGGLE: [Option<usize>; 33] = [
+  const ROW_TO_TOGGLE: [Option<usize>; 34] = [
     None,     // 0  ─ Appearence/Layout ─
     Some(0),  // 1  Black theme
     Some(5),  // 2  Theme
@@ -564,27 +564,28 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
     Some(11), // 9  Column Length
     Some(12), // 10 Column Date Added
     Some(15), // 11 Max name length
-    Some(4),  // 12 Mouse interactions
-    Some(13), // 13 Add to playlist
-    Some(14), // 14 Remove from playlist
-    Some(8),  // 15 Requests View
-    None,     // 16 blank
-    None,     // 17 ─ Playback ─
-    Some(6),  // 18 Timestamp by typing
-    Some(7),  // 19 Restore settings
-    None,     // 20 blank
-    None,     // 21 ─ Spotify ─
-    Some(18), // 22 Auto launch with sptune
-    Some(19), // 23 Enable Chromium flags
-    Some(20), // 24 Auto suspend child processes
-    Some(21), // 25 Auto trim WorkingSet
-    Some(22), // 26 Memory limit per child process
-    None,     // 27 blank
-    None,     // 28 ─ Navigation ─
-    None,     // 29 Shortcuts →
-    None,     // 30 blank
-    None,     // 31 ─ Danger Zone ─
-    Some(17), // 32 Clear cache (always last)
+    Some(23), // 12 Suspend/Resume Process
+    Some(4),  // 13 Mouse interactions
+    Some(13), // 14 Add to playlist
+    Some(14), // 15 Remove from playlist
+    Some(8),  // 16 Requests View
+    None,     // 17 blank
+    None,     // 18 ─ Playback ─
+    Some(6),  // 19 Timestamp by typing
+    Some(7),  // 20 Restore settings
+    None,     // 21 blank
+    None,     // 22 ─ Spotify in launch ─
+    Some(18), // 23 Auto launch with sptune
+    Some(19), // 24 Enable Chromium flags
+    Some(20), // 25 Auto suspend child processes
+    Some(21), // 26 Auto trim WorkingSet
+    Some(22), // 27 Memory limit per child process
+    None,     // 28 blank
+    None,     // 29 ─ Navigation ─
+    None,     // 30 Shortcuts →
+    None,     // 31 blank
+    None,     // 32 ─ Danger Zone ─
+    Some(17), // 33 Clear cache (always last)
   ];
   if let Some(Some(toggle)) = ROW_TO_TOGGLE.get(row).copied() {
     app.toggle_setting(toggle);
@@ -1214,6 +1215,12 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
       let glyph_x = playbar.x + 1 + title.width() as u16;
       if x >= glyph_x.saturating_sub(3) && x < glyph_x {
         toggle_music_view(app);
+        return;
+      }
+      let (px0, px1) =
+        crate::tui::layout::playbar_processes_range(playbar, &ctx.device.name, app.processes_suspended);
+      if x >= px0 && x < px1 {
+        app.toggle_process_suspend();
         return;
       }
     }
@@ -2491,14 +2498,34 @@ mod tests {
 
   #[test]
   fn click_dev_view_row_toggles_request_log() {
-    // help_full_rect = (2,2,196,46); Requests View row 15 sits at y=18.
+    // help_full_rect = (2,2,196,46); Requests View row 16 sits at y=19.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.dev_view);
-    handle_mouse(click_event(10, 18), &mut app);
+    handle_mouse(click_event(10, 19), &mut app);
     assert!(app.dev_view);
-    handle_mouse(click_event(10, 18), &mut app);
+    handle_mouse(click_event(10, 19), &mut app);
     assert!(!app.dev_view);
+  }
+
+  #[test]
+  fn click_playbar_processes_button_toggles_suspend() {
+    // The processes button sits on the title row, right of the [ ] window
+    // toggle; x derives from the shared playbar_processes_range helper.
+    let mut app = playback_app();
+    let ctx = app.current_playback_context.as_ref().unwrap();
+    let (_, playbar, _) = main_layout(&app).unwrap();
+    let (px0, px1) = crate::tui::layout::playbar_processes_range(
+      playbar,
+      &ctx.device.name,
+      app.processes_suspended,
+    );
+    assert!(!app.processes_suspended);
+    handle_mouse(click_event((px0 + px1) / 2, playbar.y), &mut app);
+    assert!(app.processes_suspended);
+    // Clicking just left of the button ([ ] window) must not toggle suspend.
+    handle_mouse(click_event(px0.saturating_sub(4), playbar.y), &mut app);
+    assert!(app.processes_suspended);
   }
 
   #[test]
@@ -3280,13 +3307,13 @@ mod tests {
 
   #[test]
   fn click_mouse_settings_row_toggles_enable_mouse() {
-    // help_full_rect (2,2,196,46); Mouse interactions row 12 at y=15.
+    // help_full_rect (2,2,196,46); Mouse interactions row 13 at y=16.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(app.user_config.behavior.enable_mouse);
-    handle_mouse(click_event(100, 15), &mut app);
+    handle_mouse(click_event(100, 16), &mut app);
     assert!(!app.user_config.behavior.enable_mouse);
-    handle_mouse(click_event(100, 15), &mut app);
+    handle_mouse(click_event(100, 16), &mut app);
     assert!(app.user_config.behavior.enable_mouse);
   }
 
@@ -3314,25 +3341,25 @@ mod tests {
 
   #[test]
   fn click_seek_by_typing_row_toggles_setting() {
-    // help_full_rect (2,2,196,46); Seek by typing row 18 at y=21.
+    // help_full_rect (2,2,196,46); Seek by typing row 19 at y=22.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.user_config.behavior.seek_by_typing);
-    handle_mouse(click_event(10, 21), &mut app);
+    handle_mouse(click_event(10, 22), &mut app);
     assert!(app.user_config.behavior.seek_by_typing);
-    handle_mouse(click_event(10, 21), &mut app);
+    handle_mouse(click_event(10, 22), &mut app);
     assert!(!app.user_config.behavior.seek_by_typing);
   }
 
   #[test]
   fn click_restore_settings_row_toggles_setting() {
-    // help_full_rect (2,2,196,46); Restore settings row 19 at y=22.
+    // help_full_rect (2,2,196,46); Restore settings row 20 at y=23.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.user_config.behavior.restore_settings);
-    handle_mouse(click_event(10, 22), &mut app);
+    handle_mouse(click_event(10, 23), &mut app);
     assert!(app.user_config.behavior.restore_settings);
-    handle_mouse(click_event(10, 22), &mut app);
+    handle_mouse(click_event(10, 23), &mut app);
     assert!(!app.user_config.behavior.restore_settings);
   }
 

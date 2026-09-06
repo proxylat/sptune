@@ -86,6 +86,69 @@ pub fn descendants_of(root: u32) -> Vec<(u32, String)> {
   result
 }
 
+// Manual suspend (no trim): NtSuspendProcess only, so Resume restores the prior state.
+#[cfg(windows)]
+pub fn suspend_only(pid: u32, cmd: &str) {
+  if is_network_service(cmd) {
+    return;
+  }
+  let ps_suspend = format!(
+    "$p=Get-Process -Id {} -ErrorAction SilentlyContinue; if($p){{ Add-Type -MemberDefinition '[DllImport(\"ntdll.dll\")] public static extern int NtSuspendProcess(IntPtr h);' -Name NSS -Namespace NSS -ErrorAction SilentlyContinue | Out-Null; [NSS.NSS]::NtSuspendProcess($p.Handle) | Out-Null }}",
+    pid
+  );
+  let _ = std::process::Command::new("powershell")
+    .args(["-NoProfile", "-Command", &ps_suspend])
+    .output();
+}
+
+#[cfg(windows)]
+pub fn resume_children_of(root: u32) {
+  for (pid, _) in descendants_of(root) {
+    let ps_resume = format!(
+      "$p=Get-Process -Id {} -ErrorAction SilentlyContinue; if($p){{ Add-Type -MemberDefinition '[DllImport(\"ntdll.dll\")] public static extern int NtResumeProcess(IntPtr h);' -Name NRP -Namespace NRP -ErrorAction SilentlyContinue | Out-Null; [NRP.NRP]::NtResumeProcess($p.Handle) | Out-Null }}",
+      pid
+    );
+    let _ = std::process::Command::new("powershell")
+      .args(["-NoProfile", "-Command", &ps_resume])
+      .output();
+  }
+}
+
+#[cfg(windows)]
+pub fn kill_tree(root: u32) {
+  // /T walks the child tree, /F force-terminates; Chromium helpers die with it.
+  let _ = std::process::Command::new("taskkill")
+    .args(["/PID", &root.to_string(), "/T", "/F"])
+    .output();
+}
+
+// Topmost process whose command line mentions Spotify.exe (its parent's does
+// not) — the Chromium browser process sptune would have launched.
+#[cfg(windows)]
+pub fn find_root_pid() -> Option<u32> {
+  let (ppid_map, cmd_map) = ppid_map_via_powershell()?;
+  let is_spotify = |pid: u32| {
+    cmd_map
+      .get(&pid)
+      .map(|c| c.to_lowercase().contains("spotify.exe"))
+      .unwrap_or(false)
+  };
+  let mut candidates: Vec<u32> = ppid_map
+    .values()
+    .flatten()
+    .copied()
+    .filter(|&pid| is_spotify(pid))
+    .collect();
+  candidates.sort_unstable();
+  candidates.into_iter().find(|&pid| {
+    ppid_map
+      .iter()
+      .find(|(_, kids)| kids.contains(&pid))
+      .map(|(ppid, _)| !is_spotify(*ppid))
+      .unwrap_or(true)
+  })
+}
+
 #[cfg(windows)]
 pub fn suspend_children_of(root: u32, do_suspend: bool, do_trim: bool) {
   for (pid, cmd) in descendants_of(root) {

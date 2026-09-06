@@ -261,6 +261,7 @@ pub enum IoEvent {
   GetLyrics,
   GetTrackCredits(String),
   GetQueue,
+  ToggleProcessSuspend,
   GetArtistAlbumsMore(String, u32),
   GetArtistSinglesMore(String, u32),
   GetArtistAppearsOnMore(String, u32),
@@ -894,6 +895,23 @@ impl<'a> Network<'a> {
       }
       IoEvent::GetQueue => {
         self.get_queue().await;
+      }
+      IoEvent::ToggleProcessSuspend => {
+        let suspended = { self.app.lock().await.processes_suspended };
+        match crate::platform::spotify::find_root_pid() {
+          Some(root) => {
+            if suspended {
+              crate::platform::spotify::suspend_processes(root);
+            } else {
+              crate::platform::spotify::resume_processes(root);
+            }
+          }
+          None => {
+            let mut app = self.app.lock().await;
+            app.processes_suspended = false;
+            app.api_error = "Spotify process not found".to_string();
+          }
+        }
       }
       IoEvent::GetArtistAlbumsMore(artist_id, offset) => {
         self.get_artist_albums_more(artist_id, offset).await;

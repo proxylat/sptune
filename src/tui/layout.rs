@@ -725,6 +725,24 @@ pub enum PlaybarButton {
 // centered on the first inner row, just above the music bar. The song name
 // shares this row, drawn left of the buttons (truncated so it never
 // overlaps).
+// The manual suspend/resume button, drawn in the playbar title row just
+// right of the [ ] window toggle (separated by ──). Shared by the drawer and
+// the mouse hit-test so the hit zone follows the drawn label exactly.
+pub fn playbar_processes_label(suspended: bool) -> &'static str {
+  if suspended {
+    "Resume Processes"
+  } else {
+    "Suspend Processes"
+  }
+}
+
+// X range [start, end) of the processes button on the title row.
+pub fn playbar_processes_range(playbar: Rect, device_name: &str, suspended: bool) -> (u16, u16) {
+  let title = build_playbar_title("", device_name);
+  let start = playbar.x + 1 + title.width() as u16 + 2; // ── separator after [ ]
+  (start, start + playbar_processes_label(suspended).width() as u16)
+}
+
 pub fn playbar_controls_row(playbar: Rect) -> Rect {
   Rect::new(
     playbar.x + 1,

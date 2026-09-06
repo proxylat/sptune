@@ -244,6 +244,10 @@ fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'a>> {
     }
   )));
   rows.push(mk_row(format!(
+    "Suspend/Resume Process: {}",
+    on_off(app.processes_suspended)
+  )));
+  rows.push(mk_row(format!(
     "Mouse interactions: {} (m)",
     on_off(app.user_config.behavior.enable_mouse)
   )));
@@ -2409,6 +2413,11 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
       let theme = app.user_config.theme;
 
       let title = build_playbar_title(play_title, &current_playback_context.device.name);
+      let title = format!(
+        "{}──{}",
+        title,
+        layout::playbar_processes_label(app.processes_suspended)
+      );
       let border_style = get_color(highlight_state, theme);
       let title_block = Block::default()
         .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })

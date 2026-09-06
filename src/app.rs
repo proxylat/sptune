@@ -526,6 +526,12 @@ pub struct App {
   pub theme_preset_index: Option<usize>,
   pub dev_view: bool,
   pub request_log: VecDeque<RequestLogEntry>,
+  // Manual suspend state for the Spotify client's helper processes
+  // (playbar button + "Suspend/Resume Process" settings row).
+  pub processes_suspended: bool,
+  // True only when sptune spawned Spotify itself this session; drives the
+  // exit policy (kill the tree on exit vs. leave the user's player alone).
+  pub spotify_launched_by_sptune: bool,
   pub request_log_index: Option<usize>,
 }
 
@@ -654,6 +660,8 @@ impl Default for App {
       config_theme: Theme::default(),
       theme_preset_index: None,
       dev_view: false,
+      processes_suspended: false,
+      spotify_launched_by_sptune: false,
       request_log: VecDeque::new(),
       request_log_index: None,
     }
@@ -2294,6 +2302,15 @@ impl App {
   /// 6 = seek by typing, 7 = resume last song, 8 = restore settings,
   /// 9 = dev view, 10-13 = column visibility, 14 = add to playlist,
   /// 15 = liked icon, 16 = remove from playlist, 17 = clear cache.
+  /// Manual suspend/resume of the Spotify client's helper processes. The
+  /// state flips optimistically so the button label is instant; the backend
+  /// reverts it when no Spotify process can be found (the Windows process
+  /// scan alone can take a second).
+  pub fn toggle_process_suspend(&mut self) {
+    self.processes_suspended = !self.processes_suspended;
+    self.dispatch(IoEvent::ToggleProcessSuspend);
+  }
+
   pub fn toggle_setting(&mut self, index: usize) {
     match index {
       0 => {
@@ -2404,6 +2421,9 @@ impl App {
         } else {
           0
         };
+      }
+      23 => {
+        self.toggle_process_suspend();
       }
       _ => {}
     }

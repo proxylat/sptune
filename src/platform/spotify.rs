@@ -109,3 +109,83 @@ pub fn launch(cfg: &SpotifyConfig) -> anyhow::Result<std::process::Child> {
   }
   Ok(child)
 }
+
+// --- Manual suspend/resume/exit handling (playbar button + settings toggle) ---
+
+// These are best-effort no-ops on platforms without the helpers.
+
+/// Find the running Spotify browser (root) process, whether or not sptune
+/// launched it.
+pub fn find_root_pid() -> Option<u32> {
+  #[cfg(target_os = "linux")]
+  {
+    return crate::platform::linux::find_root_pid();
+  }
+  #[cfg(windows)]
+  {
+    return crate::platform::windows::find_root_pid();
+  }
+  #[cfg(not(any(target_os = "linux", windows)))]
+  {
+    None
+  }
+}
+
+/// STOP/NtSuspendProcess every Spotify helper process (NetworkService kept
+/// alive so connectivity survives).
+pub fn suspend_processes(root: u32) {
+  #[cfg(target_os = "linux")]
+  {
+    for (pid, cmd) in crate::platform::linux::descendants_of(root) {
+      crate::platform::linux::suspend_only(pid, &cmd);
+    }
+    return;
+  }
+  #[cfg(windows)]
+  {
+    for (pid, cmd) in crate::platform::windows::descendants_of(root) {
+      crate::platform::windows::suspend_only(pid, &cmd);
+    }
+    return;
+  }
+  #[cfg(not(any(target_os = "linux", windows)))]
+  {
+    let _ = root;
+  }
+}
+
+/// CONT/NtResumeProcess every Spotify helper process.
+pub fn resume_processes(root: u32) {
+  #[cfg(target_os = "linux")]
+  {
+    crate::platform::linux::resume_children_of(root);
+    return;
+  }
+  #[cfg(windows)]
+  {
+    crate::platform::windows::resume_children_of(root);
+    return;
+  }
+  #[cfg(not(any(target_os = "linux", windows)))]
+  {
+    let _ = root;
+  }
+}
+
+/// Terminate the whole Spotify tree (used on exit when sptune launched it).
+pub fn kill_tree(root: u32) {
+  #[cfg(target_os = "linux")]
+  {
+    crate::platform::linux::kill_tree(root);
+    return;
+  }
+  #[cfg(windows)]
+  {
+    crate::platform::windows::kill_tree(root);
+    return;
+  }
+  #[cfg(not(any(target_os = "linux", windows)))]
+  {
+    let _ = root;
+  }
+}
