@@ -64,14 +64,14 @@ mod ffi {
 #[cfg(windows)]
 pub fn disable_quick_edit() {
   unsafe {
-    let conin = ffi::get_std_handle(ffi::STD_INPUT_HANDLE);
+    let conin = ffi::GetStdHandle(ffi::STD_INPUT_HANDLE);
     if conin.is_null() {
       return;
     }
     let mut mode: u32 = 0;
-    if ffi::get_console_mode(conin, &mut mode) != 0 {
+    if ffi::GetConsoleMode(conin, &mut mode) != 0 {
       let new_mode = (mode | ffi::ENABLE_EXTENDED_FLAGS) & !ffi::ENABLE_QUICK_EDIT_MODE;
-      ffi::set_console_mode(conin, new_mode);
+      ffi::SetConsoleMode(conin, new_mode);
     }
   }
 }
