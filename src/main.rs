@@ -407,6 +407,9 @@ of the app. Beware that this comes at a CPU cost!",
     if let Some(custom) = saved.made_for_you_custom {
       app_guard.made_for_you_custom = custom;
     }
+    if let Some(uri) = saved.last_played_track {
+      app_guard.saved_last_track = Some(uri);
+    }
   }
   app_guard.clamp_library_selection();
   let should_auto_launch = app_guard.user_config.spotify.auto_launch;
@@ -706,6 +709,14 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     if let Some(root) = crate::platform::spotify::find_root_pid() {
       crate::platform::spotify::resume_processes(root);
     }
+  }
+
+  // The single save point: the full snapshot (settings + playback state +
+  // last track) is written here and nowhere else — nothing is saved during
+  // the session.
+  {
+    let guard = app.lock().await;
+    SavedState::snapshot_from_app(&guard).save();
   }
 
   close_application(

@@ -532,6 +532,8 @@ pub struct App {
   // True only when sptune spawned Spotify itself this session; drives the
   // exit policy (kill the tree on exit vs. leave the user's player alone).
   pub spotify_launched_by_sptune: bool,
+  // Last track URI from the previous session (Resume Last Listening).
+  pub saved_last_track: Option<String>,
   pub request_log_index: Option<usize>,
 }
 
@@ -662,6 +664,7 @@ impl Default for App {
       dev_view: false,
       processes_suspended: false,
       spotify_launched_by_sptune: false,
+      saved_last_track: None,
       request_log: VecDeque::new(),
       request_log_index: None,
     }
@@ -1842,7 +1845,6 @@ impl App {
     {
       let display = if name.is_empty() { id.clone() } else { name };
       self.made_for_you_custom.push((display, id));
-      self.dispatch(IoEvent::SaveState);
     }
   }
 
@@ -1850,7 +1852,6 @@ impl App {
   pub fn remove_pasted_playlist_from_for_you(&mut self, index: usize) {
     if index < self.made_for_you_custom.len() {
       self.made_for_you_custom.remove(index);
-      self.dispatch(IoEvent::SaveState);
     }
   }
 
@@ -2299,9 +2300,9 @@ impl App {
   /// Toggles one of the settings shown in the '?' menu by row index:
   /// 0 = black theme, 1 = library block, 2 = playlists block,
   /// 3 = volume ramp bar, 4 = mouse interactions, 5 = theme preset,
-  /// 6 = seek by typing, 7 = resume last song, 8 = restore settings,
-  /// 9 = dev view, 10-13 = column visibility, 14 = add to playlist,
-  /// 15 = liked icon, 16 = remove from playlist, 17 = clear cache.
+  /// 6 = seek by typing, 7 = restore settings, 8 = dev view,
+  /// 9-12 = column visibility, 13 = add to playlist, 14 = remove from
+  /// playlist, 15 = max name length, 17 = clear cache, 23 = suspend/resume.
   /// Manual suspend/resume of the Spotify client's helper processes. The
   /// state flips optimistically so the button label is instant; the backend
   /// reverts it when no Spotify process can be found (the Windows process
@@ -2309,6 +2310,15 @@ impl App {
   pub fn toggle_process_suspend(&mut self) {
     self.processes_suspended = !self.processes_suspended;
     self.dispatch(IoEvent::ToggleProcessSuspend);
+  }
+
+  /// Resume Last Listening: start the previous session's last track. Only
+  /// meaningful when nothing is playing; the backend applies the saved
+  /// volume/repeat/shuffle on top.
+  pub fn resume_last_listening(&mut self) {
+    if let Some(uri) = self.saved_last_track.clone() {
+      self.dispatch(IoEvent::ResumeLastTrack(uri));
+    }
   }
 
   pub fn toggle_setting(&mut self, index: usize) {
@@ -2426,9 +2436,6 @@ impl App {
         self.toggle_process_suspend();
       }
       _ => {}
-    }
-    if index <= 22 {
-      self.dispatch(IoEvent::SaveState);
     }
   }
 
@@ -2776,10 +2783,13 @@ mod tests {
   }
 
   #[test]
-  fn gear_toggle_16_dispatches_clean_cache() {
+  fn gear_toggle_16_flips_animations() {
     let mut app = App::default();
+    assert!(app.user_config.behavior.enable_animations);
     app.toggle_setting(16);
-    assert!(app.is_loading);
+    assert!(!app.user_config.behavior.enable_animations);
+    app.toggle_setting(16);
+    assert!(app.user_config.behavior.enable_animations);
   }
 
   #[test]

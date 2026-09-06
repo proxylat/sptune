@@ -2395,8 +2395,38 @@ fn draw_music_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
-  // If no track is playing, render paragraph showing which device is selected, if no selected
-  // give hint to choose a device
+  // Empty state (nothing playing): the block carries exactly one button —
+  // "▶ Resume" to restart the previous session's last track — or a device
+  // hint when there is nothing saved to resume.
+  let has_track = app
+    .current_playback_context
+    .as_ref()
+    .and_then(|c| c.item.as_ref())
+    .is_some();
+  if !has_track {
+    let block = Block::default()
+      .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+      .border_style(Style::default().fg(app.user_config.theme.playbar_background));
+    f.render_widget(block, layout_chunk);
+    if app.saved_last_track.is_some() {
+      let rect = layout::playbar_resume_rect(layout_chunk);
+      let button = Paragraph::new(Span::styled(
+        layout::playbar_resume_label(),
+        Style::default()
+          .fg(app.user_config.theme.playbar_progress)
+          .add_modifier(Modifier::BOLD),
+      ));
+      f.render_widget(button, rect);
+    } else {
+      let hint = Paragraph::new(Span::styled(
+        "Nothing playing — press d to select a device",
+        Style::default().fg(app.user_config.theme.inactive),
+      ))
+      .alignment(Alignment::Center);
+      f.render_widget(hint, layout_chunk);
+    }
+    return;
+  }
   if let Some(current_playback_context) = &app.current_playback_context {
     if let Some(track_item) = &current_playback_context.item {
       let play_title = if current_playback_context.is_playing {

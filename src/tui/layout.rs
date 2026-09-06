@@ -725,6 +725,23 @@ pub enum PlaybarButton {
 // centered on the first inner row, just above the music bar. The song name
 // shares this row, drawn left of the buttons (truncated so it never
 // overlaps).
+// Resume Last Listening: the single centered button shown in the playbar
+// when nothing is playing. Shared by the drawer and the mouse hit-test.
+pub fn playbar_resume_label() -> &'static str {
+  "\u{25b6} Resume"
+}
+
+pub fn playbar_resume_rect(playbar: Rect) -> Rect {
+  let label = playbar_resume_label();
+  let w = label.width() as u16;
+  Rect::new(
+    playbar.x + playbar.width.saturating_sub(w) / 2,
+    playbar.y + playbar.height / 2,
+    w,
+    1,
+  )
+}
+
 // The manual suspend/resume button, drawn in the playbar title row just
 // right of the [ ] window toggle (separated by ──). Shared by the drawer and
 // the mouse hit-test so the hit zone follows the drawn label exactly.

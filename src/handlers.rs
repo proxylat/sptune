@@ -91,7 +91,17 @@ pub fn handle_app(key: Key, app: &mut App) {
     }
     _ if Some(key) == app.user_config.keys.toggle_sidebar => {
       app.sidebar_minimized = !app.sidebar_minimized;
-      app.dispatch(IoEvent::SaveState);
+    }
+    // Resume Last Listening — only when the API reports nothing playing.
+    _ if Some(key) == app.user_config.keys.resume_last_track
+      && app.saved_last_track.is_some()
+      && app
+        .current_playback_context
+        .as_ref()
+        .and_then(|c| c.item.as_ref())
+        .is_none() =>
+    {
+      app.resume_last_listening();
     }
     _ if key == app.user_config.keys.copy_song_url => {
       app.copy_song_url();

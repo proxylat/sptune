@@ -262,6 +262,7 @@ pub enum IoEvent {
   GetTrackCredits(String),
   GetQueue,
   ToggleProcessSuspend,
+  ResumeLastTrack(String),
   GetArtistAlbumsMore(String, u32),
   GetArtistSinglesMore(String, u32),
   GetArtistAppearsOnMore(String, u32),
@@ -289,7 +290,6 @@ pub enum IoEvent {
   AddItemToQueue(String),
   AddTrackToPlaylist(String, String),
   RemoveTrackFromPlaylist(String, String),
-  SaveState,
   CleanCache,
   RefreshPlaylists,
   RefreshSavedTracks,
@@ -331,10 +331,10 @@ pub struct Network<'a> {
 pub struct SavedState {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub volume: Option<u8>,
+  /// Track URI for Resume Last Listening (manual, no position — the seconds
+  /// into the song are not tracked).
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub track_uri: Option<String>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub is_playing: Option<bool>,
+  pub last_played_track: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub mouse_enabled: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -404,6 +404,84 @@ impl SavedState {
     })
   }
 
+  /// Full snapshot for the single exit-time save: playback state (volume,
+  /// shuffle, repeat, last track) plus every settings/UI field. Nothing is
+  /// written to disk during the session — sptune saves once, on exit.
+  pub fn snapshot_from_app(app: &App) -> SavedState {
+    let mut volume = None;
+    let mut shuffle = None;
+    let mut repeat = None;
+    let mut last_played_track = None;
+    if let Some(context) = &app.current_playback_context {
+      volume = context.device.volume_percent.map(|v| v as u8);
+      shuffle = Some(context.shuffle_state);
+      repeat = Some(
+        match context.repeat_state {
+          RepeatState::Off => "off",
+          RepeatState::Context => "context",
+          RepeatState::Track => "track",
+        }
+        .to_string(),
+      );
+      last_played_track = match &context.item {
+        Some(PlayableItem::Track(track)) => track.id.as_ref().map(|id| id.uri()),
+        _ => None,
+      };
+    }
+    let track_sort = app
+      .track_table_sort
+      .map(|(column, desc)| (sort_column_name(column).to_string(), desc));
+    let last_page = {
+      let mut page = None;
+      if app.get_current_route().id == RouteId::TrackTable
+        && app.track_table.context == Some(TrackTableContext::MyPlaylists)
+      {
+        if let (Some(playlists), Some(index)) = (&app.playlists, app.selected_playlist_index) {
+          if let Some(playlist) = playlists.items.get(index) {
+            page = Some(format!("playlist:{}", playlist.id.to_string()));
+          }
+        }
+      }
+      page
+    };
+    SavedState {
+      volume,
+      last_played_track,
+      shuffle,
+      repeat,
+      track_sort,
+      last_page,
+      seek_by_typing: Some(app.user_config.behavior.seek_by_typing),
+      restore_settings: Some(app.user_config.behavior.restore_settings),
+      mouse_enabled: Some(app.user_config.behavior.enable_mouse),
+      theme_preset: app
+        .theme_preset_index
+        .and_then(|i| theme_presets().get(i).map(|(name, _)| name.to_string())),
+      show_library: Some(app.show_library),
+      show_playlists: Some(app.show_playlists),
+      sidebar_minimized: Some(app.sidebar_minimized),
+      sidebar_width: app.sidebar_width_override,
+      library_height: app.library_height_override,
+      volume_ramp_bar: Some(app.user_config.behavior.volume_ramp_bar),
+      black_background: Some(app.user_config.theme.background == Color::Rgb(0, 0, 0)),
+      show_album_column: Some(app.user_config.behavior.show_album_column),
+      show_artist_column: Some(app.user_config.behavior.show_artist_column),
+      show_length_column: Some(app.user_config.behavior.show_length_column),
+      show_date_added_column: Some(app.user_config.behavior.show_date_added_column),
+      enable_add_to_playlist: Some(app.user_config.behavior.enable_add_to_playlist),
+      enable_remove_from_playlist: Some(app.user_config.behavior.enable_remove_from_playlist),
+      max_display_length: Some(app.user_config.behavior.max_display_length),
+      dev_view: Some(app.dev_view),
+      enable_animations: Some(app.user_config.behavior.enable_animations),
+      made_for_you_custom: Some(app.made_for_you_custom.clone()),
+      spotify_auto_launch: Some(app.user_config.spotify.auto_launch),
+      spotify_use_flags: Some(app.user_config.spotify.use_chromium_flags),
+      spotify_suspend: Some(app.user_config.spotify.suspend_children),
+      spotify_trim_ws: Some(app.user_config.spotify.trim_working_set),
+      spotify_mem_limit: Some(app.user_config.spotify.memory_limit_mb),
+    }
+  }
+
   pub fn load() -> Option<SavedState> {
     let path = SavedState::file_path()?;
     let contents = fs::read_to_string(path).ok()?;
@@ -428,11 +506,8 @@ impl SavedState {
       if let Some(value) = &self.volume {
         obj.insert("volume".to_string(), serde_json::json!(value));
       }
-      if let Some(value) = &self.track_uri {
-        obj.insert("track_uri".to_string(), serde_json::json!(value));
-      }
-      if let Some(value) = &self.is_playing {
-        obj.insert("is_playing".to_string(), serde_json::json!(value));
+      if let Some(value) = &self.last_played_track {
+        obj.insert("last_played_track".to_string(), serde_json::json!(value));
       }
       if let Some(value) = &self.mouse_enabled {
         obj.insert("mouse_enabled".to_string(), serde_json::json!(value));
@@ -675,7 +750,6 @@ impl<'a> Network<'a> {
       IoEvent::SetTracksToTable(_)
       | IoEvent::SetArtistsToTable(_)
       | IoEvent::UpdateSearchLimits(_, _)
-      | IoEvent::SaveState
       | IoEvent::CleanCache => true,
       _ => false,
     };
@@ -896,6 +970,9 @@ impl<'a> Network<'a> {
       IoEvent::GetQueue => {
         self.get_queue().await;
       }
+      IoEvent::ResumeLastTrack(uri) => {
+        self.resume_last_track(uri).await;
+      }
       IoEvent::ToggleProcessSuspend => {
         let suspended = { self.app.lock().await.processes_suspended };
         match crate::platform::spotify::find_root_pid() {
@@ -995,10 +1072,6 @@ impl<'a> Network<'a> {
       IoEvent::RemoveTrackFromPlaylist(uri, playlist_id) => {
         self.remove_track_from_playlist(uri, playlist_id).await;
       }
-      IoEvent::SaveState => {
-        let app = self.app.lock().await;
-        self.save_settings_from_app(&app);
-      }
       IoEvent::CleanCache => {
         self.library_cache.clear();
         self.playlist_cache.clear();
@@ -1026,132 +1099,6 @@ impl<'a> Network<'a> {
     app.is_loading = false;
   }
 
-  /// Persist the current volume/track snapshot so the next launch can resume it.
-  fn save_state_from_app(&self, app: &App) {
-    let mut volume = None;
-    let mut track_uri = None;
-    let mut is_playing = None;
-    let mut shuffle = None;
-    let mut repeat = None;
-    if let Some(context) = &app.current_playback_context {
-      volume = context.device.volume_percent.map(|v| v as u8);
-      is_playing = Some(context.is_playing);
-      shuffle = Some(context.shuffle_state);
-      repeat = Some(
-        match context.repeat_state {
-          RepeatState::Off => "off",
-          RepeatState::Context => "context",
-          RepeatState::Track => "track",
-        }
-        .to_string(),
-      );
-      track_uri = match &context.item {
-        Some(PlayableItem::Track(track)) => track.id.as_ref().map(|id| id.uri()),
-        _ => None,
-      };
-    }
-    let track_sort = app
-      .track_table_sort
-      .map(|(column, desc)| (sort_column_name(column).to_string(), desc));
-    // keep the current page if the sort reset cleared it (the resume event
-    // re-applies the saved sort after the fetch, so this only shapes what
-    // `save_state_from_app` sees next run)
-    let last_page = {
-      let mut page = None;
-      if app.get_current_route().id == RouteId::TrackTable
-        && app.track_table.context == Some(TrackTableContext::MyPlaylists)
-      {
-        if let (Some(playlists), Some(index)) = (&app.playlists, app.selected_playlist_index) {
-          if let Some(playlist) = playlists.items.get(index) {
-            page = Some(format!("playlist:{}", playlist.id.to_string()));
-          }
-        }
-      }
-      page
-    };
-    SavedState {
-      volume,
-      track_uri,
-      is_playing,
-      shuffle,
-      repeat,
-      track_sort,
-      last_page,
-      // Playback-path saves must NOT touch the settings fields: a stale
-      // process (or an interleaved save) would otherwise clobber the gear
-      // menu choices. Restore treats null as "keep current".
-      mouse_enabled: None,
-      theme_preset: None,
-      seek_by_typing: None,
-      show_library: None,
-      show_playlists: None,
-      sidebar_minimized: None,
-      sidebar_width: None,
-      library_height: None,
-      volume_ramp_bar: None,
-      black_background: None,
-      show_album_column: None,
-      show_artist_column: None,
-      show_length_column: None,
-      show_date_added_column: None,
-      restore_settings: None,
-      enable_add_to_playlist: None,
-      enable_remove_from_playlist: None,
-      max_display_length: None,
-      dev_view: None,
-      enable_animations: None,
-      made_for_you_custom: None,
-      spotify_auto_launch: None,
-      spotify_use_flags: None,
-      spotify_suspend: None,
-      spotify_trim_ws: None,
-      spotify_mem_limit: None,
-    }
-    .save();
-  }
-
-  /// Persist the gear-menu settings in isolation, leaving the volume/track
-  /// fields untouched.
-  fn save_settings_from_app(&self, app: &App) {
-    SavedState {
-      volume: None,
-      track_uri: None,
-      is_playing: None,
-      shuffle: None,
-      repeat: None,
-      track_sort: None,
-      last_page: None,
-      seek_by_typing: Some(app.user_config.behavior.seek_by_typing),
-      restore_settings: Some(app.user_config.behavior.restore_settings),
-      mouse_enabled: Some(app.user_config.behavior.enable_mouse),
-      theme_preset: app
-        .theme_preset_index
-        .and_then(|i| theme_presets().get(i).map(|(name, _)| name.to_string())),
-      show_library: Some(app.show_library),
-      show_playlists: Some(app.show_playlists),
-      sidebar_minimized: Some(app.sidebar_minimized),
-      sidebar_width: app.sidebar_width_override,
-      library_height: app.library_height_override,
-      volume_ramp_bar: Some(app.user_config.behavior.volume_ramp_bar),
-      black_background: Some(app.user_config.theme.background == Color::Rgb(0, 0, 0)),
-      show_album_column: Some(app.user_config.behavior.show_album_column),
-      show_artist_column: Some(app.user_config.behavior.show_artist_column),
-      show_length_column: Some(app.user_config.behavior.show_length_column),
-      show_date_added_column: Some(app.user_config.behavior.show_date_added_column),
-      enable_add_to_playlist: Some(app.user_config.behavior.enable_add_to_playlist),
-      enable_remove_from_playlist: Some(app.user_config.behavior.enable_remove_from_playlist),
-      max_display_length: Some(app.user_config.behavior.max_display_length),
-      dev_view: Some(app.dev_view),
-      enable_animations: Some(app.user_config.behavior.enable_animations),
-      made_for_you_custom: Some(app.made_for_you_custom.clone()),
-      spotify_auto_launch: Some(app.user_config.spotify.auto_launch),
-      spotify_use_flags: Some(app.user_config.spotify.use_chromium_flags),
-      spotify_suspend: Some(app.user_config.spotify.suspend_children),
-      spotify_trim_ws: Some(app.user_config.spotify.trim_working_set),
-      spotify_mem_limit: Some(app.user_config.spotify.memory_limit_mb),
-    }
-    .save();
-  }
 
 fn parse_retry_after(msg: &str) -> Option<u64> {
   // ponytail: minimal Retry-After parsing from rspotify error string; full header parsing would need ClientError access
@@ -1235,7 +1182,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         let mut app = self.app.lock().await;
         app.current_playback_context = Some(c.clone());
         app.instant_since_last_current_playback_poll = Instant::now();
-        self.save_state_from_app(&app);
       }
       Ok(None) => {
         let mut app = self.app.lock().await;
@@ -2894,6 +2840,35 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     };
   }
 
+  /// Resume Last Listening: apply the saved volume/repeat/shuffle, then
+  /// start the last track from the beginning. Manual only (playbar button /
+  /// key) and only when nothing is playing; there is no position tracking.
+  async fn resume_last_track(&mut self, track_uri: String) {
+    if let Some(saved) = SavedState::load() {
+      if let Some(volume) = saved.volume {
+        self.change_volume(volume).await;
+      }
+      if let Some(shuffle) = saved.shuffle {
+        let _ = self
+          .spotify
+          .shuffle(shuffle, self.client_config.device_id.as_deref())
+          .await;
+      }
+      if let Some(repeat) = &saved.repeat {
+        let state = match repeat.as_str() {
+          "track" => RepeatState::Track,
+          "context" => RepeatState::Context,
+          _ => RepeatState::Off,
+        };
+        let _ = self
+          .spotify
+          .repeat(state, self.client_config.device_id.as_deref())
+          .await;
+      }
+    }
+    self.start_playback(None, Some(vec![track_uri]), Some(0)).await;
+  }
+
   async fn change_volume(&mut self, volume_percent: u8) {
     match self
       .spotify
@@ -2905,7 +2880,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         if let Some(current_playback_context) = &mut app.current_playback_context {
           current_playback_context.device.volume_percent = Some(volume_percent as u32);
         };
-        self.save_state_from_app(&app);
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -4575,7 +4549,6 @@ mod tests {
     let _ = std::fs::create_dir_all(&tmp);
     std::env::set_var("HOME", &tmp);
     let app = Arc::new(Mutex::new(App::default()));
-    let network = test_network(&app);
     let rt = tokio::runtime::Builder::new_current_thread()
       .build()
       .unwrap();
@@ -4584,7 +4557,7 @@ mod tests {
       app_guard.show_library = false;
       app_guard.sidebar_minimized = true;
       app_guard.user_config.theme.background = Color::Rgb(0, 0, 0);
-      network.save_settings_from_app(&app_guard);
+      SavedState::snapshot_from_app(&app_guard).save();
     });
     let saved = SavedState::load().expect("state file should exist");
     assert_eq!(saved.show_library, Some(false));

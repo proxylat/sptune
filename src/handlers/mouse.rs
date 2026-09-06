@@ -158,16 +158,8 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
       handle_hover(mouse.column, mouse.row, app);
     }
     MouseEventKind::Up(MouseButton::Left) => {
-      let mut need_save = false;
-      if SIDEBAR_DRAG.with(|d| d.borrow_mut().take().is_some()) {
-        need_save = true;
-      }
-      if LIBRARY_DRAG.with(|d| d.borrow_mut().take().is_some()) {
-        need_save = true;
-      }
-      if need_save {
-        app.dispatch(IoEvent::SaveState);
-      }
+      SIDEBAR_DRAG.with(|d| *d.borrow_mut() = None);
+      LIBRARY_DRAG.with(|d| *d.borrow_mut() = None);
       SCROLLBAR_DRAG.with(|d| *d.borrow_mut() = None);
       // Commit a scrubbed seek/volume once on release (immediate jump on
       // press already dispatched; only a real drag adds the final commit).
@@ -1227,6 +1219,22 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
     app.dispatch(IoEvent::GetDevices);
     return;
   }
+  // Empty playbar: the single centered Resume button is the only target.
+  let has_track = app
+    .current_playback_context
+    .as_ref()
+    .and_then(|c| c.item.as_ref())
+    .is_some();
+  if !has_track {
+    if app.saved_last_track.is_some() {
+      let rect = crate::tui::layout::playbar_resume_rect(playbar);
+      if y == rect.y && x >= rect.x && x < rect.x + rect.width {
+        app.resume_last_listening();
+      }
+    }
+    return;
+  }
+
   // Geometry is shared with `draw_playbar`: volume box at the top-right, the
   // progress bar centered on the song row.
   let Some(current_playback_context) = &app.current_playback_context else {
@@ -2526,6 +2534,22 @@ mod tests {
     // Clicking just left of the button ([ ] window) must not toggle suspend.
     handle_mouse(click_event(px0.saturating_sub(4), playbar.y), &mut app);
     assert!(app.processes_suspended);
+  }
+
+  #[test]
+  fn click_playbar_resume_button_dispatches_resume() {
+    // Empty playbar: the centered Resume button is the only click target.
+    let mut app = playback_app();
+    app.current_playback_context = None;
+    app.saved_last_track = Some("spotify:track:mock1".to_string());
+    let (_, playbar, _) = main_layout(&app).unwrap();
+    let rect = crate::tui::layout::playbar_resume_rect(playbar);
+    handle_mouse(click_event(rect.x + rect.width / 2, rect.y), &mut app);
+    assert!(app.is_loading);
+    // A click that isn't on the button does nothing.
+    app.is_loading = false;
+    handle_mouse(click_event(rect.x.saturating_sub(2), rect.y), &mut app);
+    assert!(!app.is_loading);
   }
 
   #[test]

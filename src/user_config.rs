@@ -286,6 +286,7 @@ pub struct KeyBindingsString {
   search_in_playlist: Option<String>,
   remove_from_playlist: Option<String>,
   toggle_sidebar: Option<String>,
+  resume_last_track: Option<String>,
 }
 
 #[derive(Clone)]
@@ -322,6 +323,7 @@ pub struct KeyBindings {
   pub search_in_playlist: Option<Key>,
   pub remove_from_playlist: Option<Key>,
   pub toggle_sidebar: Option<Key>,
+  pub resume_last_track: Option<Key>,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -511,6 +513,7 @@ impl UserConfig {
         search_in_playlist: Some(Key::Char('f')),
         remove_from_playlist: None,
         toggle_sidebar: Some(Key::Char('\\')),
+        resume_last_track: Some(Key::Char('R')),
       },
       behavior: BehaviorConfig {
         seek_milliseconds: 1000,
@@ -636,6 +639,7 @@ impl UserConfig {
     to_optional_keys!(search_in_playlist);
     to_optional_keys!(remove_from_playlist);
     to_optional_keys!(toggle_sidebar);
+    to_optional_keys!(resume_last_track);
 
     Ok(())
   }
