@@ -574,11 +574,11 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
     Some(7),  // 19 Restore settings
     None,     // 20 blank
     None,     // 21 ─ Spotify ─
-    Some(18), // 22 Spotify auto launch
-    Some(19), // 23 Spotify chromium flags
-    Some(20), // 24 Spotify suspend children
-    Some(21), // 25 Spotify trim WorkingSet
-    Some(22), // 26 Spotify memory limit
+    Some(18), // 22 Auto launch with sptune
+    Some(19), // 23 Enable Chromium flags
+    Some(20), // 24 Auto suspend child processes
+    Some(21), // 25 Auto trim WorkingSet
+    Some(22), // 26 Memory limit per child process
     None,     // 27 blank
     None,     // 28 ─ Navigation ─
     None,     // 29 Shortcuts →
@@ -1132,7 +1132,6 @@ fn handle_hover(x: u16, y: u16, app: &mut App) {
         ArtistBlock::Singles => (artist.singles.items.len() + usize::from((artist.singles.items.len() as u32) < artist.singles.total), artist.selected_singles_index),
         ArtistBlock::EPs => (artist.eps.items.len(), artist.selected_eps_index),
         ArtistBlock::AppearsOn => (artist.appears_on.items.len() + usize::from((artist.appears_on.items.len() as u32) < artist.appears_on.total), artist.selected_appears_on_index),
-        ArtistBlock::DiscoveredOn => (artist.discovered_on.items.len() + usize::from((artist.discovered_on.items.len() as u32) < artist.discovered_on.total), artist.selected_discovered_on_index),
         _ => (0,0),
       };
       let list_rect = Rect { x: right.x, y: right.y + 1, width: right.width, height: right.height.saturating_sub(1) };
@@ -1998,13 +1997,11 @@ fn handle_search_wheel(up: bool, app: &mut App) {
 fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
   if y == chunk.y {
     let tabs = [
-      ArtistBlock::About,
       ArtistBlock::TopTracks,
       ArtistBlock::Albums,
       ArtistBlock::Singles,
       ArtistBlock::EPs,
       ArtistBlock::AppearsOn,
-      ArtistBlock::DiscoveredOn,
     ];
     let n = tabs.len() as u16;
     let cell_w = if n > 0 { chunk.width / n } else { chunk.width };
@@ -2025,7 +2022,7 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
     height: chunk.height.saturating_sub(1),
   };
 
-  let (shown, top_has_more, albums_has_more, singles_has_more, appears_has_more, discovered_has_more, count, selected) = {
+  let (shown, top_has_more, albums_has_more, singles_has_more, appears_has_more, count, selected) = {
     let Some(artist) = &app.artist else {
       return false;
     };
@@ -2038,7 +2035,6 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
     let albums_has_more = artist.albums.items.len() < artist.albums.total as usize;
     let singles_has_more = artist.singles.items.len() < artist.singles.total as usize;
     let appears_has_more = artist.appears_on.items.len() < artist.appears_on.total as usize;
-    let discovered_has_more = artist.discovered_on.items.len() < artist.discovered_on.total as usize;
     let (count, selected) = match shown {
       ArtistBlock::TopTracks => (
         artist.top_tracks.len() + usize::from(top_has_more),
@@ -2057,11 +2053,7 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
         artist.appears_on.items.len() + usize::from(appears_has_more),
         artist.selected_appears_on_index,
       ),
-      ArtistBlock::DiscoveredOn => (
-        artist.discovered_on.items.len() + usize::from(discovered_has_more),
-        artist.selected_discovered_on_index,
-      ),
-      ArtistBlock::About | ArtistBlock::Empty => (0, 0),
+      ArtistBlock::Empty => (0, 0),
     };
     (
       shown,
@@ -2069,12 +2061,11 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       albums_has_more,
       singles_has_more,
       appears_has_more,
-      discovered_has_more,
       count,
       selected,
     )
   };
-  if shown == ArtistBlock::Empty || shown == ArtistBlock::About {
+  if shown == ArtistBlock::Empty {
     return false;
   }
 
@@ -2171,14 +2162,6 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
     app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
     return false;
   }
-  if shown == ArtistBlock::DiscoveredOn && discovered_has_more && index == count - 1 {
-    app.load_more_discovered_on();
-    if let Some(artist) = &mut app.artist {
-      artist.selected_discovered_on_index = index;
-    }
-    app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
-    return false;
-  }
 
   if let Some(artist) = &mut app.artist {
     match shown {
@@ -2187,8 +2170,7 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       ArtistBlock::Singles => artist.selected_singles_index = index,
       ArtistBlock::EPs => artist.selected_eps_index = index,
       ArtistBlock::AppearsOn => artist.selected_appears_on_index = index,
-      ArtistBlock::DiscoveredOn => artist.selected_discovered_on_index = index,
-      ArtistBlock::About | ArtistBlock::Empty => return false,
+      ArtistBlock::Empty => return false,
     }
     app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
     return true;

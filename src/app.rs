@@ -206,13 +206,11 @@ fn page_has_more<T: serde::de::DeserializeOwned>(page: &Page<T>) -> bool {
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum ArtistBlock {
-  About,
   TopTracks,
   Albums,
   Singles,
   EPs,
   AppearsOn,
-  DiscoveredOn,
   Empty,
 }
 
@@ -373,7 +371,6 @@ pub struct Artist {
   pub singles: Page<SimplifiedAlbum>,
   pub eps: Page<SimplifiedAlbum>,
   pub appears_on: Page<SimplifiedAlbum>,
-  pub discovered_on: Page<SimplifiedPlaylist>,
   pub related_artists: Vec<FullArtist>,
   pub top_tracks: Vec<FullTrack>,
   pub top_tracks_total: usize,
@@ -385,23 +382,16 @@ pub struct Artist {
   pub selected_singles_index: usize,
   pub selected_eps_index: usize,
   pub selected_appears_on_index: usize,
-  pub selected_discovered_on_index: usize,
   pub selected_related_artist_index: usize,
   pub selected_top_track_index: usize,
   pub artist_hovered_block: ArtistBlock,
   pub artist_selected_block: ArtistBlock,
-  // About header (from GET /v1/artists/{id})
-  pub image_url: Option<String>,
-  pub followers_total: Option<u32>,
-  pub popularity: Option<u32>,
-  pub genres: Vec<String>,
 }
 
 pub struct App {
   pub instant_since_last_current_playback_poll: Instant,
   navigation_stack: Vec<Route>,
   pub lyrics: Option<Vec<(u128, String)>>,
-  pub monthly_listeners: Option<u64>,
   pub track_credits: Option<Vec<String>>,
   pub queue_next: Option<String>,
   pub user_config: UserConfig,
@@ -543,7 +533,6 @@ impl Default for App {
   fn default() -> Self {
     App {
       lyrics: None,
-      monthly_listeners: None,
       track_credits: None,
       queue_next: None,
       album_table_context: AlbumTableContext::Full,
@@ -1874,25 +1863,16 @@ impl App {
   }
 
   pub fn get_panel_data(&mut self) {
-    let (track_id, artist_id) = match &self.current_playback_context {
+    let track_id = match &self.current_playback_context {
       Some(CurrentPlaybackContext {
         item: Some(PlayableItem::Track(track)),
         ..
-      }) => (
-        track.id.as_ref().map(|id| id.id().to_string()),
-        track
-          .artists
-          .first()
-          .and_then(|artist| artist.id.as_ref().map(|id| id.id().to_string())),
-      ),
-      _ => (None, None),
+      }) => track.id.as_ref().map(|id| id.id().to_string()),
+      _ => None,
     };
     if let Some(id) = track_id {
       self.dispatch(IoEvent::GetLyrics);
       self.dispatch(IoEvent::GetTrackCredits(id));
-    }
-    if let Some(id) = artist_id {
-      self.dispatch(IoEvent::GetMonthlyListeners(id));
     }
     self.dispatch(IoEvent::GetQueue);
   }
@@ -1906,25 +1886,26 @@ impl App {
   pub fn get_artist(&mut self, artist_id: String, input_artist_name: String) {
     let user_country = self.get_user_country();
     self.dispatch(IoEvent::GetArtist(
-      artist_id,
+      artist_id.clone(),
       input_artist_name,
       user_country,
     ));
+    // Albums load eagerly so the artist profile never shows an empty
+    // Albums tab; the remaining tabs stay lazy (fetched on first visit).
+    self.dispatch(IoEvent::GetArtistAlbumsMore(artist_id, 0));
   }
 
   /// Activate an artist tab, lazily fetching its data on first use.
   pub fn artist_select_tab(&mut self, tab: ArtistBlock) {
-    let (needs_albums, needs_singles, needs_appears_on, needs_discovered) = match &self.artist {
+    let (needs_albums, needs_singles, needs_appears_on) = match &self.artist {
       Some(artist) => (
         tab == ArtistBlock::Albums && artist.albums.items.is_empty(),
         tab == ArtistBlock::Singles && artist.singles.items.is_empty(),
         tab == ArtistBlock::AppearsOn && artist.appears_on.items.is_empty(),
-        tab == ArtistBlock::DiscoveredOn && artist.discovered_on.items.is_empty(),
       ),
       None => return,
     };
     let artist_id = self.artist.as_ref().map(|artist| artist.artist_id.clone());
-    let artist_name = self.artist.as_ref().map(|artist| artist.artist_name.clone());
     if let Some(artist) = &mut self.artist {
       artist.artist_selected_block = tab;
       artist.artist_hovered_block = tab;
@@ -1944,19 +1925,17 @@ impl App {
         self.dispatch(IoEvent::GetArtistAppearsOnMore(artist_id, 0));
       }
     }
-    if needs_discovered {
-      if let (Some(artist_id), Some(artist_name)) = (artist_id, artist_name) {
-        self.dispatch(IoEvent::GetArtistDiscoveredOnMore(
-          artist_id,
-          artist_name,
-          0,
-        ));
-      }
-    }
     if tab == ArtistBlock::EPs {
-      // EPs derived from singles (total_tracks <= 6); ensure singles loaded
-      if needs_singles {
-        // already dispatched above; EPs will render filtered view once singles arrive
+      // EPs are derived from singles; ensure the backing singles are loaded
+      let singles_loaded = self
+        .artist
+        .as_ref()
+        .map(|artist| !artist.singles.items.is_empty())
+        .unwrap_or(false);
+      if !singles_loaded {
+        if let Some(artist_id) = artist_id {
+          self.dispatch(IoEvent::GetArtistSinglesMore(artist_id, 0));
+        }
       }
       // if singles not empty but eps empty, derive immediately
       if let Some(artist) = &mut self.artist {
@@ -2037,20 +2016,6 @@ impl App {
         IoEvent::GetArtistAppearsOnMore(
           artist.artist_id.clone(),
           artist.appears_on.items.len() as u32,
-        ),
-      );
-    }
-  }
-
-  pub fn load_more_discovered_on(&mut self) {
-    if let Some(artist) = &self.artist {
-      self.load_more_page(
-        artist.discovered_on.items.len(),
-        artist.discovered_on.total as usize,
-        IoEvent::GetArtistDiscoveredOnMore(
-          artist.artist_id.clone(),
-          artist.artist_name.clone(),
-          artist.discovered_on.items.len() as u32,
         ),
       );
     }
@@ -2636,15 +2601,6 @@ mod tests {
       singles: empty.clone(),
       eps: empty.clone(),
       appears_on: empty.clone(),
-      discovered_on: Page {
-        href: String::new(),
-        items: vec![],
-        limit: 0,
-        next: None,
-        offset: 0,
-        previous: None,
-        total: 0,
-      },
       related_artists: vec![],
       top_tracks: (0..10).map(mock_track).collect(),
       top_tracks_total: 26,
@@ -2653,15 +2609,10 @@ mod tests {
       selected_singles_index: 0,
       selected_eps_index: 0,
       selected_appears_on_index: 0,
-      selected_discovered_on_index: 0,
       selected_related_artist_index: 0,
       selected_top_track_index: 0,
       artist_hovered_block: ArtistBlock::TopTracks,
       artist_selected_block: ArtistBlock::Empty,
-      image_url: None,
-      followers_total: None,
-      popularity: None,
-      genres: vec![],
     });
     let (tx, rx) = std::sync::mpsc::channel();
     app.io_tx = Some(tx);
@@ -2712,15 +2663,6 @@ mod tests {
       singles: empty2.clone(),
       eps: empty2.clone(),
       appears_on: empty2.clone(),
-      discovered_on: Page {
-        href: String::new(),
-        items: vec![],
-        limit: 0,
-        next: None,
-        offset: 0,
-        previous: None,
-        total: 0,
-      },
       related_artists: vec![],
       top_tracks: (0..10).map(mock_track).collect(),
       top_tracks_total: 26,
@@ -2729,15 +2671,10 @@ mod tests {
       selected_singles_index: 0,
       selected_eps_index: 0,
       selected_appears_on_index: 0,
-      selected_discovered_on_index: 0,
       selected_related_artist_index: 0,
       selected_top_track_index: 0,
       artist_hovered_block: ArtistBlock::TopTracks,
       artist_selected_block: ArtistBlock::TopTracks,
-      image_url: None,
-      followers_total: None,
-      popularity: None,
-      genres: vec![],
     });
     let (tx, rx) = std::sync::mpsc::channel();
     app.io_tx = Some(tx);

@@ -256,7 +256,7 @@ fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'a>> {
     on_off(app.user_config.behavior.enable_remove_from_playlist)
   )));
   rows.push(mk_row(format!(
-    "Requests View: {} (request log)",
+    "Requests View: {}",
     on_off(app.dev_view)
   )));
   rows.push(ListItem::new(Span::raw("".to_string())));
@@ -270,25 +270,25 @@ fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'a>> {
     on_off(app.user_config.behavior.restore_settings)
   )));
   rows.push(ListItem::new(Span::raw("".to_string())));
-  rows.push(mk_header("─ Spotify ─", header_style));
+  rows.push(mk_header("─ Spotify in launch ─", header_style));
   rows.push(mk_row(format!(
-    "Spotify auto launch: {}",
+    "Auto launch with sptune: {}",
     on_off(app.user_config.spotify.auto_launch)
   )));
   rows.push(mk_row(format!(
-    "Spotify chromium flags: {}",
+    "Enable Chromium flags: {}",
     on_off(app.user_config.spotify.use_chromium_flags)
   )));
   rows.push(mk_row(format!(
-    "Spotify suspend children: {}",
+    "Auto suspend child processes: {}",
     on_off(app.user_config.spotify.suspend_children)
   )));
   rows.push(mk_row(format!(
-    "Spotify trim WorkingSet: {}",
+    "Auto trim WorkingSet: {}",
     on_off(app.user_config.spotify.trim_working_set)
   )));
   rows.push(mk_row(format!(
-    "Spotify memory limit: {}",
+    "Memory limit per child process: {}",
     if app.user_config.spotify.memory_limit_mb == 0 {
       "off".to_string()
     } else {
@@ -2279,18 +2279,6 @@ fn draw_music_visualizer(f: &mut Frame, app: &App, area: Rect) {
   f.render_widget(block, area);
 }
 
-fn format_count(n: u64) -> String {
-  if n >= 1_000_000_000 {
-    format!("{:.1}B", n as f64 / 1_000_000_000.0)
-  } else if n >= 1_000_000 {
-    format!("{:.1}M", n as f64 / 1_000_000.0)
-  } else if n >= 1_000 {
-    format!("{:.0}K", n as f64 / 1_000.0)
-  } else {
-    n.to_string()
-  }
-}
-
 fn draw_music_panel(f: &mut Frame, app: &App, area: Rect) {
   let mut lines: Vec<Line> = Vec::new();
   if let Some(context) = &app.current_playback_context {
@@ -2350,12 +2338,6 @@ fn draw_music_panel(f: &mut Frame, app: &App, area: Rect) {
           Style::default().fg(app.user_config.theme.inactive),
         )));
         lines.push(Line::from(""));
-        if let Some(n) = app.monthly_listeners {
-          lines.push(Line::from(Span::styled(
-            format!("Monthly listeners: {}", format_count(n)),
-            Style::default().fg(app.user_config.theme.inactive),
-          )));
-        }
         if let Some(credits) = &app.track_credits {
           for credit in credits {
             lines.push(Line::from(Span::styled(
@@ -2746,13 +2728,11 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
 
   for (block, rect) in tab_cells {
     let label = match block {
-      ArtistBlock::About => " About ",
-      ArtistBlock::TopTracks => " Top tracks ",
+      ArtistBlock::TopTracks => " Artist ",
       ArtistBlock::Albums => " Albums ",
       ArtistBlock::Singles => " Singles ",
       ArtistBlock::EPs => " EPs ",
       ArtistBlock::AppearsOn => " Featuring ",
-      ArtistBlock::DiscoveredOn => " Discovered ",
       ArtistBlock::Empty => "",
     };
     let mut style = get_color(get_artist_highlight_state(app, block), theme);
@@ -2851,7 +2831,7 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
           format: load_more_format,
         });
       }
-      let title = format!("{} - Top Tracks", artist.artist_name);
+      let title = format!("{} - Artist", artist.artist_name);
       draw_table(
         f,
         app,
@@ -2862,55 +2842,6 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
         get_artist_highlight_state(app, shown),
         None,
       );
-    }
-    ArtistBlock::About => {
-      let lines = vec![
-        Line::from(vec![Span::styled(
-          artist.artist_name.clone(),
-          Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(format!(
-          "Followers: {}",
-          artist
-            .followers_total
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "—".to_string())
-        )),
-        Line::from(format!(
-          "Popularity: {}",
-          artist
-            .popularity
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "—".to_string())
-        )),
-        Line::from(format!(
-          "Genres: {}",
-          if artist.genres.is_empty() {
-            "—".to_string()
-          } else {
-            artist.genres.join(", ")
-          }
-        )),
-        Line::from(format!(
-          "Monthly listeners: {}",
-          app
-            .monthly_listeners
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "—".to_string())
-        )),
-        Line::from(format!(
-          "Image: {}",
-          artist.image_url.clone().unwrap_or_else(|| "—".to_string())
-        )),
-      ];
-      let block = Block::default()
-        .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
-        .title(format!("About {}", artist.artist_name))
-        .border_style(get_color(get_artist_highlight_state(app, shown), theme));
-      let p = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: true });
-      f.render_widget(p, list_rect);
     }
     _ => {
       let (items, title, selected) = match shown {
@@ -3028,32 +2959,7 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
             Some(artist.selected_appears_on_index),
           )
         }
-        ArtistBlock::DiscoveredOn => {
-          let mut items = artist
-            .discovered_on
-            .items
-            .iter()
-            .map(|pl| {
-              format!(
-                "{} - by {} ({} tracks)",
-                pl.name,
-                pl.owner.display_name.clone().unwrap_or_else(|| pl.owner.id.to_string()),
-                pl.items.total
-              )
-            })
-            .collect::<Vec<String>>();
-          if artist.discovered_on.items.len() < artist.discovered_on.total as usize {
-            let remaining =
-              artist.discovered_on.total as usize - artist.discovered_on.items.len();
-            items.push(load_more_label("Load more playlists...", Some(remaining)));
-          }
-          (
-            items,
-            "Discovered On".to_string(),
-            Some(artist.selected_discovered_on_index),
-          )
-        }
-        ArtistBlock::Empty | ArtistBlock::TopTracks | ArtistBlock::About => {
+        ArtistBlock::Empty | ArtistBlock::TopTracks => {
           (vec![], String::new(), None)
         }
       };
@@ -4583,15 +4489,6 @@ mod tests {
       singles: empty_page.clone(),
       eps: empty_page.clone(),
       appears_on: empty_page.clone(),
-      discovered_on: rspotify::model::Page {
-        href: String::new(),
-        items: vec![],
-        limit: 0,
-        next: None,
-        offset: 0,
-        previous: None,
-        total: 0,
-      },
       related_artists: vec![],
       top_tracks: (0..10).map(mock_track).collect(),
       top_tracks_total: 26,
@@ -4600,15 +4497,10 @@ mod tests {
       selected_singles_index: 0,
       selected_eps_index: 0,
       selected_appears_on_index: 0,
-      selected_discovered_on_index: 0,
       selected_related_artist_index: 0,
       selected_top_track_index: 0,
       artist_hovered_block: ArtistBlock::TopTracks,
       artist_selected_block: ArtistBlock::Empty,
-      image_url: None,
-      followers_total: None,
-      popularity: None,
-      genres: vec![],
     });
 
     let backend = TestBackend::new(180, 40);
@@ -4680,15 +4572,6 @@ mod tests {
       singles: empty_page2.clone(),
       eps: empty_page2.clone(),
       appears_on: empty_page2.clone(),
-      discovered_on: rspotify::model::Page {
-        href: String::new(),
-        items: vec![],
-        limit: 0,
-        next: None,
-        offset: 0,
-        previous: None,
-        total: 0,
-      },
       related_artists: vec![],
       top_tracks: (0..15).map(mock_track).collect(),
       top_tracks_total: 15,
@@ -4697,15 +4580,10 @@ mod tests {
       selected_singles_index: 0,
       selected_eps_index: 0,
       selected_appears_on_index: 0,
-      selected_discovered_on_index: 0,
       selected_related_artist_index: 0,
       selected_top_track_index: 12,
       artist_hovered_block: ArtistBlock::TopTracks,
       artist_selected_block: ArtistBlock::TopTracks,
-      image_url: None,
-      followers_total: None,
-      popularity: None,
-      genres: vec![],
     });
 
     let backend = TestBackend::new(80, 8);

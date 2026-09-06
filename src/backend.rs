@@ -259,13 +259,11 @@ pub enum IoEvent {
   UserFollowPlaylist(String, String, Option<bool>),
   UserUnfollowPlaylist(String, String),
   GetLyrics,
-  GetMonthlyListeners(String),
   GetTrackCredits(String),
   GetQueue,
   GetArtistAlbumsMore(String, u32),
   GetArtistSinglesMore(String, u32),
   GetArtistAppearsOnMore(String, u32),
-  GetArtistDiscoveredOnMore(String, String, u32),
   GetArtistTopTracksMore(String, String, u32),
   GetUser,
   RefreshUser,
@@ -891,9 +889,6 @@ impl<'a> Network<'a> {
       IoEvent::GetLyrics => {
         self.get_lyrics().await;
       }
-      IoEvent::GetMonthlyListeners(artist_id) => {
-        self.get_monthly_listeners(artist_id).await;
-      }
       IoEvent::GetTrackCredits(track_id) => {
         self.get_track_credits(track_id).await;
       }
@@ -908,11 +903,6 @@ impl<'a> Network<'a> {
       }
       IoEvent::GetArtistAppearsOnMore(artist_id, offset) => {
         self.get_artist_appears_on_more(artist_id, offset).await;
-      }
-      IoEvent::GetArtistDiscoveredOnMore(artist_id, artist_name, offset) => {
-        self
-          .get_artist_discovered_on_more(artist_id, artist_name, offset)
-          .await;
       }
       IoEvent::GetArtistTopTracksMore(artist_id, artist_name, offset) => {
         self
@@ -2929,25 +2919,16 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     let artist_id = cloneable_artist_id.to_string();
     // Spotify removed artist_top_tracks and artist_related_artists in Feb
     // 2026 (related artists 403s); top tracks come from a track search on
-    // the artist name, and albums are only fetched when the user opens that
-    // tab (GetArtistAlbumsMore), so opening an artist stays a single request.
-    // Fetch FullArtist for About (images/followers/genres/popularity) — always try,
-    // fall back to input name if the fetch fails (rate limit / token expired).
-    let mut fetched: Option<FullArtist> = None;
+    // the artist name, and albums are fetched eagerly right after the
+    // profile opens (GetArtistAlbumsMore, dispatched by app.get_artist).
+    // Resolve the display name from the FullArtist fetch when the caller
+    // didn't supply one; fall back to "" on failure (rate limit / token expired).
     let artist_name = if input_artist_name.is_empty() {
       match self.spotify.artist(cloneable_artist_id.clone()).await {
-        Ok(fa) => {
-          let name = fa.name.clone();
-          fetched = Some(fa);
-          name
-        }
+        Ok(fa) => fa.name.clone(),
         Err(_) => String::new(),
       }
     } else {
-      // still fetch for About fields, but don't block top-tracks search on failure
-      if let Ok(fa) = self.spotify.artist(cloneable_artist_id.clone()).await {
-        fetched = Some(fa);
-      }
       input_artist_name
     };
     let query = format!("artist:\"{}\"", artist_name);
@@ -2975,19 +2956,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     let top_tracks_has_more = true;
     {
       let mut app = self.app.lock().await;
-      let image_url = fetched
-        .as_ref()
-        .and_then(|fa| fa.images.first().map(|i| i.url.clone()));
-      // Followers/popularity/genres are deprecated in model (Spotify removed) — default to None/empty if missing
-      #[allow(deprecated)]
-      let followers_total = fetched.as_ref().map(|fa| fa.followers.total);
-      #[allow(deprecated)]
-      let popularity = fetched.as_ref().map(|fa| fa.popularity);
-      #[allow(deprecated)]
-      let genres = fetched
-        .as_ref()
-        .map(|fa| fa.genres.clone())
-        .unwrap_or_default();
       app.artist = Some(Artist {
         artist_id,
         artist_name,
@@ -2995,7 +2963,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         singles: Self::empty_page(),
         eps: Self::empty_page(),
         appears_on: Self::empty_page(),
-        discovered_on: Self::empty_page(),
         related_artists: Vec::new(),
         top_tracks,
         top_tracks_total,
@@ -3004,15 +2971,10 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         selected_singles_index: 0,
         selected_eps_index: 0,
         selected_appears_on_index: 0,
-        selected_discovered_on_index: 0,
         selected_related_artist_index: 0,
         selected_top_track_index: 0,
         artist_hovered_block: ArtistBlock::TopTracks,
         artist_selected_block: ArtistBlock::TopTracks,
-        image_url,
-        followers_total,
-        popularity,
-        genres,
       });
     }
   }
@@ -3085,45 +3047,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
           apply(artist, &mut page);
         }
       }
-      Err(e) => {
-        self.handle_error(anyhow!(e)).await;
-      }
-    }
-  }
-
-  async fn get_artist_discovered_on_more(
-    &mut self,
-    _artist_id: String,
-    artist_name: String,
-    offset: u32,
-  ) {
-    let country = {
-      let app = self.app.lock().await;
-      app.get_user_country()
-    };
-    let query = format!("artist:\"{}\"", artist_name);
-    match self
-      .spotify
-      .search(
-        &query,
-        SearchType::Playlist,
-        country.map(Market::Country),
-        None,
-        Some(10),
-        Some(offset),
-      )
-      .await
-    {
-      Ok(SearchResult::Playlists(page)) => {
-        let mut app = self.app.lock().await;
-        if let Some(artist) = &mut app.artist {
-          let mut page = page;
-          artist.discovered_on.items.append(&mut page.items);
-          artist.discovered_on.offset = page.offset;
-          artist.discovered_on.total = page.total;
-        }
-      }
-      Ok(_) => {}
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
       }
@@ -3867,29 +3790,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       ));
     }
     Ok(None)
-  }
-
-  async fn get_monthly_listeners(&mut self, artist_id: String) {
-    let Some(token) = self.bearer_token().await else {
-      return;
-    };
-    let url = format!("https://spclient.wg.spotify.com/artist-view/v1/artist/{artist_id}");
-    let response = reqwest::Client::new()
-      .get(&url)
-      .header("Authorization", format!("Bearer {token}"))
-      .send()
-      .await;
-    let mut app = self.app.lock().await;
-    app.monthly_listeners = match response {
-      Ok(res) => match res.json::<serde_json::Value>().await {
-        Ok(json) => json
-          .pointer("/monthlyListeners")
-          .or_else(|| json.pointer("/monthly_listeners"))
-          .and_then(|v| v.as_u64()),
-        Err(_) => None,
-      },
-      Err(_) => None,
-    };
   }
 
   async fn get_track_credits(&mut self, track_id: String) {

@@ -47,14 +47,6 @@ fn handle_down_press_on_selected_block(app: &mut App) {
         };
         artist.selected_appears_on_index = (artist.selected_appears_on_index + 1).min(max_selectable);
       }
-      ArtistBlock::DiscoveredOn => {
-        let max_selectable = if artist.discovered_on.items.len() < artist.discovered_on.total as usize {
-          artist.discovered_on.items.len()
-        } else {
-          artist.discovered_on.items.len().saturating_sub(1)
-        };
-        artist.selected_discovered_on_index = (artist.selected_discovered_on_index + 1).min(max_selectable);
-      }
       _ => {}
     }
   }
@@ -62,26 +54,20 @@ fn handle_down_press_on_selected_block(app: &mut App) {
 
 fn next_artist_tab(current: ArtistBlock) -> ArtistBlock {
   match current {
-    ArtistBlock::About => ArtistBlock::TopTracks,
     ArtistBlock::TopTracks => ArtistBlock::Albums,
     ArtistBlock::Albums => ArtistBlock::Singles,
     ArtistBlock::Singles => ArtistBlock::EPs,
     ArtistBlock::EPs => ArtistBlock::AppearsOn,
-    ArtistBlock::AppearsOn => ArtistBlock::DiscoveredOn,
-    ArtistBlock::DiscoveredOn => ArtistBlock::About,
-    ArtistBlock::Empty => ArtistBlock::About,
+    ArtistBlock::AppearsOn | ArtistBlock::Empty => ArtistBlock::TopTracks,
   }
 }
 fn prev_artist_tab(current: ArtistBlock) -> ArtistBlock {
   match current {
-    ArtistBlock::About => ArtistBlock::DiscoveredOn,
-    ArtistBlock::TopTracks => ArtistBlock::About,
+    ArtistBlock::TopTracks => ArtistBlock::AppearsOn,
     ArtistBlock::Albums => ArtistBlock::TopTracks,
     ArtistBlock::Singles => ArtistBlock::Albums,
     ArtistBlock::EPs => ArtistBlock::Singles,
-    ArtistBlock::AppearsOn => ArtistBlock::EPs,
-    ArtistBlock::DiscoveredOn => ArtistBlock::AppearsOn,
-    ArtistBlock::Empty => ArtistBlock::About,
+    ArtistBlock::AppearsOn | ArtistBlock::Empty => ArtistBlock::EPs,
   }
 }
 fn handle_down_press_on_hovered_block(app: &mut App) {
@@ -125,10 +111,6 @@ fn handle_up_press_on_selected_block(app: &mut App) {
         let next_index = artist.selected_appears_on_index.saturating_sub(1);
         artist.selected_appears_on_index = next_index.min(artist.appears_on.items.len().saturating_sub(1));
       }
-      ArtistBlock::DiscoveredOn => {
-        let next_index = artist.selected_discovered_on_index.saturating_sub(1);
-        artist.selected_discovered_on_index = next_index.min(artist.discovered_on.items.len().saturating_sub(1));
-      }
       _ => {}
     }
   }
@@ -150,7 +132,6 @@ fn handle_high_press_on_selected_block(app: &mut App) {
       ArtistBlock::Singles => artist.selected_singles_index = common_key_events::on_high_press_handler(),
       ArtistBlock::EPs => artist.selected_eps_index = common_key_events::on_high_press_handler(),
       ArtistBlock::AppearsOn => artist.selected_appears_on_index = common_key_events::on_high_press_handler(),
-      ArtistBlock::DiscoveredOn => artist.selected_discovered_on_index = common_key_events::on_high_press_handler(),
       _ => {}
     }
   }
@@ -174,10 +155,6 @@ fn handle_middle_press_on_selected_block(app: &mut App) {
       ArtistBlock::AppearsOn => {
         artist.selected_appears_on_index = common_key_events::on_middle_press_handler(&artist.appears_on.items)
       }
-      ArtistBlock::DiscoveredOn => {
-        artist.selected_discovered_on_index =
-          common_key_events::on_middle_press_handler(&artist.discovered_on.items)
-      }
       _ => {}
     }
   }
@@ -200,10 +177,6 @@ fn handle_low_press_on_selected_block(app: &mut App) {
       }
       ArtistBlock::AppearsOn => {
         artist.selected_appears_on_index = common_key_events::on_low_press_handler(&artist.appears_on.items)
-      }
-      ArtistBlock::DiscoveredOn => {
-        artist.selected_discovered_on_index =
-          common_key_events::on_low_press_handler(&artist.discovered_on.items)
       }
       _ => {}
     }
@@ -290,18 +263,6 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
           app.dispatch(IoEvent::GetAlbumTracks(Box::new(al)));
         }
       }
-      ArtistBlock::DiscoveredOn => {
-        if artist.selected_discovered_on_index >= artist.discovered_on.items.len() {
-          app.load_more_discovered_on();
-        } else if let Some(pl) = artist
-          .discovered_on
-          .items
-          .get(artist.selected_discovered_on_index)
-          .cloned()
-        {
-          app.dispatch(IoEvent::GetPlaylistItems(pl.id.to_string(), 0));
-        }
-      }
       _ => {}
     }
   }
@@ -352,7 +313,7 @@ pub fn handler(key: Key, app: &mut App) {
       k if common_key_events::left_event(k) => {
         if artist.artist_selected_block != ArtistBlock::Empty {
           artist.artist_selected_block = ArtistBlock::Empty;
-        } else if artist.artist_hovered_block == ArtistBlock::About {
+        } else if artist.artist_hovered_block == ArtistBlock::TopTracks {
           // leftmost tab → leave artist page
           common_key_events::handle_left_event(app);
         } else {

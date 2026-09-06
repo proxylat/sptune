@@ -353,7 +353,7 @@ pub fn search_layout(
 }
 
 /// Artist page layout, mirroring the search page: a single-row tab bar
-/// (About / Top tracks / Albums / Singles / EPs / Featuring / Discovered) and the active tab's list below.
+/// (Artist / Albums / Singles / EPs / Featuring) and the active tab's list below.
 /// Shared with the mouse hit-testing so the two never drift.
 /// Returns (tab_bar_rect, tab_cells, list_rect).
 pub fn artist_layout(chunk: Rect, expanded: ArtistBlock) -> (Rect, Vec<(ArtistBlock, Rect)>, Rect) {
@@ -364,13 +364,11 @@ pub fn artist_layout(chunk: Rect, expanded: ArtistBlock) -> (Rect, Vec<(ArtistBl
     height: 1,
   };
   let tabs = [
-    (ArtistBlock::About, "About"),
-    (ArtistBlock::TopTracks, "Top tracks"),
+    (ArtistBlock::TopTracks, "Artist"),
     (ArtistBlock::Albums, "Albums"),
     (ArtistBlock::Singles, "Singles"),
     (ArtistBlock::EPs, "EPs"),
     (ArtistBlock::AppearsOn, "Featuring"),
-    (ArtistBlock::DiscoveredOn, "Discovered"),
   ];
   let n = tabs.len() as u16;
   let cell_w = if n > 0 { chunk.width / n } else { chunk.width };
