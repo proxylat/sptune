@@ -7,11 +7,11 @@ use crate::backend::IoEvent;
 use crate::event::Key;
 use crate::tui::layout;
 use crate::tui::layout::{
-  build_playbar_controls, build_playbar_title, gear_click_rect, header_height, playbar_artist_row,
-  playbar_controls_x, playbar_progress_rect, playbar_song_row, playbar_text_click_range,
-  playbar_volume_rect, search_box_rect, song_table_columns, song_table_viewport,
-  sort_column_for, track_table_with_date, PlaybarButton, PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN,
-  SMALL_TERMINAL_HEIGHT, VOLUME_BAR_LEN, VOLUME_LABEL_LEN,
+  build_playbar_controls, build_playbar_title, gear_click_rect, get_main_layout_margin,
+  header_height, playbar_artist_row, playbar_controls_x, playbar_progress_rect, playbar_song_row,
+  playbar_text_click_range, playbar_volume_rect, search_box_rect, song_table_columns,
+  song_table_viewport, sort_column_for, track_table_with_date, PlaybarButton, PLAYBAR_HEIGHT,
+  PLAYBAR_TIME_LEN, VOLUME_BAR_LEN, VOLUME_LABEL_LEN,
 };
 use crate::tui::ColumnId;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -59,6 +59,12 @@ struct SidebarDrag {
 }
 
 pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
+  // Allow settings panel to re-enable mouse even when disabled
+  if !app.user_config.terminal.enable_mouse
+    && app.get_current_route().active_block != ActiveBlock::HelpMenu
+  {
+    return;
+  }
   match mouse.kind {
     MouseEventKind::ScrollUp => {
       if handle_add_to_playlist_scroll(true, app) {
@@ -74,6 +80,7 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
     }
     MouseEventKind::Down(MouseButton::Left) => {
       let (x, y) = (mouse.column, mouse.row);
+    
       if x >= app.size.width || y >= app.size.height {
         return;
       }
@@ -110,6 +117,9 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
           drag.dragged = true;
           let (x, _y) = (mouse.column, mouse.row);
           if drag.music {
+            if !app.user_config.terminal.progress_seek {
+              return;
+            }
             let clamped_x = (x as f32).clamp(
               drag.bar_x as f32,
               (drag.bar_x + drag.bar_w.saturating_sub(1)) as f32,
@@ -165,8 +175,10 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
         if let Some(drag) = d.borrow_mut().take() {
           if drag.dragged {
             if drag.music {
-              if let Some(ms) = app.seek_ms {
-                app.seek_to(ms as u32);
+              if app.user_config.terminal.progress_seek {
+                if let Some(ms) = app.seek_ms {
+                  app.seek_to(ms as u32);
+                }
               }
             } else {
               if let Some(pct) = app.volume_preview.take() {
@@ -422,8 +434,10 @@ fn handle_left_click(x: u16, y: u16, app: &mut App) -> bool {
     return false;
   }
 
+
   match app.get_current_route().active_block {
     ActiveBlock::HelpMenu => {
+
       handle_settings_click(x, y, app);
       return false;
     }
@@ -524,9 +538,10 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
   }
   let vis_row = (y - settings.y - 1) as usize;
   let row = vis_row + app.help_scroll_offset as usize;
+
   // Row -> toggle_setting index map for the categorized layout (33 rows):
   // headers and the Shortcuts link are None.
-  const SHORTCUTS_ROW: usize = 30;
+  const SHORTCUTS_ROW: usize = 29;
   if row == SHORTCUTS_ROW {
     app.help_show_shortcuts = true;
     app.help_scroll_offset = 0;
@@ -537,39 +552,39 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
     return;
   }
   const ROW_TO_TOGGLE: [Option<usize>; 33] = [
-    None,     // 0  ─ Appearance ─
+    None,     // 0  ─ Appearence/Layout ─
     Some(0),  // 1  Black theme
     Some(5),  // 2  Theme
-    Some(18), // 3  Animations
+    Some(16), // 3  Animations
     Some(3),  // 4  Volume ramp bar
-    None,     // 5  ─ Layout ─
-    Some(1),  // 6  Library block
-    Some(2),  // 7  Playlists block
-    Some(10), // 8  Column Album
-    Some(11), // 9  Column Artist
-    Some(12), // 10 Column Length
-    Some(13), // 11 Column Date Added
-    Some(15), // 12 Liked icon
-    Some(17), // 13 Max name length
-    None,     // 14 ─ Playback ─
-    Some(6),  // 15 Timestamp by typing
-    Some(7),  // 16 Resume last song
-    Some(8),  // 17 Restore settings
-    None,     // 18 ─ Interaction ─
-    Some(4),  // 19 Mouse interactions
-    Some(14), // 20 Add to playlist
-    Some(16), // 21 Remove from playlist
-    Some(9),  // 22 Dev view
-    None,     // 23 ─ Spotify ─
-    Some(20), // 24 Spotify auto launch
-    Some(21), // 25 Spotify chromium flags
-    Some(22), // 26 Spotify suspend children
-    Some(23), // 27 Spotify trim WorkingSet
-    Some(24), // 28 Spotify memory limit
-    None,     // 29 ─ Navigation ─
-    None,     // 30 Shortcuts →
+    Some(1),  // 5  Library block
+    Some(2),  // 6  Playlists block
+    Some(9),  // 7  Column Album
+    Some(10), // 8  Column Artist
+    Some(11), // 9  Column Length
+    Some(12), // 10 Column Date Added
+    Some(15), // 11 Max name length
+    Some(4),  // 12 Mouse interactions
+    Some(13), // 13 Add to playlist
+    Some(14), // 14 Remove from playlist
+    Some(8),  // 15 Requests View
+    None,     // 16 blank
+    None,     // 17 ─ Playback ─
+    Some(6),  // 18 Timestamp by typing
+    Some(7),  // 19 Restore settings
+    None,     // 20 blank
+    None,     // 21 ─ Spotify ─
+    Some(18), // 22 Spotify auto launch
+    Some(19), // 23 Spotify chromium flags
+    Some(20), // 24 Spotify suspend children
+    Some(21), // 25 Spotify trim WorkingSet
+    Some(22), // 26 Spotify memory limit
+    None,     // 27 blank
+    None,     // 28 ─ Navigation ─
+    None,     // 29 Shortcuts →
+    None,     // 30 blank
     None,     // 31 ─ Danger Zone ─
-    Some(19), // 32 Clear cache (always last)
+    Some(17), // 32 Clear cache (always last)
   ];
   if let Some(Some(toggle)) = ROW_TO_TOGGLE.get(row).copied() {
     app.toggle_setting(toggle);
@@ -730,11 +745,7 @@ fn scroll_bounds(app: &App) -> Option<(usize, usize)> {
 }
 
 fn main_layout(app: &App) -> Option<(Rect, Rect, Option<Rect>)> {
-  let margin = if app.size.height > SMALL_TERMINAL_HEIGHT {
-    1
-  } else {
-    0
-  };
+  let margin = get_main_layout_margin(app);
   // Header row is global now: [Search | title | Settings] on top
   let parent = Layout::default()
     .direction(Direction::Vertical)
@@ -1200,10 +1211,7 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
   // other cell opens the device selector.
   if y == playbar.y {
     if let Some(ctx) = &app.current_playback_context {
-      let title = build_playbar_title(
-        if ctx.is_playing { "Playing" } else { "Paused" },
-        &ctx.device.name,
-      );
+      let title = build_playbar_title("", &ctx.device.name);
       let glyph_x = playbar.x + 1 + title.width() as u16;
       if x >= glyph_x.saturating_sub(3) && x < glyph_x {
         toggle_music_view(app);
@@ -1356,8 +1364,9 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
   }
 
   // Click-to-seek on the progress bar (the left time label counts as position 0).
-  if let Some(bar) = playbar_progress_rect(playbar) {
-    if y == bar.y && x >= bar.x - PLAYBAR_TIME_LEN && x < bar.x + bar.width && duration_ms > 0 {
+  if app.user_config.terminal.progress_seek {
+    if let Some(bar) = playbar_progress_rect(playbar) {
+      if y == bar.y && x >= bar.x - PLAYBAR_TIME_LEN && x < bar.x + bar.width && duration_ms > 0 {
       let clamped_x = x.clamp(bar.x, bar.x + bar.width - 1);
       let fraction = (clamped_x - bar.x) as f32 / bar.width as f32;
       // The last cell jumps to the exact end: raw fractions cap out just
@@ -1380,6 +1389,7 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
           dragged: false,
         });
       });
+      }
     }
   }
 }
@@ -2499,13 +2509,13 @@ mod tests {
 
   #[test]
   fn click_dev_view_row_toggles_request_log() {
-    // help_full_rect = (2,2,196,46); 33 rows categorized — Dev view row 22 sits at y=25.
+    // help_full_rect = (2,2,196,46); Requests View row 15 sits at y=18.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.dev_view);
-    handle_mouse(click_event(10, 25), &mut app);
+    handle_mouse(click_event(10, 18), &mut app);
     assert!(app.dev_view);
-    handle_mouse(click_event(10, 25), &mut app);
+    handle_mouse(click_event(10, 18), &mut app);
     assert!(!app.dev_view);
   }
 
@@ -2701,6 +2711,7 @@ mod tests {
       app.request_log.push_back(crate::app::RequestLogEntry {
         text: format!("request {}", i),
         count: 1,
+        instant: std::time::Instant::now(),
       });
     }
     // Dev panel = right column's right quarter; derive the rects the exact
@@ -2737,6 +2748,7 @@ mod tests {
       app.request_log.push_back(crate::app::RequestLogEntry {
         text: format!("request {}", i),
         count: 1,
+        instant: std::time::Instant::now(),
       });
     }
     let (routes, _, _) = main_layout(&app).unwrap();
@@ -3274,25 +3286,25 @@ mod tests {
 
   #[test]
   fn click_playlists_row_toggles_show_playlists() {
-    // help_full_rect (2,2,196,46); Playlists block row 7 at y=10.
+    // help_full_rect (2,2,196,46); Playlists block row 6 at y=9.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(app.show_playlists);
-    handle_mouse(click_event(10, 10), &mut app);
+    handle_mouse(click_event(10, 9), &mut app);
     assert!(!app.show_playlists);
-    handle_mouse(click_event(10, 10), &mut app);
+    handle_mouse(click_event(10, 9), &mut app);
     assert!(app.show_playlists);
   }
 
   #[test]
   fn click_mouse_settings_row_toggles_enable_mouse() {
-    // help_full_rect (2,2,196,46); Mouse interactions row 19 at y=22.
+    // help_full_rect (2,2,196,46); Mouse interactions row 12 at y=15.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(app.user_config.behavior.enable_mouse);
-    handle_mouse(click_event(10, 22), &mut app);
+    handle_mouse(click_event(100, 15), &mut app);
     assert!(!app.user_config.behavior.enable_mouse);
-    handle_mouse(click_event(10, 22), &mut app);
+    handle_mouse(click_event(100, 15), &mut app);
     assert!(app.user_config.behavior.enable_mouse);
   }
 
@@ -3320,37 +3332,25 @@ mod tests {
 
   #[test]
   fn click_seek_by_typing_row_toggles_setting() {
-    // help_full_rect (2,2,196,46); Seek by typing row 15 at y=18.
+    // help_full_rect (2,2,196,46); Seek by typing row 18 at y=21.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.user_config.behavior.seek_by_typing);
-    handle_mouse(click_event(10, 18), &mut app);
+    handle_mouse(click_event(10, 21), &mut app);
     assert!(app.user_config.behavior.seek_by_typing);
-    handle_mouse(click_event(10, 18), &mut app);
+    handle_mouse(click_event(10, 21), &mut app);
     assert!(!app.user_config.behavior.seek_by_typing);
-  }
-
-  #[test]
-  fn click_resume_track_row_toggles_setting() {
-    // help_full_rect (2,2,196,46); Resume last song row 16 at y=19.
-    let mut app = playback_app();
-    app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
-    assert!(!app.user_config.behavior.resume_track);
-    handle_mouse(click_event(10, 19), &mut app);
-    assert!(app.user_config.behavior.resume_track);
-    handle_mouse(click_event(10, 19), &mut app);
-    assert!(!app.user_config.behavior.resume_track);
   }
 
   #[test]
   fn click_restore_settings_row_toggles_setting() {
-    // help_full_rect (2,2,196,46); Restore settings row 17 at y=20.
+    // help_full_rect (2,2,196,46); Restore settings row 19 at y=22.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.user_config.behavior.restore_settings);
-    handle_mouse(click_event(10, 20), &mut app);
+    handle_mouse(click_event(10, 22), &mut app);
     assert!(app.user_config.behavior.restore_settings);
-    handle_mouse(click_event(10, 20), &mut app);
+    handle_mouse(click_event(10, 22), &mut app);
     assert!(!app.user_config.behavior.restore_settings);
   }
 

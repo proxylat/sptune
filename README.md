@@ -1,105 +1,43 @@
-# sptune
+<div align="center">
 
 ```text
  ___ _ __ | |_ _   _ _ __   ___
 / __| '_ \| __| | | | '_ \ / _ \
 \__ \ |_) | |_| |_| | | | |  __/
-|___/ .__/ \__|\__,_|_| |_|\___|
-    |_|
+|___| .__/ \__|\__,_|_| |_|\___|
+     |_|
 ```
 
-A Spotify client for those who really love the terminal and music.
-Performance and privacy first — everything runs locally.
-No bloat, no noise — just the essentials.
+**A Spotify client for people who live in the terminal.**
 
-## Preview
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/built_with-Rust-orange.svg)](https://www.rust-lang.org)
 
-<!-- add image -->
+</div>
 
-## Features
+---
 
-- Everything is mouse clickable: single-click a row to open or play it...
-- Fully keyboard-driven with remappable keybindings (`?` shows them all in-app)
-- Search, browse and play your library, playlists, albums, artists and podcasts
-- CLI for playback control, playlists and search (`sptune --help`)
-- User-configurable theme, behavior and keybindings (${HOME}/.config/sptune/config.yml)
+## Why sptune
 
-## Compatibility
+- **Official Spotify Web API only** — unlike some third party clients, sptune uses only official Spotify Web API methods and never relies on librespot or other unofficial libraries to ensure account safety and eliminate ban risks.
+- **Spotify desktop app can be aggressively optimized** — sptune has optional features that apply system-level tweaks and custom startup flags to squeeze every ounce of performance from the official Spotify client: reclaiming memory, suspending unnecessary child processes, and disabling costly background features. Even as an Electron app, it uses significantly less RAM and CPU than stock Spotify, keeping the player more lightweight while you game or run demanding work.
+- **Request-optimized by design** — sptune makes requests only when their results are needed, delays non-essential work, reuses cached data and paces background updates. Less API traffic means less unnecessary activity while you are listening, working or gaming.
+- **A customizable "For You" surface** — curate the home around the playlists and mixes you actually use, including custom playlist entries you add yourself.
+- **Search that understands Spotify links** — paste a Spotify playlist link into search and press <kbd>Enter</kbd> to open it directly, no need to hunt through the library.
+- **A real terminal UI** — fully clickable with the mouse, fully keyboard-driven with vim-style keys (remappable), plus synced lyrics and a draggable playbar scrubber.
+- **CLI included** — drive playback, search and playlists from scripts, keybindings or your window manager without opening the UI.
 
-- Made only for spotify at the moment...
-- No mac development at the moment.
+Requires a **Spotify Premium** account and an active Spotify player — the official desktop client, a third-party client such as [spotifyd](https://github.com/Spotifyd/spotifyd), the web player or Spotify on another device.
 
-> [!NOTE]
-> This app uses the official Spotify Web API, which doesn't handle streaming
-> itself — you need an official Spotify client or a thirdparty client like [spotifyd](https://github.com/Spotifyd/spotifyd)
-> open to play music. Playing tracks requires a Spotify Premium account.
+## Docs
 
-## Connecting to Spotify
-
-Initial setup is one time and interactive: run `sptune` and it will walk you
-through it. If you want to set it up manually:
-
-1. Go to the [Spotify dashboard](https://developer.spotify.com/dashboard/applications)
-   and click `Create an app`
-1. Note your `Client ID` and `Client Secret`
-1. Click `Edit Settings` → add `http://127.0.0.1:8888/callback` to Redirect URIs → `Save`
-1. Run `sptune` and enter your `Client ID`, `Client Secret` and port (default 8888)
-1. Accept the permissions on the Spotify page — you'll be redirected back and
-   authenticated automatically
-
-## Using
-
-Running `sptune` with no arguments brings up the UI. Press `?` for the help
-menu showing all key events and their actions. There is also a CLI that does
-most of what the UI does:
-
-```
-sptune play --name "Your Playlist" --playlist --random # Plays a random song from "Your Playlist"
-sptune playback --like --shuffle # Likes the current song and toggles shuffle mode
-sptune list --liked --limit 50 # See your liked songs (50 is the max limit)
-sptune search "An even cooler song" --tracks --format "%t from %b" --limit 30
-```
-
-## Configuration
-
-A configuration file is located at `${HOME}/.config/sptune/config.yml`
-(not to be confused with client.yml which handles Spotify authentication).
-The ⚙️ gear in the header opens a settings menu with quick toggles: black
-theme, library/playlists blocks, volume bar subcells, `enable_mouse` and the
-theme preset (Spotify / Dracula / Custom). Mouse and theme choices persist
-across restarts (stored in `${HOME}/.config/sptune/state.json`).
-
-## Local Installation
-
-Install [Rust](https://www.rust-lang.org/tools/install) and
-
-```bash
-cargo install sptune  # after `cargo publish` — for now use `cargo install --path .`
-```
-
-On Linux, the development packages for `libssl` and `pkg-config` are required
-for compilation.
-
-## Development
-
-1. [Install Rust](https://www.rust-lang.org/tools/install)
-1. `cargo run` to develop, `cargo test` to run the test suite
+- [Installation & auth](docs/index.html#install) · [Features](docs/features.html) · [Keyboard shortcuts](docs/features.html#keyboard) · [CLI](docs/features.html#cli) · [Configuration](docs/features.html#configuration)
 
 ## Credits
 
-This repo is based on [spotify-tui](https://github.com/Rigellute/spotify-tui), but heavily modified for sptune — mouse support, a
-draggable playbar scrubber, synced lyrics and more. 
-Special thanks:
-[ratatui](https://github.com/ratatui/ratatui), [rspotify](https://github.com/ramsayleung/rspotify),
-[crossterm](https://github.com/crossterm-rs/crossterm) and [tokio](https://github.com/tokio-rs/tokio).
+Based on [spotify-tui](https://github.com/Rigellute/spotify-tui), rebuilt for sptune — mouse support, draggable playbar scrubber, synced lyrics and more.
 
-## References
-
-https://developer.spotify.com/documentation/web-api
-https://developer.spotify.com/documentation/web-api/concepts/rate-limits
-https://developer.spotify.com/documentation/web-api/concepts/playlists
-https://developer.spotify.com/documentation/web-api/concepts/api-calls
-https://developer.spotify.com/documentation/web-api/tutorials/building-with-ai
+Special thanks to [ratatui](https://github.com/ratatui/ratatui), [rspotify](https://github.com/ramsayleung/rspotify), [crossterm](https://github.com/crossterm-rs/crossterm) and [tokio](https://github.com/tokio-rs/tokio).
 
 ## License
 

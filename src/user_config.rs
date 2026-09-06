@@ -74,6 +74,71 @@ impl Default for Theme {
   }
 }
 
+fn nearest_ansi(r: u8, g: u8, b: u8) -> Color {
+  // 16-color ANSI palette approximate RGB values
+  const PALETTE: [(Color, u8, u8, u8); 16] = [
+    (Color::Black, 0, 0, 0),
+    (Color::Red, 128, 0, 0),
+    (Color::Green, 0, 128, 0),
+    (Color::Yellow, 128, 128, 0),
+    (Color::Blue, 0, 0, 128),
+    (Color::Magenta, 128, 0, 128),
+    (Color::Cyan, 0, 128, 128),
+    (Color::Gray, 192, 192, 192),
+    (Color::DarkGray, 128, 128, 128),
+    (Color::LightRed, 255, 0, 0),
+    (Color::LightGreen, 0, 255, 0),
+    (Color::LightYellow, 255, 255, 0),
+    (Color::LightBlue, 0, 0, 255),
+    (Color::LightMagenta, 255, 0, 255),
+    (Color::LightCyan, 0, 255, 255),
+    (Color::White, 255, 255, 255),
+  ];
+  let mut best = PALETTE[0].0;
+  let mut best_dist = u32::MAX;
+  for (c, pr, pg, pb) in PALETTE {
+    let dr = (r as i32 - pr as i32) as i32;
+    let dg = (g as i32 - pg as i32) as i32;
+    let db = (b as i32 - pb as i32) as i32;
+    let dist = (dr * dr + dg * dg + db * db) as u32;
+    if dist < best_dist {
+      best_dist = dist;
+      best = c;
+    }
+  }
+  best
+}
+
+fn downgrade_color(c: Color) -> Color {
+  match c {
+    Color::Rgb(r, g, b) => nearest_ansi(r, g, b),
+    other => other,
+  }
+}
+
+impl Theme {
+  pub fn downgraded(&self) -> Self {
+    Self {
+      active: downgrade_color(self.active),
+      banner: downgrade_color(self.banner),
+      error_border: downgrade_color(self.error_border),
+      error_text: downgrade_color(self.error_text),
+      hint: downgrade_color(self.hint),
+      hovered: downgrade_color(self.hovered),
+      inactive: downgrade_color(self.inactive),
+      load_more: downgrade_color(self.load_more),
+      playbar_background: downgrade_color(self.playbar_background),
+      playbar_progress: downgrade_color(self.playbar_progress),
+      playbar_progress_text: downgrade_color(self.playbar_progress_text),
+      playbar_text: downgrade_color(self.playbar_text),
+      selected: downgrade_color(self.selected),
+      text: downgrade_color(self.text),
+      header: downgrade_color(self.header),
+      background: downgrade_color(self.background),
+    }
+  }
+}
+
 /// Built-in palettes cycled from the gear settings menu. Only the visually
 /// dominant slots are set; the rest keep the default theme.
 pub fn theme_presets() -> [(&'static str, Theme); 2] {
@@ -267,7 +332,6 @@ pub struct BehaviorConfigString {
   pub enable_text_emphasis: Option<bool>,
   pub volume_ramp_bar: Option<bool>,
   pub seek_by_typing: Option<bool>,
-  pub resume_track: Option<bool>,
   pub restore_settings: Option<bool>,
   pub enforce_wide_search_bar: Option<bool>,
   pub liked_icon: Option<String>,
@@ -284,7 +348,6 @@ pub struct BehaviorConfigString {
   pub show_date_added_column: Option<bool>,
   pub enable_add_to_playlist: Option<bool>,
   pub in_playlist_icon: Option<String>,
-  pub show_liked_icon: Option<bool>,
   pub enable_remove_from_playlist: Option<bool>,
   pub max_display_length: Option<u16>,
   pub enable_animations: Option<bool>,
@@ -298,7 +361,6 @@ pub struct BehaviorConfig {
   pub enable_text_emphasis: bool,
   pub volume_ramp_bar: bool,
   pub seek_by_typing: bool,
-  pub resume_track: bool,
   pub restore_settings: bool,
   pub enforce_wide_search_bar: bool,
   pub liked_icon: String,
@@ -315,7 +377,6 @@ pub struct BehaviorConfig {
   pub show_date_added_column: bool,
   pub enable_add_to_playlist: bool,
   pub in_playlist_icon: String,
-  pub show_liked_icon: bool,
   pub enable_remove_from_playlist: bool,
   /// Maximum characters for name columns (song, artist, album). 0 = no limit.
   pub max_display_length: u16,
@@ -350,9 +411,46 @@ impl Default for SpotifyConfig {
       use_chromium_flags: false,
       suspend_children: false,
       trim_working_set: false,
-      memory_limit_mb: 150,
+      memory_limit_mb: crate::platform::DEFAULT_SPOTIFY_MEMORY_LIMIT_MB as u32,
     }
   }
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TerminalConfigString {
+  pub enable_mouse: Option<bool>,
+  pub progress_seek: Option<bool>,
+  pub unicode_borders: Option<bool>,
+  pub truecolor: Option<bool>,
+  pub alt_screen: Option<bool>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TerminalConfig {
+  pub enable_mouse: bool,
+  pub progress_seek: bool,
+  pub unicode_borders: bool,
+  pub truecolor: bool,
+  pub alt_screen: bool,
+}
+
+impl Default for TerminalConfig {
+  fn default() -> Self {
+    Self {
+      enable_mouse: true,
+      progress_seek: true,
+      unicode_borders: true,
+      truecolor: true,
+      alt_screen: true,
+    }
+  }
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlatformOverridesString {
+  pub windows: Option<TerminalConfigString>,
+  pub linux: Option<TerminalConfigString>,
+  pub macos: Option<TerminalConfigString>,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -361,6 +459,8 @@ pub struct UserConfigString {
   behavior: Option<BehaviorConfigString>,
   theme: Option<UserTheme>,
   spotify: Option<SpotifyConfigString>,
+  terminal: Option<TerminalConfigString>,
+  platform: Option<PlatformOverridesString>,
 }
 
 #[derive(Clone)]
@@ -369,12 +469,13 @@ pub struct UserConfig {
   pub theme: Theme,
   pub behavior: BehaviorConfig,
   pub spotify: SpotifyConfig,
+  pub terminal: TerminalConfig,
   pub path_to_config: Option<UserConfigPaths>,
 }
 
 impl UserConfig {
   pub fn new() -> UserConfig {
-    UserConfig {
+    let mut cfg = UserConfig {
       theme: Default::default(),
       spotify: SpotifyConfig::default(),
       keys: KeyBindings {
@@ -418,7 +519,6 @@ impl UserConfig {
         enable_text_emphasis: true,
         volume_ramp_bar: false,
         seek_by_typing: false,
-        resume_track: false,
         restore_settings: false,
         enforce_wide_search_bar: false,
         liked_icon: "♥".to_string(),
@@ -435,13 +535,25 @@ impl UserConfig {
         show_date_added_column: true,
         enable_add_to_playlist: true,
         in_playlist_icon: "✓".to_string(),
-        show_liked_icon: true,
         enable_remove_from_playlist: false,
         max_display_length: 0,
         enable_animations: true,
       },
+      terminal: {
+        let mut t = TerminalConfig::default();
+        // Windows legacy console lacks unicode borders; modern Windows Terminal
+        // supports truecolor, so keep it enabled for theme presets.
+        if cfg!(windows) {
+          t.unicode_borders = false;
+        }
+        t
+      },
       path_to_config: None,
+    };
+    if !cfg.terminal.truecolor {
+      cfg.theme = cfg.theme.downgraded();
     }
+    cfg
   }
 
   pub fn get_or_build_paths(&mut self) -> Result<()> {
@@ -591,10 +703,6 @@ impl UserConfig {
       self.behavior.seek_by_typing = seek_by_typing;
     }
 
-    if let Some(resume_track) = behavior_config.resume_track {
-      self.behavior.resume_track = resume_track;
-    }
-
     if let Some(restore_settings) = behavior_config.restore_settings {
       self.behavior.restore_settings = restore_settings;
     }
@@ -613,10 +721,6 @@ impl UserConfig {
 
     if let Some(enable_add_to_playlist) = behavior_config.enable_add_to_playlist {
       self.behavior.enable_add_to_playlist = enable_add_to_playlist;
-    }
-
-    if let Some(show_liked_icon) = behavior_config.show_liked_icon {
-      self.behavior.show_liked_icon = show_liked_icon;
     }
 
     if let Some(enable_remove_from_playlist) = behavior_config.enable_remove_from_playlist {
@@ -653,6 +757,7 @@ impl UserConfig {
 
     if let Some(enable_mouse) = behavior_config.enable_mouse {
       self.behavior.enable_mouse = enable_mouse;
+      self.terminal.enable_mouse = enable_mouse;
     }
     if let Some(show_album) = behavior_config.show_album_column {
       self.behavior.show_album_column = show_album;
@@ -671,6 +776,44 @@ impl UserConfig {
     }
 
     Ok(())
+  }
+
+  pub fn load_terminal_config(&mut self, t: TerminalConfigString) {
+    if let Some(v) = t.enable_mouse {
+      self.terminal.enable_mouse = v;
+      self.behavior.enable_mouse = v;
+    }
+    if let Some(v) = t.progress_seek {
+      self.terminal.progress_seek = v;
+    }
+    if let Some(v) = t.unicode_borders {
+      self.terminal.unicode_borders = v;
+    }
+    if let Some(v) = t.truecolor {
+      self.terminal.truecolor = v;
+    }
+    if let Some(v) = t.alt_screen {
+      self.terminal.alt_screen = v;
+    }
+  }
+
+  fn apply_terminal_override(&mut self, t: &TerminalConfigString) {
+    if let Some(v) = t.enable_mouse {
+      self.terminal.enable_mouse = v;
+      self.behavior.enable_mouse = v;
+    }
+    if let Some(v) = t.progress_seek {
+      self.terminal.progress_seek = v;
+    }
+    if let Some(v) = t.unicode_borders {
+      self.terminal.unicode_borders = v;
+    }
+    if let Some(v) = t.truecolor {
+      self.terminal.truecolor = v;
+    }
+    if let Some(v) = t.alt_screen {
+      self.terminal.alt_screen = v;
+    }
   }
 
   pub fn load_config(&mut self) -> Result<()> {
@@ -703,9 +846,27 @@ impl UserConfig {
       if let Some(spotify) = config_yml.spotify {
         self.load_spotify_config(spotify);
       }
+      if let Some(terminal) = config_yml.terminal {
+        self.load_terminal_config(terminal);
+      }
+      if let Some(platform) = config_yml.platform {
+        let os = std::env::consts::OS;
+        let override_cfg = match os {
+          "windows" => platform.windows,
+          "macos" => platform.macos,
+          _ => platform.linux,
+        };
+        if let Some(o) = override_cfg {
+          self.apply_terminal_override(&o);
+        }
+      }
+
+      self.apply_truecolor_downgrade();
 
       Ok(())
     } else {
+      // No config file – still downgrade defaults per platform (Windows)
+      self.apply_truecolor_downgrade();
       Ok(())
     }
   }
@@ -736,6 +897,12 @@ impl UserConfig {
     }
     if let Some(v) = s.memory_limit_mb {
       self.spotify.memory_limit_mb = v;
+    }
+  }
+
+  pub fn apply_truecolor_downgrade(&mut self) {
+    if !self.terminal.truecolor {
+      self.theme = self.theme.downgraded();
     }
   }
 }

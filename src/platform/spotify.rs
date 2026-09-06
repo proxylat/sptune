@@ -44,29 +44,63 @@ pub fn build_args(cfg: &SpotifyConfig) -> Vec<String> {
 pub fn launch(cfg: &SpotifyConfig) -> anyhow::Result<std::process::Child> {
   let bin = resolve_binary(cfg).ok_or_else(|| anyhow::anyhow!("spotify binary not found"))?;
   let args = build_args(cfg);
+  let bin_dir = bin.parent().map(|p| p.to_path_buf());
   let mut cmd = Command::new(bin);
   cmd.args(&args);
-  let child = cmd.spawn()?;
-  // Apply platform memory/trim policy if configured (single 150 MB cgroup / Job).
-  // These call through to platform/linux and platform/windows which filter
-  // NetworkService via is_network_service.
-  #[cfg(target_os = "linux")]
-  {
-    if cfg.memory_limit_mb != 0 {
-      crate::platform::linux::apply_memory_limits_pids(&[child.id()]);
-    }
-    if cfg.suspend_children || cfg.trim_working_set {
-      crate::platform::linux::suspend_and_trim(child.id(), "");
+  // Detach from sptune's TTY so Chromium/Spotify stderr (e.g. resource_bundle.cc
+  // NOTREACHED "Unable to load bitmap") never corrupts the TUI alternate screen.
+  // Also set cwd to the binary's directory so resource pak lookup is stable.
+  use std::process::Stdio;
+  cmd.stdin(Stdio::null());
+  cmd.stdout(Stdio::null());
+  cmd.stderr(Stdio::null());
+  if let Some(dir) = bin_dir {
+    if dir.is_dir() {
+      cmd.current_dir(dir);
     }
   }
   #[cfg(windows)]
   {
-    if cfg.memory_limit_mb != 0 {
-      crate::platform::windows::apply_memory_limits(&[child.id()]);
-    }
-    if cfg.suspend_children || cfg.trim_working_set {
-      crate::platform::windows::suspend_and_trim(child.id(), "");
-    }
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+  }
+  let child = cmd.spawn()?;
+  // Spotify is multi-process (Chromium). Its renderer/utility children appear
+  // a few seconds after the browser process starts, so defer handling.
+  let root = child.id();
+  let suspend = cfg.suspend_children;
+  let trim = cfg.trim_working_set;
+  let mem_limit = cfg.memory_limit_mb;
+  if suspend || trim || mem_limit != 0 {
+    std::thread::spawn(move || {
+      std::thread::sleep(std::time::Duration::from_millis(2500));
+      #[cfg(target_os = "linux")]
+      {
+        if mem_limit != 0 {
+          let kids = crate::platform::linux::descendants_of(root);
+          if !kids.is_empty() {
+            crate::platform::linux::apply_memory_limits(&kids);
+          } else {
+            crate::platform::linux::apply_memory_limits_pids(&[root]);
+          }
+        }
+        if suspend || trim {
+          crate::platform::linux::suspend_children_of(root, suspend, trim);
+        }
+      }
+      #[cfg(windows)]
+      {
+        if mem_limit != 0 {
+          crate::platform::windows::apply_memory_limits(&[root]);
+        }
+        if suspend || trim {
+          crate::platform::windows::suspend_children_of(root, suspend, trim);
+        }
+      }
+    });
   }
   // Keep for non-linux/windows builds so cfg fields are considered used.
   #[cfg(not(any(target_os = "linux", windows)))]

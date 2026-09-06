@@ -139,6 +139,7 @@ const DEFAULT_ROUTE: Route = Route {
 pub struct RequestLogEntry {
   pub text: String,
   pub count: u32,
+  pub instant: std::time::Instant,
 }
 
 #[derive(Clone)]
@@ -481,6 +482,7 @@ pub struct App {
   pub last_load_more: Option<Instant>,
   // Rate limiter state exposed for the dev panel.
   pub api_tokens: f64,
+  pub api_tokens_updated: Option<Instant>,
   pub api_backoff_until: Option<Instant>,
   pub track_table_added_at: Vec<Option<DateTime<Utc>>>,
   // Date Added was requested while the playlist was only partially loaded;
@@ -619,7 +621,8 @@ impl Default for App {
       playlist_filter_cursor_position: 0,
       last_remove_time: None,
       last_load_more: None,
-      api_tokens: 5.0,
+      api_tokens: 10.0,
+      api_tokens_updated: None,
       api_backoff_until: None,
       track_table_added_at: vec![],
       date_added_pending: false,
@@ -669,16 +672,20 @@ impl Default for App {
 }
 
 impl App {
-  /// Log a request; repeat entries coalesce into one with a counter.
+  /// Log a request; repeats coalesce globally, keeping only latest timestamp (no tracetrail) — grouped display in tui.rs shows HH:MM header with counts.
   pub fn log_request(&mut self, text: String) {
-    if let Some(pos) = self.request_log.iter().position(|e| e.text == text) {
+    let pos = self.request_log.iter().position(|e| e.text == text);
+    if let Some(pos) = pos {
       let mut entry = self.request_log.remove(pos).unwrap();
       entry.count = entry.count.saturating_add(1);
+      entry.instant = Instant::now();
       self.request_log.push_front(entry);
     } else {
-      self
-        .request_log
-        .push_front(RequestLogEntry { text, count: 1 });
+      self.request_log.push_front(RequestLogEntry {
+        text,
+        count: 1,
+        instant: Instant::now(),
+      });
       self.request_log.truncate(100);
     }
   }
@@ -2348,6 +2355,7 @@ impl App {
       }
       4 => {
         self.user_config.behavior.enable_mouse = !self.user_config.behavior.enable_mouse;
+        self.user_config.terminal.enable_mouse = self.user_config.behavior.enable_mouse;
       }
       5 => {
         let presets = theme_presets();
@@ -2360,52 +2368,43 @@ impl App {
           Some(i) => presets[i].1,
           None => self.config_theme,
         };
+        if !self.user_config.terminal.truecolor {
+          self.user_config.theme = self.user_config.theme.downgraded();
+        }
       }
       6 => {
         self.user_config.behavior.seek_by_typing = !self.user_config.behavior.seek_by_typing;
       }
       7 => {
-        self.user_config.behavior.resume_track = !self.user_config.behavior.resume_track;
-      }
-      // Restore settings on start: re-sends the last saved playback/volume state at launch.
-      8 => {
         self.user_config.behavior.restore_settings = !self.user_config.behavior.restore_settings;
       }
-      // Dev view: sidebar shows the request log instead of the library.
-      9 => {
+      8 => {
         self.dev_view = !self.dev_view;
       }
-      10 => {
+      9 => {
         self.user_config.behavior.show_album_column = !self.user_config.behavior.show_album_column;
       }
-      11 => {
+      10 => {
         self.user_config.behavior.show_artist_column =
           !self.user_config.behavior.show_artist_column;
       }
-      12 => {
+      11 => {
         self.user_config.behavior.show_length_column =
           !self.user_config.behavior.show_length_column;
       }
-      13 => {
+      12 => {
         self.user_config.behavior.show_date_added_column =
           !self.user_config.behavior.show_date_added_column;
       }
-      // Add-to-playlist picker on/off.
-      14 => {
+      13 => {
         self.user_config.behavior.enable_add_to_playlist =
           !self.user_config.behavior.enable_add_to_playlist;
       }
-      // Liked-heart column on/off.
-      15 => {
-        self.user_config.behavior.show_liked_icon = !self.user_config.behavior.show_liked_icon;
-      }
-      // Remove-from-playlist button on/off.
-      16 => {
+      14 => {
         self.user_config.behavior.enable_remove_from_playlist =
           !self.user_config.behavior.enable_remove_from_playlist;
       }
-      // Max display length: cycles through off(0), 15, 20, 25, 30, 40, 50.
-      17 => {
+      15 => {
         self.user_config.behavior.max_display_length = match self.user_config.behavior.max_display_length {
           0 => 15,
           15 => 20,
@@ -2416,27 +2415,25 @@ impl App {
           _ => 0,
         };
       }
-      18 => {
+      16 => {
         self.user_config.behavior.enable_animations = !self.user_config.behavior.enable_animations;
       }
-      // Clear the on-disk playlist/library caches. Danger action: the last
-      // settings row is styled red, so this stays the last arm too.
-      19 => {
+      17 => {
         self.dispatch(IoEvent::CleanCache);
       }
-      20 => {
+      18 => {
         self.user_config.spotify.auto_launch = !self.user_config.spotify.auto_launch;
       }
-      21 => {
+      19 => {
         self.user_config.spotify.use_chromium_flags = !self.user_config.spotify.use_chromium_flags;
       }
-      22 => {
+      20 => {
         self.user_config.spotify.suspend_children = !self.user_config.spotify.suspend_children;
       }
-      23 => {
+      21 => {
         self.user_config.spotify.trim_working_set = !self.user_config.spotify.trim_working_set;
       }
-      24 => {
+      22 => {
         self.user_config.spotify.memory_limit_mb = if self.user_config.spotify.memory_limit_mb == 0 {
           150
         } else {
@@ -2445,7 +2442,7 @@ impl App {
       }
       _ => {}
     }
-    if index <= 24 {
+    if index <= 22 {
       self.dispatch(IoEvent::SaveState);
     }
   }
@@ -2812,23 +2809,13 @@ mod tests {
   }
 
   #[test]
-  fn gear_toggle_14_flips_add_to_playlist() {
+  fn gear_toggle_13_flips_add_to_playlist() {
     let mut app = App::default();
     assert!(app.user_config.behavior.enable_add_to_playlist);
-    app.toggle_setting(14);
+    app.toggle_setting(13);
     assert!(!app.user_config.behavior.enable_add_to_playlist);
-    app.toggle_setting(14);
+    app.toggle_setting(13);
     assert!(app.user_config.behavior.enable_add_to_playlist);
-  }
-
-  #[test]
-  fn gear_toggle_15_flips_liked_icon() {
-    let mut app = App::default();
-    assert!(app.user_config.behavior.show_liked_icon);
-    app.toggle_setting(15);
-    assert!(!app.user_config.behavior.show_liked_icon);
-    app.toggle_setting(15);
-    assert!(app.user_config.behavior.show_liked_icon);
   }
 
   #[test]

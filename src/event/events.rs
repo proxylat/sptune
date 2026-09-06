@@ -75,7 +75,16 @@ impl Events {
           loop {
             let ev = match event::read() {
               Ok(ev) => match ev {
-                event::Event::Key(key) => Event::Input(InputEvent::Key(Key::from(key))),
+                event::Event::Key(key) => {
+                  // crossterm 0.29 emits Press+Release; only handle Press/Repeat to avoid doubled chars ("ride" -> "rriiddee")
+                  if matches!(
+                    key.kind,
+                    event::KeyEventKind::Release
+                  ) {
+                    continue;
+                  }
+                  Event::Input(InputEvent::Key(Key::from(key)))
+                }
                 event::Event::Mouse(mouse) => Event::Input(InputEvent::Mouse(mouse)),
                 _ => continue,
               },

@@ -351,8 +351,6 @@ pub struct SavedState {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub seek_by_typing: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub resume_track: Option<bool>,
-  #[serde(skip_serializing_if = "Option::is_none")]
   pub restore_settings: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub show_library: Option<bool>,
@@ -386,8 +384,6 @@ pub struct SavedState {
   pub dev_view: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub enable_animations: Option<bool>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub show_liked_icon: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub made_for_you_custom: Option<Vec<(String, String)>>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -459,9 +455,6 @@ impl SavedState {
       }
       if let Some(value) = &self.seek_by_typing {
         obj.insert("seek_by_typing".to_string(), serde_json::json!(value));
-      }
-      if let Some(value) = &self.resume_track {
-        obj.insert("resume_track".to_string(), serde_json::json!(value));
       }
       if let Some(value) = &self.restore_settings {
         obj.insert("restore_settings".to_string(), serde_json::json!(value));
@@ -540,9 +533,6 @@ impl SavedState {
           "enable_add_to_playlist".to_string(),
           serde_json::json!(value),
         );
-      }
-      if let Some(value) = &self.show_liked_icon {
-        obj.insert("show_liked_icon".to_string(), serde_json::json!(value));
       }
       // dedup: earlier inserts already covered these; keep one copy above spotify
     }
@@ -635,7 +625,6 @@ impl<'a> Network<'a> {
       Some(pos) => debug[..pos].to_string(),
       None => debug,
     };
-    self.app.lock().await.log_request(text);
     // Cached opens must not wait for the token bucket — serve immediately
     // and only pace the background reconcile. Otherwise a fully-cached
     // playlist open pays 200-500ms for no network work.
@@ -684,9 +673,16 @@ impl<'a> Network<'a> {
           .get_typed::<PrivateUser>("profile")
           .is_some()
       }
-      IoEvent::SetTracksToTable(_) | IoEvent::SaveState | IoEvent::CleanCache => true,
+      IoEvent::SetTracksToTable(_)
+      | IoEvent::SetArtistsToTable(_)
+      | IoEvent::UpdateSearchLimits(_, _)
+      | IoEvent::SaveState
+      | IoEvent::CleanCache => true,
       _ => false,
     };
+    if !skip_pace {
+      self.app.lock().await.log_request(text);
+    }
     if skip_pace {
       // keep token state fresh for the panel without sleeping
       let now = Instant::now();
@@ -701,6 +697,7 @@ impl<'a> Network<'a> {
     {
       let mut app = self.app.lock().await;
       app.api_tokens = self.tokens;
+      app.api_tokens_updated = Some(Instant::now());
       app.api_backoff_until = self.api_backoff_until;
     }
     match io_event {
@@ -1089,14 +1086,12 @@ impl<'a> Network<'a> {
       show_artist_column: None,
       show_length_column: None,
       show_date_added_column: None,
-      resume_track: None,
       restore_settings: None,
       enable_add_to_playlist: None,
       enable_remove_from_playlist: None,
       max_display_length: None,
       dev_view: None,
       enable_animations: None,
-      show_liked_icon: None,
       made_for_you_custom: None,
       spotify_auto_launch: None,
       spotify_use_flags: None,
@@ -1119,7 +1114,6 @@ impl<'a> Network<'a> {
       track_sort: None,
       last_page: None,
       seek_by_typing: Some(app.user_config.behavior.seek_by_typing),
-      resume_track: Some(app.user_config.behavior.resume_track),
       restore_settings: Some(app.user_config.behavior.restore_settings),
       mouse_enabled: Some(app.user_config.behavior.enable_mouse),
       theme_preset: app
@@ -1141,7 +1135,6 @@ impl<'a> Network<'a> {
       max_display_length: Some(app.user_config.behavior.max_display_length),
       dev_view: Some(app.dev_view),
       enable_animations: Some(app.user_config.behavior.enable_animations),
-      show_liked_icon: Some(app.user_config.behavior.show_liked_icon),
       made_for_you_custom: Some(app.made_for_you_custom.clone()),
       spotify_auto_launch: Some(app.user_config.spotify.auto_launch),
       spotify_use_flags: Some(app.user_config.spotify.use_chromium_flags),
@@ -1851,7 +1844,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       .collect::<Vec<String>>();
     if !track_ids.is_empty() {
       let mut app = self.app.lock().await;
-      if app.user_config.behavior.show_liked_icon {
+      {
         app.dispatch(IoEvent::CurrentUserSavedTracksContains(track_ids));
       }
     }
@@ -2612,6 +2605,53 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
   }
 
+  /// Resolve an active device id without user interaction.
+  /// Order: cached config → current playback context → cached device list → live device list (active or first).
+  /// Persists the chosen id so subsequent calls succeed synchronously.
+  async fn effective_device_id(&mut self) -> Option<String> {
+    if let Some(id) = self.client_config.device_id.clone() {
+      return Some(id);
+    }
+    let from_app = {
+      if let Ok(app) = self.app.try_lock() {
+        if let Some(id) = app
+          .current_playback_context
+          .as_ref()
+          .and_then(|c| c.device.id.clone())
+        {
+          Some(id)
+        } else if let Some(devs) = app.devices.as_ref() {
+          devs.iter().find_map(|d| d.id.clone())
+        } else {
+          None
+        }
+      } else {
+        None
+      }
+    };
+    if let Some(id) = from_app {
+      let _ = self.client_config.set_device_id(id.clone());
+      return Some(id);
+    }
+    if let Ok(devs) = self.spotify.device().await {
+      let picked = devs
+        .iter()
+        .find(|d| d.is_active)
+        .or(devs.first())
+        .and_then(|d| d.id.clone());
+      if let Some(ref id) = picked {
+        let _ = self.client_config.set_device_id(id.clone());
+        if let Ok(mut app) = self.app.try_lock() {
+          app.devices = Some(devs);
+        }
+      } else if let Ok(mut app) = self.app.try_lock() {
+        app.devices = Some(devs);
+      }
+      return picked;
+    }
+    None
+  }
+
   async fn start_playback(
     &mut self,
     context_uri: Option<String>,
@@ -2628,37 +2668,42 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
 
     let offset = offset.map(|o| Offset::Position(ChronoDuration::milliseconds(o as i64)));
 
-    let result = match &self.client_config.device_id {
-      Some(device_id) => {
-        if let Some(context_uri) = context_uri {
-          match play_context_from_uri(&context_uri) {
-            Some(cid) => self
-              .spotify
-              .start_context_playback(cid, Some(device_id), offset, None)
-              .await
-              .map_err(|e| anyhow!(e)),
-            None => Err(anyhow!("Invalid context uri")),
-          }
-        } else if let Some(uris) = uris {
-          self
-            .spotify
-            .start_uris_playback(
-              uris.iter().filter_map(|u| playable_from_uri(u)),
-              Some(device_id),
-              offset,
-              None,
-            )
-            .await
-            .map_err(|e| anyhow!(e))
-        } else {
-          self
-            .spotify
-            .resume_playback(Some(device_id), None)
-            .await
-            .map_err(|e| anyhow!(e))
-        }
+    let Some(device_id) = self.effective_device_id().await else {
+      self
+        .handle_error(anyhow!(
+          "No device available — open Spotify on a device and retry (press `d` to select)"
+        ))
+        .await;
+      self.get_devices().await;
+      return;
+    };
+
+    let result = if let Some(context_uri) = context_uri {
+      match play_context_from_uri(&context_uri) {
+        Some(cid) => self
+          .spotify
+          .start_context_playback(cid, Some(&device_id), offset, None)
+          .await
+          .map_err(|e| anyhow!(e)),
+        None => Err(anyhow!("Invalid context uri")),
       }
-      None => Err(anyhow!("No device_id selected")),
+    } else if let Some(uris) = uris {
+      self
+        .spotify
+        .start_uris_playback(
+          uris.iter().filter_map(|u| playable_from_uri(u)),
+          Some(&device_id),
+          offset,
+          None,
+        )
+        .await
+        .map_err(|e| anyhow!(e))
+    } else {
+      self
+        .spotify
+        .resume_playback(Some(&device_id), None)
+        .await
+        .map_err(|e| anyhow!(e))
     };
 
     match result {
@@ -2678,18 +2723,28 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
   // so this is immune to stale is_playable flags, unavailable-track drops,
   // and sort remapping.
   async fn start_playback_at(&mut self, context_uri: Option<String>, track_uri: Option<String>) {
-    let result = match (&self.client_config.device_id, context_uri, track_uri) {
-      (Some(device_id), Some(context_uri), Some(track_uri)) => {
-        match play_context_from_uri(&context_uri) {
-          Some(cid) => self
-            .spotify
-            .start_context_playback(cid, Some(device_id), Some(Offset::Uri(track_uri)), None)
-            .await
-            .map_err(|e| anyhow!(e)),
-          None => Err(anyhow!("Invalid context uri")),
-        }
-      }
-      _ => Err(anyhow!("No device_id selected")),
+    let (Some(context_uri), Some(track_uri)) = (context_uri, track_uri) else {
+      self
+        .handle_error(anyhow!("Missing context or track uri"))
+        .await;
+      return;
+    };
+    let Some(device_id) = self.effective_device_id().await else {
+      self
+        .handle_error(anyhow!(
+          "No device available — open Spotify on a device and retry (press `d` to select)"
+        ))
+        .await;
+      self.get_devices().await;
+      return;
+    };
+    let result = match play_context_from_uri(&context_uri) {
+      Some(cid) => self
+        .spotify
+        .start_context_playback(cid, Some(&device_id), Some(Offset::Uri(track_uri)), None)
+        .await
+        .map_err(|e| anyhow!(e)),
+      None => Err(anyhow!("Invalid context uri")),
     };
 
     match result {
@@ -2705,26 +2760,33 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
   }
 
   async fn seek(&mut self, position_ms: u32) {
-    if let Some(device_id) = &self.client_config.device_id {
-      match self
-        .spotify
-        .seek_track(
-          ChronoDuration::milliseconds(position_ms as i64),
-          Some(device_id.as_str()),
-        )
-        .await
-      {
-        Ok(()) => {
-          // Wait between seek and status query.
-          // Without it, the Spotify API may return the old progress.
-          tokio::time::sleep(Duration::from_millis(1000)).await;
-          self.get_current_playback().await;
-        }
-        Err(e) => {
-          self.handle_error(anyhow!(e)).await;
-        }
-      };
-    }
+    let Some(device_id) = self.effective_device_id().await else {
+      self
+        .handle_error(anyhow!(
+          "No device available — open Spotify on a device and retry (press `d` to select)"
+        ))
+        .await;
+      self.get_devices().await;
+      return;
+    };
+    match self
+      .spotify
+      .seek_track(
+        ChronoDuration::milliseconds(position_ms as i64),
+        Some(device_id.as_str()),
+      )
+      .await
+    {
+      Ok(()) => {
+        // Wait between seek and status query.
+        // Without it, the Spotify API may return the old progress.
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        self.get_current_playback().await;
+      }
+      Err(e) => {
+        self.handle_error(anyhow!(e)).await;
+      }
+    };
   }
 
   async fn next_track(&mut self) {
@@ -3192,7 +3254,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
           album.tracks.offset = page.offset;
           album.tracks.total = page.total;
         }
-        if !track_ids.is_empty() && app.user_config.behavior.show_liked_icon {
+        if !track_ids.is_empty() {
           app.dispatch(IoEvent::CurrentUserSavedTracksContains(track_ids));
         }
       }
@@ -4612,7 +4674,6 @@ mod tests {
     assert_eq!(saved.sidebar_minimized, Some(true));
     assert_eq!(saved.volume_ramp_bar, Some(false));
     assert_eq!(saved.black_background, Some(true));
-    assert_eq!(saved.resume_track, Some(false));
     assert_eq!(saved.restore_settings, Some(false));
   }
 

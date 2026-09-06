@@ -174,10 +174,15 @@ impl ClientConfig {
         let _ = fs::set_permissions(&paths.config_file_path, fs::Permissions::from_mode(0o600));
       }
 
-      self.client_id = config_yml.client_id;
-      self.client_secret = config_yml.client_secret;
-      self.device_id = config_yml.device_id;
+      self.client_id = config_yml.client_id.clone();
+      self.client_secret = config_yml.client_secret.clone();
+      self.device_id = config_yml.device_id.clone();
       self.port = config_yml.port;
+
+      println!(
+        "\nConfig saved. Make sure http://127.0.0.1:{}/callback is in your Spotify dashboard Redirect URIs.",
+        self.get_port()
+      );
 
       Ok(())
     }

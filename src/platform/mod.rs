@@ -4,3 +4,5 @@ pub mod spotify;
 pub mod windows;
 #[cfg(target_os = "linux")]
 pub mod linux;
+
+pub const DEFAULT_SPOTIFY_MEMORY_LIMIT_MB: usize = 150;

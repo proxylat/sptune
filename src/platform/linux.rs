@@ -1,6 +1,5 @@
 use super::chromium_flags::is_network_service;
-
-pub const DEFAULT_SPOTIFY_MEMORY_LIMIT_MB: usize = 150;
+use super::DEFAULT_SPOTIFY_MEMORY_LIMIT_MB;
 
 #[cfg(target_os = "linux")]
 fn cgroup_base() -> std::path::PathBuf {
@@ -49,13 +48,79 @@ pub fn apply_memory_limits_pids(pids: &[u32]) {
 
 #[cfg(target_os = "linux")]
 pub fn suspend_and_trim(pid: u32, cmd: &str) {
-  // SIGSTOP always, even for NetworkService — skip WorkingSet trim for NetworkService
+  // NetworkService must stay responsive — never STOP or trim it (user reported
+  // `--utility-sub-type=network.mojom.NetworkService` was being suspended).
+  if is_network_service(cmd) {
+    return;
+  }
   let _ = std::process::Command::new("kill")
     .args(["-STOP", &pid.to_string()])
     .output();
-  if !is_network_service(cmd) {
-    let _ = std::fs::write(format!("/proc/{pid}/clear_refs"), "1");
-    let _ = pid;
+  let _ = std::fs::write(format!("/proc/{pid}/clear_refs"), "1");
+}
+
+#[cfg(target_os = "linux")]
+fn cmdline_of(pid: u32) -> String {
+  std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+    .unwrap_or_default()
+    .replace('\0', " ")
+}
+
+#[cfg(target_os = "linux")]
+fn ppid_of(pid: u32) -> Option<u32> {
+  let s = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+  for line in s.lines() {
+    if line.starts_with("PPid:") {
+      return line.split_whitespace().nth(1)?.parse().ok();
+    }
+  }
+  None
+}
+
+#[cfg(target_os = "linux")]
+pub fn descendants_of(root: u32) -> Vec<(u32, String)> {
+  use std::collections::{HashMap, HashSet};
+  let mut ppid_map: HashMap<u32, Vec<u32>> = HashMap::new();
+  let mut cmd_map: HashMap<u32, String> = HashMap::new();
+  let Ok(entries) = std::fs::read_dir("/proc") else {
+    return Vec::new();
+  };
+  for entry in entries.flatten() {
+    let name = entry.file_name();
+    let s = name.to_string_lossy();
+    if let Ok(pid) = s.parse::<u32>() {
+      if let Some(ppid) = ppid_of(pid) {
+        ppid_map.entry(ppid).or_default().push(pid);
+        cmd_map.insert(pid, cmdline_of(pid));
+      }
+    }
+  }
+  let mut result = Vec::new();
+  let mut stack = vec![root];
+  let mut visited: HashSet<u32> = HashSet::new();
+  visited.insert(root);
+  while let Some(cur) = stack.pop() {
+    if let Some(children) = ppid_map.get(&cur) {
+      for &child in children {
+        if visited.insert(child) {
+          stack.push(child);
+          let cmd = cmd_map.get(&child).cloned().unwrap_or_default();
+          result.push((child, cmd));
+        }
+      }
+    }
+  }
+  result
+}
+
+#[cfg(target_os = "linux")]
+pub fn suspend_children_of(root: u32, do_suspend: bool, do_trim: bool) {
+  for (pid, cmd) in descendants_of(root) {
+    if do_suspend {
+      suspend_and_trim(pid, &cmd);
+    } else if do_trim && !is_network_service(&cmd) {
+      let _ = std::fs::write(format!("/proc/{pid}/clear_refs"), "1");
+    }
   }
 }
 

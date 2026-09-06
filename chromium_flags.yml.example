@@ -67,7 +67,6 @@ flags:
   - --disable-lcd-text
   - --disable-smooth-scrolling
   - --disable-canvas-aa
-  - --no-sandbox
   - --disable-dev-shm-usage
   - --disable-infobars
   - --disk-cache-size=0

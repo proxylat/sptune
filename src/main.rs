@@ -83,7 +83,13 @@ pub async fn get_token_auto(spotify: &mut AuthCodeSpotify, port: u16) -> Option<
   }
 
   let auth_url = spotify.get_authorize_url(false).ok()?;
-  println!("{}", auth_url);
+  println!("\nOpening browser for Spotify authorization...");
+  // On Windows cmd.exe splits '&' — tell user to paste into browser address bar, not terminal
+  println!("If it doesn't open, copy this URL into your browser:\n{}\n", auth_url);
+  #[cfg(windows)]
+  println!("(On Windows, paste into browser — don't run it in cmd)\n");
+  println!("Waiting for callback on http://127.0.0.1:{}/callback ...", port);
+  open_url(&auth_url);
 
   match redirect_uri_web_server(port) {
     Ok(path) => {
@@ -102,16 +108,44 @@ pub async fn get_token_auto(spotify: &mut AuthCodeSpotify, port: u16) -> Option<
   }
 }
 
+fn open_url(url: &str) {
+  #[cfg(target_os = "linux")]
+  let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+  #[cfg(target_os = "macos")]
+  let _ = std::process::Command::new("open").arg(url).spawn();
+  #[cfg(target_os = "windows")]
+  {
+    // ponytail: avoid cmd.exe '&' splitting — explorer/rundll32 take the URL as a single arg
+    if std::process::Command::new("rundll32")
+      .args(["url.dll,FileProtocolHandler", url])
+      .spawn()
+      .is_err()
+    {
+      let _ = std::process::Command::new("explorer").arg(url).spawn();
+    }
+  }
+  #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+  let _ = url;
+}
+
 async fn get_code_from_url(spotify: &mut AuthCodeSpotify, url: String) -> Option<Token> {
-  let code = spotify.parse_response_code(url.as_str())?;
-  spotify.request_token(code.as_str()).await.ok()?;
+  let code = spotify.parse_response_code(url.trim())?;
+  if let Err(e) = spotify.request_token(code.as_str()).await {
+    eprintln!("Failed to exchange code for token: {}", e);
+    return None;
+  }
   spotify.get_token().lock().await.unwrap().clone()
 }
 
-fn close_application() -> Result<()> {
+fn close_application(alt_screen: bool, enable_mouse: bool) -> Result<()> {
   disable_raw_mode()?;
   let mut stdout = io::stdout();
-  execute!(stdout, LeaveAlternateScreen, DisableMouseCapture)?;
+  if alt_screen {
+    execute!(stdout, LeaveAlternateScreen)?;
+  }
+  if enable_mouse {
+    execute!(stdout, DisableMouseCapture)?;
+  }
   Ok(())
 }
 
@@ -270,6 +304,7 @@ of the app. Beware that this comes at a CPU cost!",
   if let Some(saved) = SavedState::load() {
     if let Some(enabled) = saved.mouse_enabled {
       user_config.behavior.enable_mouse = enabled;
+      user_config.terminal.enable_mouse = enabled;
     }
     if let Some(name) = saved.theme_preset {
       if let Some(index) = theme_presets().iter().position(|(n, _)| *n == name) {
@@ -283,6 +318,7 @@ of the app. Beware that this comes at a CPU cost!",
     if saved.black_background == Some(true) {
       user_config.theme.background = Color::Rgb(0, 0, 0);
     }
+    user_config.apply_truecolor_downgrade();
     if let Some(seek_by_typing) = saved.seek_by_typing {
       user_config.behavior.seek_by_typing = seek_by_typing;
     }
@@ -297,9 +333,6 @@ of the app. Beware that this comes at a CPU cost!",
     }
     if let Some(show_date) = saved.show_date_added_column {
       user_config.behavior.show_date_added_column = show_date;
-    }
-    if let Some(resume_track) = saved.resume_track {
-      user_config.behavior.resume_track = resume_track;
     }
     if let Some(restore_settings) = saved.restore_settings {
       user_config.behavior.restore_settings = restore_settings;
@@ -321,9 +354,6 @@ of the app. Beware that this comes at a CPU cost!",
     }
     if let Some(enable_animations) = saved.enable_animations {
       user_config.behavior.enable_animations = enable_animations;
-    }
-    if let Some(show_liked_icon) = saved.show_liked_icon {
-      user_config.behavior.show_liked_icon = show_liked_icon;
     }
     restored_show_library = saved.show_library;
     restored_show_playlists = saved.show_playlists;
@@ -416,13 +446,6 @@ of the app. Beware that this comes at a CPU cost!",
           let _ = sync_io_tx.send(IoEvent::ChangeVolume(volume));
         }
       }
-      if user_config.behavior.resume_track {
-        if let Some(uri) = saved.track_uri {
-          if saved.is_playing != Some(false) {
-            let _ = sync_io_tx.send(IoEvent::StartPlayback(None, Some(vec![uri]), Some(0)));
-          }
-        }
-      }
     }
     // The UI must run in the "main" thread
     start_ui(user_config, &cloned_app).await?;
@@ -448,8 +471,10 @@ fn start_tokio(io_rx: std::sync::mpsc::Receiver<IoEvent>, network: &mut Network)
 async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> {
   // Terminal initialization
   let mut stdout = stdout();
-  execute!(stdout, EnterAlternateScreen)?;
-  if user_config.behavior.enable_mouse {
+  if user_config.terminal.alt_screen {
+    execute!(stdout, EnterAlternateScreen)?;
+  }
+  if user_config.terminal.enable_mouse {
     execute!(stdout, EnableMouseCapture)?;
   }
   enable_raw_mode()?;
@@ -662,7 +687,10 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
   }
 
   terminal.show_cursor()?;
-  close_application()?;
+  close_application(
+    user_config.terminal.alt_screen,
+    user_config.terminal.enable_mouse,
+  )?;
 
   Ok(())
 }

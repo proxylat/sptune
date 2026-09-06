@@ -455,8 +455,12 @@ pub fn get_percentage_width(width: u16, percentage: f32) -> u16 {
 }
 
 // Make better use of space on small terminals
-pub fn get_main_layout_margin(_app: &App) -> u16 {
-  0
+pub fn get_main_layout_margin(app: &App) -> u16 {
+  if app.size.height > SMALL_TERMINAL_HEIGHT {
+    1
+  } else {
+    0
+  }
 }
 
 // Thumb geometry for the website-style scrollbar, shared by rendering and
@@ -784,8 +788,8 @@ pub fn repeat_label(repeat: RepeatState) -> Option<String> {
 // Builds the playbar title string.
 // Playbar title: the trailing cells of the title text are the fullscreen
 // toggle (see handle_playbar_click). ASCII so every terminal renders it.
-pub fn build_playbar_title(play_title: &str, device_name: &str) -> String {
-  format!("{:-7} ({})——[ ]", play_title, device_name)
+pub fn build_playbar_title(_play_title: &str, device_name: &str) -> String {
+  format!("{:-7} ({})——[ ]", "Device", device_name)
 }
 
 // Which track-table contexts have a Date Added column (they carry added_at).
