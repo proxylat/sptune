@@ -12,6 +12,7 @@ mod ffi {
 
   pub const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
   pub const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+  pub const PROCESS_SET_QUOTA: u32 = 0x0100;
   pub const PROCESS_VM_READ: u32 = 0x0010;
   pub const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
 
@@ -110,7 +111,15 @@ mod ffi {
   pub const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
 
   pub unsafe fn with_process<R>(pid: u32, f: impl FnOnce(Handle) -> R) -> Option<R> {
-    let handle = OpenProcess(PROCESS_SUSPEND_RESUME, 0, pid);
+    with_process_access(pid, PROCESS_SUSPEND_RESUME, f)
+  }
+
+  pub unsafe fn with_process_access<R>(
+    pid: u32,
+    access: u32,
+    f: impl FnOnce(Handle) -> R,
+  ) -> Option<R> {
+    let handle = OpenProcess(access, 0, pid);
     if handle.is_null() {
       return None;
     }
@@ -142,26 +151,41 @@ pub fn disable_quick_edit() {
 }
 
 #[cfg(windows)]
-pub fn suspend_and_trim(pid: u32, cmd: &str) {
-  // NetworkService must stay responsive — skip entirely (user reported it was being suspended)
+pub fn trim_process(pid: u32, cmd: &str) {
+  // The ONLY exclusion in the whole policy: never trim the working set of
+  // the NetworkService utility process.
   if is_network_service(cmd) {
     return;
   }
-  suspend_only(pid, cmd);
-  trim_process(pid);
-}
-
-#[cfg(windows)]
-fn trim_process(pid: u32) {
-  // EmptyWorkingSet lives in psapi.dll (as K32EmptyWorkingSet forward in
-  // kernel32 on Win7+); resolve from psapi first, kernel32 as fallback.
+  // EmptyWorkingSet requires PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA
+  // on the handle — the suspend handle (PROCESS_SUSPEND_RESUME) gets
+  // rejected, which is why the working-set cleanup silently never ran.
   unsafe {
     let func = ffi::system_proc("psapi.dll", "EmptyWorkingSet")
       .or_else(|| ffi::system_proc("kernel32.dll", "EmptyWorkingSet"));
-    if let Some(empty_working_set) = func {
-      ffi::with_process(pid, |h| {
-        empty_working_set(h);
-      });
+    let ok = match func {
+      Some(empty_working_set) => {
+        ffi::with_process_access(
+          pid,
+          ffi::PROCESS_QUERY_INFORMATION | ffi::PROCESS_SET_QUOTA,
+          |h| empty_working_set(h),
+        )
+        .unwrap_or(0)
+          != 0
+      }
+      None => false,
+    };
+    if !ok {
+      // Fallback: PowerShell with a full-access handle.
+      let _ = std::process::Command::new("powershell")
+        .args([
+          "-NoProfile",
+          "-Command",
+          &format!(
+            "$p=Get-Process -Id {pid} -ErrorAction SilentlyContinue; if($p){{ Add-Type -MemberDefinition '[DllImport(\"psapi.dll\")] public static extern bool EmptyWorkingSet(IntPtr h);' -Name EWS -Namespace EWS -ErrorAction SilentlyContinue | Out-Null; [EWS.EWS]::EmptyWorkingSet($p.Handle) | Out-Null }}"
+          ),
+        ])
+        .output();
     }
   }
 }
@@ -288,10 +312,7 @@ pub fn descendants_of(root: u32) -> Vec<(u32, String)> {
 
 // Manual suspend (no trim): NtSuspendProcess only, so Resume restores the prior state.
 #[cfg(windows)]
-pub fn suspend_only(pid: u32, cmd: &str) {
-  if is_network_service(cmd) {
-    return;
-  }
+pub fn suspend_only(pid: u32) {
   unsafe {
     if let Some(nt_suspend) = ffi::system_proc("ntdll.dll", "NtSuspendProcess") {
       // NTSTATUS 0 = success; OpenProcess failure surfaces as None here and
@@ -373,12 +394,13 @@ pub fn find_root_pid() -> Option<u32> {
   candidates.into_iter().next()
 }
 
-// Sweep helper: suspend+trim, or trim only, for one freshly spawned child.
+// Sweep helper: suspend and/or trim one freshly spawned child.
 #[cfg(windows)]
 pub fn suspend_and_trim_child(pid: u32, cmd: &str, do_suspend: bool, do_trim: bool) {
   if do_suspend {
-    suspend_and_trim(pid, cmd);
-  } else if do_trim && !is_network_service(cmd) {
-    trim_process(pid);
+    suspend_only(pid);
+  }
+  if do_trim {
+    trim_process(pid, cmd);
   }
 }

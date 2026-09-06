@@ -47,15 +47,22 @@ pub fn apply_memory_limits_pids(pids: &[u32]) {
 }
 
 #[cfg(target_os = "linux")]
-pub fn suspend_and_trim(pid: u32, cmd: &str) {
-  // NetworkService must stay responsive — never STOP or trim it (user reported
-  // `--utility-sub-type=network.mojom.NetworkService` was being suspended).
-  if is_network_service(cmd) {
-    return;
-  }
+pub fn suspend_process(pid: u32) {
+  // No exclusions: every Spotify helper is suspended, NetworkService
+  // included — the only policy exception is its working set (see
+  // trim_process). The user traded connectivity for memory while suspended.
   let _ = std::process::Command::new("kill")
     .args(["-STOP", &pid.to_string()])
     .output();
+}
+
+#[cfg(target_os = "linux")]
+pub fn trim_process(pid: u32, cmd: &str) {
+  // The ONLY exclusion in the whole policy: never trim the working set of
+  // the NetworkService utility process.
+  if is_network_service(cmd) {
+    return;
+  }
   let _ = std::fs::write(format!("/proc/{pid}/clear_refs"), "1");
 }
 
@@ -113,13 +120,14 @@ pub fn descendants_of(root: u32) -> Vec<(u32, String)> {
   result
 }
 
-// Sweep helper: suspend+trim, or trim only, for one freshly spawned child.
+// Sweep helper: suspend and/or trim one freshly spawned child.
 #[cfg(target_os = "linux")]
 pub fn suspend_and_trim_child(pid: u32, cmd: &str, do_suspend: bool, do_trim: bool) {
   if do_suspend {
-    suspend_and_trim(pid, cmd);
-  } else if do_trim && !is_network_service(cmd) {
-    let _ = std::fs::write(format!("/proc/{pid}/clear_refs"), "1");
+    suspend_process(pid);
+  }
+  if do_trim {
+    trim_process(pid, cmd);
   }
 }
 
@@ -136,14 +144,18 @@ pub fn resume_children_of(root: u32) {
 
 #[cfg(target_os = "linux")]
 pub fn kill_tree(root: u32) {
-  for (pid, _) in descendants_of(root) {
+  // CONT before TERM: a SIGSTOPped process queues signals without handling
+  // them, so it would survive a plain SIGTERM forever.
+  let mut targets: Vec<u32> = descendants_of(root).into_iter().map(|(pid, _)| pid).collect();
+  targets.push(root);
+  for pid in targets {
+    let _ = std::process::Command::new("kill")
+      .args(["-CONT", &pid.to_string()])
+      .output();
     let _ = std::process::Command::new("kill")
       .args(["-TERM", &pid.to_string()])
       .output();
   }
-  let _ = std::process::Command::new("kill")
-    .args(["-TERM", &root.to_string()])
-    .output();
 }
 
 // Topmost process whose cmdline mentions spotify (its parent's does not) —

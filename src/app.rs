@@ -529,9 +529,6 @@ pub struct App {
   // Manual suspend state for the Spotify client's helper processes
   // (playbar button + "Suspend/Resume Process" settings row).
   pub processes_suspended: bool,
-  // True only when sptune spawned Spotify itself this session; drives the
-  // exit policy (kill the tree on exit vs. leave the user's player alone).
-  pub spotify_launched_by_sptune: bool,
   // Last track URI from the previous session (Resume Last Listening).
   pub saved_last_track: Option<String>,
   pub request_log_index: Option<usize>,
@@ -663,7 +660,6 @@ impl Default for App {
       theme_preset_index: None,
       dev_view: false,
       processes_suspended: false,
-      spotify_launched_by_sptune: false,
       saved_last_track: None,
       request_log: VecDeque::new(),
       request_log_index: None,

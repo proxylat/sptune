@@ -156,9 +156,10 @@ pub fn find_root_pid() -> Option<u32> {
   }
 }
 
-/// Manual suspend: freeze every Spotify helper process currently running
-/// (NetworkService kept alive so connectivity survives). Registry-deduped,
-/// so pids the auto sweeper already suspended are not touched twice.
+/// Manual suspend: freeze every Spotify helper process currently running,
+/// NetworkService included (only its working set is spared from trimming).
+/// Registry-deduped, so pids the auto sweeper already suspended are not
+/// touched twice.
 pub fn suspend_processes(root: u32) {
   sweep_processes(root, true, false);
 }
