@@ -434,6 +434,46 @@ of the app. Beware that this comes at a CPU cost!",
   // Launch the UI (async)
   } else {
     let cloned_app = Arc::clone(&app);
+    // Periodic sweeper: keeps the suspend/trim/mem-limit policy applied
+    // while the UI runs. Spotify keeps spawning helper processes for several
+    // seconds after the browser starts, and Spotify may not have been
+    // launched by sptune at all — a one-shot launch sweep can't cover either.
+    // The registry in platform::spotify keeps every pid suspend-once.
+    {
+      let sweeper_app = Arc::clone(&app);
+      std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(4));
+        let (auto_suspend, trim, mem_limit, manual_suspended) = {
+          let guard = sweeper_app.blocking_lock();
+          (
+            guard.user_config.spotify.suspend_children,
+            guard.user_config.spotify.trim_working_set,
+            guard.user_config.spotify.memory_limit_mb,
+            guard.processes_suspended,
+          )
+        };
+        let suspend = auto_suspend || manual_suspended;
+        if !(suspend || trim || mem_limit != 0) {
+          continue;
+        }
+        let Some(root) = crate::platform::spotify::find_root_pid() else {
+          continue;
+        };
+        if mem_limit != 0 {
+          #[cfg(target_os = "linux")]
+          {
+            // cgroup.procs writes are idempotent, so re-adding known pids is fine
+            let kids = crate::platform::linux::descendants_of(root);
+            if kids.is_empty() {
+              crate::platform::linux::apply_memory_limits_pids(&[root]);
+            } else {
+              crate::platform::linux::apply_memory_limits(&kids);
+            }
+          }
+        }
+        crate::platform::spotify::sweep_processes(root, suspend, trim);
+      });
+    }
     std::thread::spawn(move || {
       let mut network = Network::new(spotify, client_config, &app);
       start_tokio(sync_io_rx, &mut network);

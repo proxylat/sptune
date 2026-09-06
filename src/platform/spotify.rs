@@ -68,62 +68,9 @@ pub fn launch(cfg: &SpotifyConfig) -> anyhow::Result<std::process::Child> {
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
   }
   let child = cmd.spawn()?;
-  // Spotify is multi-process (Chromium): renderer/utility children keep
-  // spawning for several seconds after the browser process starts, so one
-  // deferred pass misses late arrivals. Sweep repeatedly; each pass only
-  // touches new pids (Windows NtSuspendProcess is counted, so re-suspending
-  // an already-suspended child would break its later resume).
-  let root = child.id();
-  let suspend = cfg.suspend_children;
-  let trim = cfg.trim_working_set;
-  let mem_limit = cfg.memory_limit_mb;
-  if suspend || trim || mem_limit != 0 {
-    std::thread::spawn(move || {
-      let mut handled: std::collections::HashSet<u32> = std::collections::HashSet::new();
-      for delay in [1_000u64, 3_000, 6_000, 10_000, 15_000] {
-        std::thread::sleep(std::time::Duration::from_millis(delay));
-        #[cfg(target_os = "linux")]
-        {
-          let kids = crate::platform::linux::descendants_of(root);
-          let fresh: Vec<(u32, String)> = kids
-            .into_iter()
-            .filter(|(pid, _)| handled.insert(*pid))
-            .collect();
-          if mem_limit != 0 {
-            if !fresh.is_empty() {
-              crate::platform::linux::apply_memory_limits(&fresh);
-            } else if handled.is_empty() {
-              crate::platform::linux::apply_memory_limits_pids(&[root]);
-              handled.insert(root);
-            }
-          }
-          if suspend || trim {
-            for (pid, cmd) in fresh {
-              crate::platform::linux::suspend_and_trim_child(pid, &cmd, suspend, trim);
-            }
-          }
-        }
-        #[cfg(windows)]
-        {
-          let kids = crate::platform::windows::descendants_of(root);
-          let fresh: Vec<(u32, String)> = kids
-            .into_iter()
-            .filter(|(pid, _)| handled.insert(*pid))
-            .collect();
-          if mem_limit != 0 && handled.is_empty() {
-            crate::platform::windows::apply_memory_limits(&[root]);
-            handled.insert(root);
-          }
-          if suspend || trim {
-            for (pid, cmd) in fresh {
-              crate::platform::windows::suspend_and_trim_child(pid, &cmd, suspend, trim);
-            }
-          }
-        }
-      }
-    });
-  }
-  // Keep for non-linux/windows builds so cfg fields are considered used.
+  // The suspend/trim/mem-limit policy is enforced by the periodic sweeper
+  // thread started in main (it also covers externally launched Spotify and
+  // children that spawn seconds after the browser process).
   #[cfg(not(any(target_os = "linux", windows)))]
   {
     let _ = (cfg.memory_limit_mb, cfg.suspend_children, cfg.trim_working_set);
@@ -131,9 +78,66 @@ pub fn launch(cfg: &SpotifyConfig) -> anyhow::Result<std::process::Child> {
   Ok(child)
 }
 
-// --- Manual suspend/resume/exit handling (playbar button + settings toggle) ---
+// --- Suspend/resume/exit handling (auto sweeper + playbar/settings toggle) ---
 
-// These are best-effort no-ops on platforms without the helpers.
+// Pids this process has already suspended. Windows NtSuspendProcess is
+// reference-counted, so re-suspending an already-suspended pid would make a
+// later single resume leave it half-frozen; every suspend path goes through
+// the registry so each pid is only ever suspended once per sptune session.
+fn handled_registry() -> &'static std::sync::Mutex<std::collections::HashSet<u32>> {
+  use std::sync::{Mutex, OnceLock};
+  static REGISTRY: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
+  REGISTRY.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// One sweep pass: suspend (and optionally trim) every Spotify helper
+/// process under `root` that hasn't been handled yet. Safe to call
+/// repeatedly — late-spawning children get caught on a later pass, already
+/// suspended ones are skipped. Returns how many pids were touched.
+pub fn sweep_processes(root: u32, do_suspend: bool, do_trim: bool) -> usize {
+  let descendants = descendants(root);
+  let mut fresh = Vec::new();
+  {
+    let mut registry = handled_registry().lock().unwrap();
+    for (pid, cmd) in descendants {
+      if registry.insert(pid) {
+        fresh.push((pid, cmd));
+      }
+    }
+  }
+  let touched = fresh.len();
+  for (pid, cmd) in fresh {
+    #[cfg(target_os = "linux")]
+    {
+      crate::platform::linux::suspend_and_trim_child(pid, &cmd, do_suspend, do_trim);
+    }
+    #[cfg(windows)]
+    {
+      crate::platform::windows::suspend_and_trim_child(pid, &cmd, do_suspend, do_trim);
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+      let _ = (&pid, &cmd, &do_suspend, &do_trim);
+    }
+  }
+  touched
+}
+
+fn descendants(root: u32) -> Vec<(u32, String)> {
+  #[cfg(target_os = "linux")]
+  {
+    return crate::platform::linux::descendants_of(root);
+  }
+  #[cfg(windows)]
+  {
+    return crate::platform::windows::descendants_of(root);
+  }
+  #[cfg(not(any(target_os = "linux", windows)))]
+  {
+    let _ = root;
+    Vec::new()
+  }
+}
 
 /// Find the running Spotify browser (root) process, whether or not sptune
 /// launched it.
@@ -152,45 +156,25 @@ pub fn find_root_pid() -> Option<u32> {
   }
 }
 
-/// STOP/NtSuspendProcess every Spotify helper process (NetworkService kept
-/// alive so connectivity survives).
+/// Manual suspend: freeze every Spotify helper process currently running
+/// (NetworkService kept alive so connectivity survives). Registry-deduped,
+/// so pids the auto sweeper already suspended are not touched twice.
 pub fn suspend_processes(root: u32) {
-  #[cfg(target_os = "linux")]
-  {
-    for (pid, cmd) in crate::platform::linux::descendants_of(root) {
-      crate::platform::linux::suspend_only(pid, &cmd);
-    }
-    return;
-  }
-  #[cfg(windows)]
-  {
-    for (pid, cmd) in crate::platform::windows::descendants_of(root) {
-      crate::platform::windows::suspend_only(pid, &cmd);
-    }
-    return;
-  }
-  #[cfg(not(any(target_os = "linux", windows)))]
-  {
-    let _ = root;
-  }
+  sweep_processes(root, true, false);
 }
 
-/// CONT/NtResumeProcess every Spotify helper process.
+/// Resume everything sptune suspended this session, then clear the registry
+/// so a later manual suspend starts fresh.
 pub fn resume_processes(root: u32) {
   #[cfg(target_os = "linux")]
   {
     crate::platform::linux::resume_children_of(root);
-    return;
   }
   #[cfg(windows)]
   {
     crate::platform::windows::resume_children_of(root);
-    return;
   }
-  #[cfg(not(any(target_os = "linux", windows)))]
-  {
-    let _ = root;
-  }
+  handled_registry().lock().unwrap().clear();
 }
 
 /// Terminate the whole Spotify tree (used on exit when sptune launched it).

@@ -113,17 +113,6 @@ pub fn descendants_of(root: u32) -> Vec<(u32, String)> {
   result
 }
 
-// Manual suspend (no trim): STOP only, so Resume restores exactly the prior state.
-#[cfg(target_os = "linux")]
-pub fn suspend_only(pid: u32, cmd: &str) {
-  if is_network_service(cmd) {
-    return;
-  }
-  let _ = std::process::Command::new("kill")
-    .args(["-STOP", &pid.to_string()])
-    .output();
-}
-
 // Sweep helper: suspend+trim, or trim only, for one freshly spawned child.
 #[cfg(target_os = "linux")]
 pub fn suspend_and_trim_child(pid: u32, cmd: &str, do_suspend: bool, do_trim: bool) {

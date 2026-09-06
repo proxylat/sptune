@@ -11,6 +11,9 @@ mod ffi {
   pub type Handle = *mut c_void;
 
   pub const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+  pub const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+  pub const PROCESS_VM_READ: u32 = 0x0010;
+  pub const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
 
   #[link(name = "kernel32")]
   extern "system" {
@@ -21,6 +24,68 @@ mod ffi {
     pub fn GetConsoleMode(hConsoleHandle: Handle, lpMode: *mut u32) -> i32;
     pub fn SetConsoleMode(hConsoleHandle: Handle, dwMode: u32) -> i32;
     pub fn GetStdHandle(nStdHandle: u32) -> Handle;
+    pub fn ReadProcessMemory(
+      hProcess: Handle,
+      lpBaseAddress: *const c_void,
+      lpBuffer: *mut c_void,
+      nSize: usize,
+      lpNumberOfBytesRead: *mut usize,
+    ) -> i32;
+    pub fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> Handle;
+    pub fn Process32FirstW(hSnapshot: Handle, lppe: *mut ProcessEntry32W) -> i32;
+    pub fn Process32NextW(hSnapshot: Handle, lppe: *mut ProcessEntry32W) -> i32;
+  }
+
+  /// 5-arg resolver for NtQueryInformationProcess (signature differs from the
+  /// 1-arg suspend/resume/trim helpers).
+  pub unsafe fn proc5(
+    module: &str,
+    name: &str,
+  ) -> Option<unsafe extern "system" fn(Handle, u32, *mut c_void, u32, *mut u32) -> i32> {
+    let module = std::ffi::CString::new(module).ok()?;
+    let name = std::ffi::CString::new(name).ok()?;
+    let handle = GetModuleHandleA(module.as_ptr());
+    if handle.is_null() {
+      return None;
+    }
+    let proc = GetProcAddress(handle, name.as_ptr());
+    if proc.is_null() {
+      return None;
+    }
+    Some(std::mem::transmute(proc))
+  }
+
+  /// Minimal Toolhelp process entry (x64 layout: ULONG_PTR member forces
+  /// 8-byte alignment, so th32DefaultHeapID starts at offset 16).
+  #[repr(C)]
+  pub struct ProcessEntry32W {
+    pub dw_size: u32,
+    pub cnt_usage: u32,
+    pub th32_process_id: u32,
+    pub th32_default_heap_id: usize,
+    pub th32_module_id: u32,
+    pub cnt_threads: u32,
+    pub th32_parent_process_id: u32,
+    pub pc_pri_class_base: i32,
+    pub dw_flags: u32,
+    pub sz_exe_file: [u16; 260],
+  }
+
+  impl ProcessEntry32W {
+    pub fn new() -> Self {
+      Self {
+        dw_size: std::mem::size_of::<Self>() as u32,
+        cnt_usage: 0,
+        th32_process_id: 0,
+        th32_default_heap_id: 0,
+        th32_module_id: 0,
+        cnt_threads: 0,
+        th32_parent_process_id: 0,
+        pc_pri_class_base: 0,
+        dw_flags: 0,
+        sz_exe_file: [0; 260],
+      }
+    }
   }
 
   /// Resolve `NtSuspendProcess` / `NtResumeProcess` / `K32EmptyWorkingSet`
@@ -77,14 +142,6 @@ pub fn disable_quick_edit() {
 }
 
 #[cfg(windows)]
-pub fn apply_memory_limits(_pids: &[u32]) {
-  // Real impl: CreateJobObject + SetInformationJobObject(JOBOBJECT_EXTENDED_LIMIT_INFORMATION { ProcessMemoryLimit = 150<<20 })
-  // + AssignProcessToJobObject for each pid where !is_network_service(cmd). NetworkService skipped.
-  // Keeping as no-op for now — requires Job API and per-pid command line; cgroup-style
-  // limit is Linux-only. Suspend/trim is the user-visible toggle on Windows.
-}
-
-#[cfg(windows)]
 pub fn suspend_and_trim(pid: u32, cmd: &str) {
   // NetworkService must stay responsive — skip entirely (user reported it was being suspended)
   if is_network_service(cmd) {
@@ -109,54 +166,118 @@ fn trim_process(pid: u32) {
   }
 }
 
+/// All processes as (pid, ppid, exe name) from a single Toolhelp snapshot —
+/// in-process, no shells, no WMI, no encoding pitfalls.
 #[cfg(windows)]
-fn ppid_map_via_powershell() -> Option<(std::collections::HashMap<u32, Vec<u32>>, std::collections::HashMap<u32, String>)> {
-  let out = std::process::Command::new("powershell")
-    .args([
-      "-NoProfile",
-      "-Command",
-      "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)|$($_.ParentProcessId)|$($_.CommandLine)\" }",
-    ])
-    .output()
-    .ok()?;
-  if !out.status.success() {
-    return None;
-  }
-  let text = String::from_utf8_lossy(&out.stdout);
-  let mut ppid_map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
-  let mut cmd_map: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-  for line in text.lines() {
-    let line = line.trim();
-    if line.is_empty() {
-      continue;
+fn process_snapshot() -> Vec<(u32, u32, String)> {
+  unsafe {
+    let snapshot = ffi::CreateToolhelp32Snapshot(ffi::TH32CS_SNAPPROCESS, 0);
+    if snapshot.is_null() || snapshot as isize == -1 {
+      return Vec::new();
     }
-    let mut parts = line.splitn(3, '|');
-    let pid_s = parts.next()?;
-    let ppid_s = parts.next()?;
-    let cmd = parts.next().unwrap_or("").to_string();
-    if let (Ok(pid), Ok(ppid)) = (pid_s.trim().parse::<u32>(), ppid_s.trim().parse::<u32>()) {
-      ppid_map.entry(ppid).or_default().push(pid);
-      cmd_map.insert(pid, if cmd == "null" || cmd == "" { String::new() } else { cmd });
+    let mut out = Vec::new();
+    let mut entry = ffi::ProcessEntry32W::new();
+    if ffi::Process32FirstW(snapshot, &mut entry) != 0 {
+      loop {
+        let len = entry.sz_exe_file.iter().position(|&c| c == 0).unwrap_or(260);
+        let exe = String::from_utf16_lossy(&entry.sz_exe_file[..len]);
+        out.push((entry.th32_process_id, entry.th32_parent_process_id, exe));
+        if ffi::Process32NextW(snapshot, &mut entry) == 0 {
+          break;
+        }
+      }
     }
+    ffi::CloseHandle(snapshot);
+    out
   }
-  Some((ppid_map, cmd_map))
 }
 
+/// Read a process's command line via PEB -> ProcessParameters (x64 offsets),
+/// so the NetworkService exclusion works without WMI/PowerShell.
+#[cfg(windows)]
+fn cmdline_of_pid(pid: u32) -> Option<String> {
+  use std::ffi::c_void;
+  unsafe {
+    let handle = ffi::OpenProcess(ffi::PROCESS_QUERY_INFORMATION | ffi::PROCESS_VM_READ, 0, pid);
+    if handle.is_null() {
+      return None;
+    }
+    let out = (|| {
+      let nt_query = ffi::proc5("ntdll.dll", "NtQueryInformationProcess")?;
+      let read = |addr: usize, buf: &mut [u8]| -> bool {
+        let mut n: usize = 0;
+        ffi::ReadProcessMemory(
+          handle,
+          addr as *const c_void,
+          buf.as_mut_ptr() as *mut c_void,
+          buf.len(),
+          &mut n,
+        ) != 0 && n == buf.len()
+      };
+      // PROCESS_BASIC_INFORMATION: PebBaseAddress at offset 8 (x64)
+      let mut pbi = [0u8; 48];
+      let mut ret_len: u32 = 0;
+      if nt_query(handle, 0, pbi.as_mut_ptr() as *mut c_void, 48, &mut ret_len) != 0 {
+        return None;
+      }
+      let peb = usize::from_le_bytes(pbi[8..16].try_into().ok()?);
+      if peb == 0 {
+        return None;
+      }
+      // PEB: ProcessParameters pointer at 0x20 (x64)
+      let mut params_bytes = [0u8; 8];
+      if !read(peb + 0x20, &mut params_bytes) {
+        return None;
+      }
+      let params = usize::from_le_bytes(params_bytes);
+      if params == 0 {
+        return None;
+      }
+      // RTL_USER_PROCESS_PARAMETERS: CommandLine UNICODE_STRING at 0x70 (x64)
+      let mut us = [0u8; 16];
+      if !read(params + 0x70, &mut us) {
+        return None;
+      }
+      let len = u16::from_le_bytes(us[0..2].try_into().ok()?) as usize;
+      let buffer = usize::from_le_bytes(us[8..16].try_into().ok()?);
+      if len == 0 || buffer == 0 {
+        return Some(String::new());
+      }
+      let mut raw = vec![0u8; len];
+      if !read(buffer, &mut raw) {
+        return None;
+      }
+      let wide: Vec<u16> = raw
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+      Some(String::from_utf16_lossy(&wide))
+    })();
+    ffi::CloseHandle(handle);
+    out
+  }
+}
+
+// Children of `root` as (pid, command line), from the Toolhelp snapshot.
+// Command lines are read per child only so the NetworkService exclusion
+// keeps working without WMI.
 #[cfg(windows)]
 pub fn descendants_of(root: u32) -> Vec<(u32, String)> {
-  let Some((ppid_map, cmd_map)) = ppid_map_via_powershell() else {
-    return Vec::new();
-  };
+  let snapshot = process_snapshot();
+  let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+  for (pid, ppid, _) in &snapshot {
+    children.entry(*ppid).or_default().push(*pid);
+  }
   let mut result = Vec::new();
-  let mut stack = vec![root];
   let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
   visited.insert(root);
+  let mut stack = vec![root];
   while let Some(cur) = stack.pop() {
-    if let Some(children) = ppid_map.get(&cur) {
-      for &child in children {
+    if let Some(kids) = children.get(&cur) {
+      for &child in kids {
         if visited.insert(child) {
           stack.push(child);
-          let cmd = cmd_map.get(&child).cloned().unwrap_or_default();
+          let cmd = cmdline_of_pid(child).unwrap_or_default();
           result.push((child, cmd));
         }
       }
@@ -173,23 +294,51 @@ pub fn suspend_only(pid: u32, cmd: &str) {
   }
   unsafe {
     if let Some(nt_suspend) = ffi::system_proc("ntdll.dll", "NtSuspendProcess") {
-      ffi::with_process(pid, |h| {
-        nt_suspend(h);
-      });
+      // NTSTATUS 0 = success; OpenProcess failure surfaces as None here and
+      // must fall through to the PowerShell fallback, not count as success.
+      match ffi::with_process(pid, |h| nt_suspend(h)) {
+        Some(0) => return,
+        _ => {}
+      }
     }
   }
+  // Fallback: the old PowerShell NtSuspendProcess (slow, ~1 shell spawn, but
+  // works even if the ntdll resolution path ever fails).
+  let _ = std::process::Command::new("powershell")
+    .args([
+      "-NoProfile",
+      "-Command",
+      &format!(
+        "$p=Get-Process -Id {pid} -ErrorAction SilentlyContinue; if($p){{ Add-Type -MemberDefinition '[DllImport(\"ntdll.dll\")] public static extern int NtSuspendProcess(IntPtr h);' -Name NSS -Namespace NSS -ErrorAction SilentlyContinue | Out-Null; [NSS.NSS]::NtSuspendProcess($p.Handle) | Out-Null }}"
+      ),
+    ])
+    .output();
 }
 
 #[cfg(windows)]
 pub fn resume_children_of(root: u32) {
+  let mut ffi_ok = true;
   unsafe {
     if let Some(nt_resume) = ffi::system_proc("ntdll.dll", "NtResumeProcess") {
       for (pid, _) in descendants_of(root) {
-        ffi::with_process(pid, |h| {
-          nt_resume(h);
-        });
+        if ffi::with_process(pid, |h| nt_resume(h)).unwrap_or(-1) != 0 {
+          ffi_ok = false;
+        }
       }
+    } else {
+      ffi_ok = false;
     }
+  }
+  if !ffi_ok {
+    let _ = std::process::Command::new("powershell")
+      .args([
+        "-NoProfile",
+        "-Command",
+        &format!(
+          "Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -match 'Spotify' }} | ForEach-Object {{ $p=Get-Process -Id $($_.ProcessId) -ErrorAction SilentlyContinue; if($p){{ Add-Type -MemberDefinition '[DllImport(\"ntdll.dll\")] public static extern int NtResumeProcess(IntPtr h);' -Name NRP -Namespace NRP -ErrorAction SilentlyContinue | Out-Null; [NRP.NRP]::NtResumeProcess($p.Handle) | Out-Null }}"
+        ),
+      ])
+      .output();
   }
 }
 
@@ -201,31 +350,27 @@ pub fn kill_tree(root: u32) {
     .output();
 }
 
-// Topmost process whose command line mentions Spotify.exe (its parent's does
-// not) — the Chromium browser process sptune would have launched.
+// Topmost process whose exe is Spotify.exe and whose parent's is not — the
+// Chromium browser process, whether sptune launched it or the user did.
 #[cfg(windows)]
 pub fn find_root_pid() -> Option<u32> {
-  let (ppid_map, cmd_map) = ppid_map_via_powershell()?;
-  let is_spotify = |pid: u32| {
-    cmd_map
-      .get(&pid)
-      .map(|c| c.to_lowercase().contains("spotify.exe"))
+  let snapshot = process_snapshot();
+  let is_spotify_pid = |pid: u32| {
+    snapshot
+      .iter()
+      .find(|(p, _, _)| *p == pid)
+      .map(|(_, _, exe)| exe.to_lowercase().contains("spotify.exe"))
       .unwrap_or(false)
   };
-  let mut candidates: Vec<u32> = ppid_map
-    .values()
-    .flatten()
-    .copied()
-    .filter(|&pid| is_spotify(pid))
+  let mut candidates: Vec<u32> = snapshot
+    .iter()
+    .filter(|(_, ppid, exe)| {
+      exe.to_lowercase().contains("spotify.exe") && !is_spotify_pid(*ppid)
+    })
+    .map(|(pid, _, _)| *pid)
     .collect();
   candidates.sort_unstable();
-  candidates.into_iter().find(|&pid| {
-    ppid_map
-      .iter()
-      .find(|(_, kids)| kids.contains(&pid))
-      .map(|(ppid, _)| !is_spotify(*ppid))
-      .unwrap_or(true)
-  })
+  candidates.into_iter().next()
 }
 
 // Sweep helper: suspend+trim, or trim only, for one freshly spawned child.
