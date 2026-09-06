@@ -113,17 +113,6 @@ pub fn descendants_of(root: u32) -> Vec<(u32, String)> {
   result
 }
 
-#[cfg(target_os = "linux")]
-pub fn suspend_children_of(root: u32, do_suspend: bool, do_trim: bool) {
-  for (pid, cmd) in descendants_of(root) {
-    if do_suspend {
-      suspend_and_trim(pid, &cmd);
-    } else if do_trim && !is_network_service(&cmd) {
-      let _ = std::fs::write(format!("/proc/{pid}/clear_refs"), "1");
-    }
-  }
-}
-
 // Manual suspend (no trim): STOP only, so Resume restores exactly the prior state.
 #[cfg(target_os = "linux")]
 pub fn suspend_only(pid: u32, cmd: &str) {
@@ -133,6 +122,16 @@ pub fn suspend_only(pid: u32, cmd: &str) {
   let _ = std::process::Command::new("kill")
     .args(["-STOP", &pid.to_string()])
     .output();
+}
+
+// Sweep helper: suspend+trim, or trim only, for one freshly spawned child.
+#[cfg(target_os = "linux")]
+pub fn suspend_and_trim_child(pid: u32, cmd: &str, do_suspend: bool, do_trim: bool) {
+  if do_suspend {
+    suspend_and_trim(pid, cmd);
+  } else if do_trim && !is_network_service(cmd) {
+    let _ = std::fs::write(format!("/proc/{pid}/clear_refs"), "1");
+  }
 }
 
 // CONT is a no-op on running processes, so sweeping every descendant (even

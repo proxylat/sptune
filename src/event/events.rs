@@ -7,12 +7,17 @@ use std::{sync::mpsc, thread, time::Duration};
 pub struct EventConfig {
   /// The tick rate at which the application will sent an tick event.
   pub tick_rate: Duration,
+  /// Windows-only calibration for mouse rows: some conhost/ConPTY builds
+  /// deliver clicks offset from the drawn rows ("click lower than the
+  /// button"). Positive values shift reported rows down. 0 = no correction.
+  pub mouse_y_offset: i16,
 }
 
 impl Default for EventConfig {
   fn default() -> EventConfig {
     EventConfig {
       tick_rate: Duration::from_millis(250),
+      mouse_y_offset: 0,
     }
   }
 }
@@ -41,9 +46,10 @@ pub struct Events {
 
 impl Events {
   /// Constructs an new instance of `Events` with the default config.
-  pub fn new(tick_rate: u64) -> Events {
+  pub fn new(tick_rate: u64, mouse_y_offset: i16) -> Events {
     Events::with_config(EventConfig {
       tick_rate: Duration::from_millis(tick_rate),
+      mouse_y_offset,
       ..Default::default()
     })
   }
@@ -72,6 +78,14 @@ impl Events {
           // redraw, so a busy pointer (drag/move flood) would otherwise queue
           // hundreds of frames and lag the screen by seconds.
           batch.clear();
+          // Windows ConPTY/conhost builds can queue two identical Press
+          // records for one physical keypress ("ride" -> "rriiddee"); an
+          // identical Press read immediately after itself within one drain
+          // is synthesized, so drop it. Real typing never lands two presses
+          // in the same microsecond drain, and conhost coalesces held-key
+          // auto-repeat into a single record, which keeps this safe.
+          #[cfg(windows)]
+          let mut prev_press: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> = None;
           loop {
             let ev = match event::read() {
               Ok(ev) => match ev {
@@ -83,13 +97,36 @@ impl Events {
                   ) {
                     continue;
                   }
+                  #[cfg(windows)]
+                  {
+                    let id = (key.code, key.modifiers);
+                    if matches!(key.kind, event::KeyEventKind::Press) {
+                      if prev_press == Some(id) {
+                        continue; // synthesized duplicate of the previous read
+                      }
+                      prev_press = Some(id);
+                    } else {
+                      prev_press = None;
+                    }
+                  }
                   Event::Input(InputEvent::Key(Key::from(key)))
                 }
-                event::Event::Mouse(mouse) => Event::Input(InputEvent::Mouse(mouse)),
+                event::Event::Mouse(mut mouse) => {
+                  if config.mouse_y_offset != 0 {
+                    mouse.row = (mouse.row as i16 + config.mouse_y_offset).max(0) as u16;
+                  }
+                  Event::Input(InputEvent::Mouse(mouse))
+                }
                 _ => continue,
               },
               Err(_) => break,
             };
+            #[cfg(windows)]
+            {
+              if !matches!(&ev, Event::Input(InputEvent::Key(_))) {
+                prev_press = None;
+              }
+            }
             push_coalesced(&mut batch, ev);
             match event::poll(Duration::from_millis(0)) {
               Ok(more) => {

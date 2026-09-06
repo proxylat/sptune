@@ -425,6 +425,7 @@ pub struct TerminalConfigString {
   pub unicode_borders: Option<bool>,
   pub truecolor: Option<bool>,
   pub alt_screen: Option<bool>,
+  pub mouse_y_offset: Option<i16>,
 }
 
 #[derive(Clone, Debug)]
@@ -434,6 +435,8 @@ pub struct TerminalConfig {
   pub unicode_borders: bool,
   pub truecolor: bool,
   pub alt_screen: bool,
+  // Windows-only mouse row calibration (see EventConfig::mouse_y_offset).
+  pub mouse_y_offset: i16,
 }
 
 impl Default for TerminalConfig {
@@ -444,6 +447,7 @@ impl Default for TerminalConfig {
       unicode_borders: true,
       truecolor: true,
       alt_screen: true,
+      mouse_y_offset: 0,
     }
   }
 }
@@ -799,6 +803,9 @@ impl UserConfig {
     if let Some(v) = t.alt_screen {
       self.terminal.alt_screen = v;
     }
+    if let Some(v) = t.mouse_y_offset {
+      self.terminal.mouse_y_offset = v;
+    }
   }
 
   fn apply_terminal_override(&mut self, t: &TerminalConfigString) {
@@ -817,6 +824,9 @@ impl UserConfig {
     }
     if let Some(v) = t.alt_screen {
       self.terminal.alt_screen = v;
+    }
+    if let Some(v) = t.mouse_y_offset {
+      self.terminal.mouse_y_offset = v;
     }
   }
 

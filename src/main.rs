@@ -498,7 +498,13 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
   terminal.clear()?;
   terminal.hide_cursor()?;
 
-  let events = event::Events::new(user_config.behavior.tick_rate_milliseconds);
+  #[cfg(windows)]
+  crate::platform::windows::disable_quick_edit();
+
+  let events = event::Events::new(
+    user_config.behavior.tick_rate_milliseconds,
+    user_config.terminal.mouse_y_offset,
+  );
 
   // play music on, if not send them to the device selection view
 

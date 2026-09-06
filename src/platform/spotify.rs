@@ -68,36 +68,57 @@ pub fn launch(cfg: &SpotifyConfig) -> anyhow::Result<std::process::Child> {
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
   }
   let child = cmd.spawn()?;
-  // Spotify is multi-process (Chromium). Its renderer/utility children appear
-  // a few seconds after the browser process starts, so defer handling.
+  // Spotify is multi-process (Chromium): renderer/utility children keep
+  // spawning for several seconds after the browser process starts, so one
+  // deferred pass misses late arrivals. Sweep repeatedly; each pass only
+  // touches new pids (Windows NtSuspendProcess is counted, so re-suspending
+  // an already-suspended child would break its later resume).
   let root = child.id();
   let suspend = cfg.suspend_children;
   let trim = cfg.trim_working_set;
   let mem_limit = cfg.memory_limit_mb;
   if suspend || trim || mem_limit != 0 {
     std::thread::spawn(move || {
-      std::thread::sleep(std::time::Duration::from_millis(2500));
-      #[cfg(target_os = "linux")]
-      {
-        if mem_limit != 0 {
+      let mut handled: std::collections::HashSet<u32> = std::collections::HashSet::new();
+      for delay in [1_000u64, 3_000, 6_000, 10_000, 15_000] {
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+        #[cfg(target_os = "linux")]
+        {
           let kids = crate::platform::linux::descendants_of(root);
-          if !kids.is_empty() {
-            crate::platform::linux::apply_memory_limits(&kids);
-          } else {
-            crate::platform::linux::apply_memory_limits_pids(&[root]);
+          let fresh: Vec<(u32, String)> = kids
+            .into_iter()
+            .filter(|(pid, _)| handled.insert(*pid))
+            .collect();
+          if mem_limit != 0 {
+            if !fresh.is_empty() {
+              crate::platform::linux::apply_memory_limits(&fresh);
+            } else if handled.is_empty() {
+              crate::platform::linux::apply_memory_limits_pids(&[root]);
+              handled.insert(root);
+            }
+          }
+          if suspend || trim {
+            for (pid, cmd) in fresh {
+              crate::platform::linux::suspend_and_trim_child(pid, &cmd, suspend, trim);
+            }
           }
         }
-        if suspend || trim {
-          crate::platform::linux::suspend_children_of(root, suspend, trim);
-        }
-      }
-      #[cfg(windows)]
-      {
-        if mem_limit != 0 {
-          crate::platform::windows::apply_memory_limits(&[root]);
-        }
-        if suspend || trim {
-          crate::platform::windows::suspend_children_of(root, suspend, trim);
+        #[cfg(windows)]
+        {
+          let kids = crate::platform::windows::descendants_of(root);
+          let fresh: Vec<(u32, String)> = kids
+            .into_iter()
+            .filter(|(pid, _)| handled.insert(*pid))
+            .collect();
+          if mem_limit != 0 && handled.is_empty() {
+            crate::platform::windows::apply_memory_limits(&[root]);
+            handled.insert(root);
+          }
+          if suspend || trim {
+            for (pid, cmd) in fresh {
+              crate::platform::windows::suspend_and_trim_child(pid, &cmd, suspend, trim);
+            }
+          }
         }
       }
     });
