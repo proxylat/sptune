@@ -90,37 +90,62 @@ fn handled_registry() -> &'static std::sync::Mutex<std::collections::HashSet<u32
   REGISTRY.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
-/// One sweep pass: suspend (and optionally trim) every Spotify helper
-/// process under `root` that hasn't been handled yet. Safe to call
-/// repeatedly — late-spawning children get caught on a later pass, already
-/// suspended ones are skipped. Returns how many pids were touched.
+/// One sweep pass over the Spotify tree under `root`:
+/// 1. `--type=renderer` helpers are killed outright (they are the memory
+///    hogs; Spotify respawns them on demand).
+/// 2. every other child is suspended (and trimmed when enabled) — EXCEPT the
+///    NetworkService utility process, which is never suspended and never
+///    trimmed.
+/// Safe to call repeatedly — late-spawning children get caught on a later
+/// pass, already-handled ones are skipped. Returns how many pids were touched.
 pub fn sweep_processes(root: u32, do_suspend: bool, do_trim: bool) -> usize {
-  let descendants = descendants(root);
-  let mut fresh = Vec::new();
-  {
-    let mut registry = handled_registry().lock().unwrap();
-    for (pid, cmd) in descendants {
-      if registry.insert(pid) {
-        fresh.push((pid, cmd));
+  let is_network = crate::platform::chromium_flags::is_network_service;
+  let mut registry = handled_registry().lock().unwrap();
+  let mut touched = 0;
+  for (pid, cmd) in descendants(root) {
+    if is_network(&cmd) {
+      // The one exclusion: never suspended, never trimmed.
+      continue;
+    }
+    if do_suspend && cmd.contains("--type=renderer") {
+      kill_process(pid);
+      registry.remove(&pid); // a respawned renderer gets a new pid anyway
+      touched += 1;
+      continue;
+    }
+    if registry.insert(pid) {
+      touched += 1;
+      if do_suspend {
+        #[cfg(target_os = "linux")]
+        crate::platform::linux::suspend_process(pid);
+        #[cfg(windows)]
+        crate::platform::windows::suspend_only(pid);
+      }
+      if do_trim {
+        #[cfg(target_os = "linux")]
+        crate::platform::linux::trim_process(pid, &cmd);
+        #[cfg(windows)]
+        crate::platform::windows::trim_process(pid, &cmd);
       }
     }
   }
-  let touched = fresh.len();
-  for (pid, cmd) in fresh {
-    #[cfg(target_os = "linux")]
-    {
-      crate::platform::linux::suspend_and_trim_child(pid, &cmd, do_suspend, do_trim);
-    }
-    #[cfg(windows)]
-    {
-      crate::platform::windows::suspend_and_trim_child(pid, &cmd, do_suspend, do_trim);
-    }
-    #[cfg(not(any(target_os = "linux", windows)))]
-    {
-      let _ = (&pid, &cmd, &do_suspend, &do_trim);
-    }
-  }
   touched
+}
+
+/// Terminate one process outright (renderer cleanup).
+fn kill_process(pid: u32) {
+  #[cfg(target_os = "linux")]
+  {
+    crate::platform::linux::kill_process(pid);
+  }
+  #[cfg(windows)]
+  {
+    crate::platform::windows::kill_process(pid);
+  }
+  #[cfg(not(any(target_os = "linux", windows)))]
+  {
+    let _ = pid;
+  }
 }
 
 fn descendants(root: u32) -> Vec<(u32, String)> {
@@ -178,20 +203,20 @@ pub fn resume_processes(root: u32) {
   handled_registry().lock().unwrap().clear();
 }
 
-/// Terminate the whole Spotify tree (used on exit when sptune launched it).
-pub fn kill_tree(root: u32) {
+/// Terminate every Spotify process on the machine — used on sptune exit.
+/// Matches by exe/cmdline, not by tree walking, so nothing survives a
+/// missed parent link; works on suspended processes.
+pub fn kill_all_spotify() {
   #[cfg(target_os = "linux")]
   {
-    crate::platform::linux::kill_tree(root);
+    crate::platform::linux::kill_all();
     return;
   }
   #[cfg(windows)]
   {
-    crate::platform::windows::kill_tree(root);
+    crate::platform::windows::kill_all();
     return;
   }
   #[cfg(not(any(target_os = "linux", windows)))]
-  {
-    let _ = root;
-  }
+  {}
 }

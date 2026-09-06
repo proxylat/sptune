@@ -120,17 +120,6 @@ pub fn descendants_of(root: u32) -> Vec<(u32, String)> {
   result
 }
 
-// Sweep helper: suspend and/or trim one freshly spawned child.
-#[cfg(target_os = "linux")]
-pub fn suspend_and_trim_child(pid: u32, cmd: &str, do_suspend: bool, do_trim: bool) {
-  if do_suspend {
-    suspend_process(pid);
-  }
-  if do_trim {
-    trim_process(pid, cmd);
-  }
-}
-
 // CONT is a no-op on running processes, so sweeping every descendant (even
 // ones sptune never stopped) is safe.
 #[cfg(target_os = "linux")]
@@ -142,19 +131,50 @@ pub fn resume_children_of(root: u32) {
   }
 }
 
+// SIGKILL works on SIGSTOPped processes too.
 #[cfg(target_os = "linux")]
-pub fn kill_tree(root: u32) {
-  // CONT before TERM: a SIGSTOPped process queues signals without handling
-  // them, so it would survive a plain SIGTERM forever.
-  let mut targets: Vec<u32> = descendants_of(root).into_iter().map(|(pid, _)| pid).collect();
-  targets.push(root);
-  for pid in targets {
+pub fn kill_process(pid: u32) {
+  let _ = std::process::Command::new("kill")
+    .args(["-KILL", &pid.to_string()])
+    .output();
+}
+
+// Terminate every process whose cmdline mentions spotify: CONT (a stopped
+// process queues signals without handling them), TERM for a clean exit,
+// then KILL whatever survived the grace period.
+#[cfg(target_os = "linux")]
+pub fn kill_all() {
+  let targets: Vec<u32> = {
+    let mut v = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+      for entry in entries.flatten() {
+        if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
+          if cmdline_of(pid).to_lowercase().contains("spotify") {
+            v.push(pid);
+          }
+        }
+      }
+    }
+    v
+  };
+  if targets.is_empty() {
+    return;
+  }
+  for pid in &targets {
     let _ = std::process::Command::new("kill")
       .args(["-CONT", &pid.to_string()])
       .output();
+  }
+  for pid in &targets {
     let _ = std::process::Command::new("kill")
       .args(["-TERM", &pid.to_string()])
       .output();
+  }
+  std::thread::sleep(std::time::Duration::from_millis(300));
+  for pid in &targets {
+    if std::path::Path::new(format!("/proc/{pid}").as_str()).exists() {
+      kill_process(*pid);
+    }
   }
 }
 

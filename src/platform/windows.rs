@@ -11,6 +11,7 @@ mod ffi {
   pub type Handle = *mut c_void;
 
   pub const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+  pub const PROCESS_TERMINATE: u32 = 0x0001;
   pub const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
   pub const PROCESS_SET_QUOTA: u32 = 0x0100;
   pub const PROCESS_VM_READ: u32 = 0x0010;
@@ -33,6 +34,7 @@ mod ffi {
       lpNumberOfBytesRead: *mut usize,
     ) -> i32;
     pub fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> Handle;
+    pub fn TerminateProcess(hProcess: Handle, uExitCode: u32) -> i32;
     pub fn Process32FirstW(hSnapshot: Handle, lppe: *mut ProcessEntry32W) -> i32;
     pub fn Process32NextW(hSnapshot: Handle, lppe: *mut ProcessEntry32W) -> i32;
   }
@@ -363,12 +365,25 @@ pub fn resume_children_of(root: u32) {
   }
 }
 
+// TerminateProcess works on suspended processes — no resume needed.
 #[cfg(windows)]
-pub fn kill_tree(root: u32) {
-  // /T walks the child tree, /F force-terminates; Chromium helpers die with it.
-  let _ = std::process::Command::new("taskkill")
-    .args(["/PID", &root.to_string(), "/T", "/F"])
-    .output();
+pub fn kill_process(pid: u32) {
+  unsafe {
+    ffi::with_process_access(pid, ffi::PROCESS_TERMINATE, |h| {
+      ffi::TerminateProcess(h, 1);
+    });
+  }
+}
+
+// Terminate every Spotify.exe in the snapshot — matches by exe name, so no
+// parent-link can be missed and suspended processes die all the same.
+#[cfg(windows)]
+pub fn kill_all() {
+  for (pid, _, exe) in process_snapshot() {
+    if exe.to_lowercase().contains("spotify.exe") {
+      kill_process(pid);
+    }
+  }
 }
 
 // Topmost process whose exe is Spotify.exe and whose parent's is not — the
@@ -392,15 +407,4 @@ pub fn find_root_pid() -> Option<u32> {
     .collect();
   candidates.sort_unstable();
   candidates.into_iter().next()
-}
-
-// Sweep helper: suspend and/or trim one freshly spawned child.
-#[cfg(windows)]
-pub fn suspend_and_trim_child(pid: u32, cmd: &str, do_suspend: bool, do_trim: bool) {
-  if do_suspend {
-    suspend_only(pid);
-  }
-  if do_trim {
-    trim_process(pid, cmd);
-  }
 }

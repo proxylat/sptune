@@ -162,6 +162,8 @@ fn panic_hook(info: &PanicHookInfo<'_>) {
 
   eprintln!("thread '<unnamed>' panicked at '{}' ({})", msg, location);
   eprintln!("{:?}", Backtrace::capture());
+  // Panic = sptune is going down: take Spotify with it, same as a clean exit.
+  crate::platform::spotify::kill_all_spotify();
 }
 
 #[tokio::main]
@@ -735,15 +737,12 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     }
   }
 
-  terminal.show_cursor()?;
+  // Exit policy: Spotify dies with sptune. Runs before anything fallible so
+  // a terminal-teardown error can't skip it; matches processes by name, so
+  // it works no matter who launched Spotify.
+  crate::platform::spotify::kill_all_spotify();
 
-  // Exit policy: Spotify dies with sptune — its whole tree, whether sptune
-  // launched it or not. Resume first so suspended helpers (SIGSTOPped
-  // processes queue signals without handling them) can actually terminate.
-  if let Some(root) = crate::platform::spotify::find_root_pid() {
-    crate::platform::spotify::resume_processes(root);
-    crate::platform::spotify::kill_tree(root);
-  }
+  terminal.show_cursor()?;
 
   // The single save point: the full snapshot (settings + playback state +
   // last track) is written here and nowhere else — nothing is saved during
