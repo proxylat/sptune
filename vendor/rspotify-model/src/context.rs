@@ -42,6 +42,11 @@ pub struct CurrentPlaybackContext {
     pub device: Device,
     pub repeat_state: RepeatState,
     pub shuffle_state: bool,
+    /// Smart Shuffle flag returned by Get Playback State. Undocumented in
+    /// the official reference but present in real responses; defaults to
+    /// false so older payloads without it still parse.
+    #[serde(default)]
+    pub smart_shuffle: bool,
     pub context: Option<Context>,
     #[serde(with = "ts_milliseconds")]
     pub timestamp: DateTime<Utc>,
@@ -101,4 +106,25 @@ impl<'de> Deserialize<'de> for Actions {
                 .collect(),
         })
     }
+}
+
+#[test]
+fn test_smart_shuffle_field() {
+    // Real Get Playback State responses carry an undocumented smart_shuffle
+    // flag; payloads without it (older captures) must still parse as false.
+    let with_flag = r#"{
+        "device": {
+            "id": "mock-device", "is_active": true, "is_private_session": false,
+            "is_restricted": false, "name": "Mock", "type": "Computer",
+            "volume_percent": 50
+        },
+        "repeat_state": "off", "shuffle_state": true, "smart_shuffle": true,
+        "context": null, "timestamp": 0, "is_playing": true, "item": null,
+        "currently_playing_type": "track", "actions": { "disallows": {} }
+    }"#;
+    let ctx: CurrentPlaybackContext = serde_json::from_str(with_flag).unwrap();
+    assert!(ctx.smart_shuffle);
+    let without_flag = with_flag.replace(r#""smart_shuffle": true,"#, "");
+    let ctx: CurrentPlaybackContext = serde_json::from_str(&without_flag).unwrap();
+    assert!(!ctx.smart_shuffle);
 }

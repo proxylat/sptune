@@ -27,3 +27,5 @@ client.yml
 tags
 .idea
 .vscode
+# Vendored crate build output (regenerable, never commit)
+/vendor/rspotify-model/target/

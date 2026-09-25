@@ -39,7 +39,7 @@ use redirect_uri::redirect_uri_web_server;
 use rspotify::{
   clients::{BaseClient, OAuthClient},
   model::Token,
-  AuthCodeSpotify, Credentials, OAuth,
+  AuthCodePkceSpotify, Credentials, OAuth,
 };
 use std::backtrace::Backtrace;
 use std::{
@@ -69,9 +69,8 @@ const SCOPES: [&str; 14] = [
   "user-read-recently-played",
 ];
 
-// ponytail: temporary dual-flow — auto keeps legacy AuthCode working until natural re-auth rotates to PKCE (rspotify AuthCodePkceSpotify not in 0.16.1); after upgrade, branch here on client_config.is_pkce() and use PKCE verifier/challenge, delete AuthCode path after 2 releases.
-/// get token automatically with local webserver
-pub async fn get_token_auto(spotify: &mut AuthCodeSpotify, port: u16) -> Option<Token> {
+/// get token automatically with local webserver (PKCE, no client secret)
+pub async fn get_token_auto(spotify: &mut AuthCodePkceSpotify, port: u16) -> Option<Token> {
   if let Ok(Some(token)) = spotify.read_token_cache(false).await {
     return Some(token);
   }
@@ -82,7 +81,7 @@ pub async fn get_token_auto(spotify: &mut AuthCodeSpotify, port: u16) -> Option<
     return Some(token);
   }
 
-  let auth_url = spotify.get_authorize_url(false).ok()?;
+  let auth_url = spotify.get_authorize_url(None).ok()?;
   println!("\nOpening browser for Spotify authorization...");
   // On Windows cmd.exe splits '&' — tell user to paste into browser address bar, not terminal
   println!("If it doesn't open, copy this URL into your browser:\n{}\n", auth_url);
@@ -128,7 +127,7 @@ fn open_url(url: &str) {
   let _ = url;
 }
 
-async fn get_code_from_url(spotify: &mut AuthCodeSpotify, url: String) -> Option<Token> {
+async fn get_code_from_url(spotify: &mut AuthCodePkceSpotify, url: String) -> Option<Token> {
   let code = spotify.parse_response_code(url.trim())?;
   if let Err(e) = spotify.request_token(code.as_str()).await {
     eprintln!("Failed to exchange code for token: {}", e);
@@ -273,14 +272,14 @@ of the app. Beware that this comes at a CPU cost!",
     scopes: SCOPES.iter().map(|s| s.to_string()).collect(),
     ..Default::default()
   };
-  // ponytail: auto keeps client_secret prompt for legacy installs; is_pkce() will branch to AuthCodePkceSpotify after rspotify upgrade — delete this AuthCode path after cutover
-  let creds = Credentials::new(&client_config.client_id, &client_config.client_secret);
+  // PKCE-only: no client secret (Spotify TOS forbids secrets in native apps).
+  let creds = Credentials::new_pkce(&client_config.client_id);
   let config = rspotify::Config {
     cache_path: config_paths.token_cache_path,
     token_cached: true,
     ..Default::default()
   };
-  let mut spotify = AuthCodeSpotify::with_config(creds, oauth, config);
+  let mut spotify = AuthCodePkceSpotify::with_config(creds, oauth, config);
 
   let config_port = client_config.get_port();
   let (spotify, token_expiry) = match get_token_auto(&mut spotify, config_port).await {
@@ -350,6 +349,9 @@ of the app. Beware that this comes at a CPU cost!",
     }
     if let Some(max_len) = saved.max_display_length {
       user_config.behavior.max_display_length = max_len;
+    }
+    if let Some(poll_secs) = saved.playback_poll_secs {
+      user_config.behavior.playback_poll_secs = poll_secs.clamp(1, 30);
     }
     if let Some(dev_view) = saved.dev_view {
       restored_dev_view = Some(dev_view);
@@ -477,18 +479,25 @@ of the app. Beware that this comes at a CPU cost!",
       let mut network = Network::new(spotify, client_config, &app);
       start_tokio(sync_io_rx, &mut network);
     });
-    // Resume the volume and track from the last session
+    // OS media events (GSMTC/MPRIS): track changes wake the playbar without
+    // spending API tokens. Dies silently where unsupported; the poll below
+    // and the 5s cadence keep working regardless.
+    crate::platform::media_watch::spawn_media_watcher(sync_io_tx.clone());
+    // Restore the last session: volume/shuffle/repeat apply only when
+    // nothing is already playing (gated inside AutoRestore), last
+    // page/sort always. One event instead of the old ResumeState + ChangeVolume pair.
+    // GetCurrentPlayback goes first so AutoRestore (and the first paint)
+    // can read the live state instead of paying a second fetch.
+    let _ = sync_io_tx.send(IoEvent::GetCurrentPlayback);
     if let Some(saved) = SavedState::load() {
       if user_config.behavior.restore_settings {
-        if saved.shuffle.is_some()
+        if saved.volume.is_some()
+          || saved.shuffle.is_some()
           || saved.repeat.is_some()
           || saved.track_sort.is_some()
           || saved.last_page.is_some()
         {
-          let _ = sync_io_tx.send(IoEvent::ResumeState(saved.clone()));
-        }
-        if let Some(volume) = saved.volume {
-          let _ = sync_io_tx.send(IoEvent::ChangeVolume(volume));
+          let _ = sync_io_tx.send(IoEvent::AutoRestore(saved.clone()));
         }
       }
     }
@@ -567,6 +576,12 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
 
     let mut app = app.lock().await;
     let mut needs_redraw = is_first_render;
+    // Backend mutations (add/remove/unlike) flag the screen dirty so the
+    // change paints on the next iteration without waiting for input.
+    if app.ui_dirty {
+      app.ui_dirty = false;
+      needs_redraw = true;
+    }
     // Get the size of the screen on each loop to account for resize event
     if let Ok(size) = terminal.backend().size() {
       let size = Rect::from(size);
@@ -601,7 +616,7 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
 
     let mut quit = false;
     for event in batch {
-      // ponytail: cooldown 60s so a failed refetch (main.rs:505 every 250ms) doesn't tight-loop; temporary dual-flow keeps AuthCode until invalid_grant rotates to PKCE
+      // ponytail: cooldown 60s so a failed refetch (main.rs:505 every 250ms) doesn't tight-loop
       let now = SystemTime::now();
       if now > app.spotify_token_expiry
         && now
@@ -730,7 +745,9 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     if is_first_render {
       app.dispatch(IoEvent::GetPlaylists);
       app.dispatch(IoEvent::GetUser);
-      app.dispatch(IoEvent::GetCurrentPlayback);
+      // No GetCurrentPlayback here: startup already queued one before
+      // AutoRestore, so this would be a duplicate roundtrip ahead of
+      // the playlist/user responses.
       app.help_docs_size = tui::help::get_help_docs(&app.user_config.keys).len() as u32;
 
       is_first_render = false;

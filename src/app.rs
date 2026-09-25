@@ -17,7 +17,7 @@ use rspotify::{
     show::{FullShow, Show, SimplifiedEpisode, SimplifiedShow},
     track::{FullTrack, SavedTrack, SimplifiedTrack},
     user::PrivateUser,
-    Id, PlayableItem,
+    Id, PlayableItem, RepeatState,
   },
 };
 use std::collections::{HashMap, VecDeque};
@@ -460,7 +460,7 @@ pub struct App {
   // When Some, the track-table view shows an in-playlist search bar (first
   // row) and only rows whose title or artist matches the query are listed.
   // None hides the bar and clears the filter. Toggled by the configurable
-  // `search_in_playlist` key (default: no key bound).
+  // `search_in_playlist` key (default: Ctrl+F).
   pub playlist_filter: Option<String>,
   pub playlist_filter_idx: usize,
   pub playlist_filter_cursor_position: u16,
@@ -499,8 +499,13 @@ pub struct App {
   pub help_scroll_offset: u32,
   pub help_show_shortcuts: bool,
   pub is_loading: bool,
+  pub ui_dirty: bool,
   pub io_tx: Option<Sender<IoEvent>>,
   pub is_fetching_current_playback: bool,
+  /// True once the first live playback response has landed. Gates the
+  /// Resume affordance: before that the playbar cannot tell "nothing
+  /// playing" from "not asked yet", so it must not offer Resume.
+  pub playback_known: bool,
   pub is_fetching_next_page: bool,
   pub spotify_token_expiry: SystemTime,
   pub dialog: Option<String>,
@@ -512,6 +517,10 @@ pub struct App {
   /// navigation must not change which track gets added.
   pub pending_track_uri: Option<String>,
   pub playlist_picker_index: usize,
+  /// Name-entry mode inside the add-to-playlist picker: Enter on the
+  /// "+ New playlist" row flips this on, and typed chars land here.
+  pub naming_playlist: bool,
+  pub new_playlist_name: String,
   pub pending_remove_track_uri: Option<String>,
   pub pending_remove_playlist_id: Option<String>,
   pub pending_remove_track_name: Option<String>,
@@ -633,8 +642,12 @@ impl Default for App {
       help_scroll_offset: 0,
       help_show_shortcuts: false,
       is_loading: false,
+      // Set by the network thread after add/remove/unlike mutations; the UI
+      // loop repaints on the next iteration without waiting for input.
+      ui_dirty: false,
       io_tx: None,
       is_fetching_current_playback: false,
+      playback_known: false,
       is_fetching_next_page: false,
       spotify_token_expiry: SystemTime::now(),
       dialog: None,
@@ -642,6 +655,8 @@ impl Default for App {
       playlist_uri_map: HashMap::new(),
       pending_track_uri: None,
       playlist_picker_index: 0,
+      naming_playlist: false,
+      new_playlist_name: String::new(),
       pending_remove_track_uri: None,
       pending_remove_playlist_id: None,
       pending_remove_track_name: None,
@@ -885,11 +900,11 @@ impl App {
   }
 
   fn poll_current_playback(&mut self) {
-    // Poll every 5 seconds while playing; while paused poll less often so a
-    // playback started externally (e.g. in the Spotify app) gets picked up
-    // without hammering the API. A pending scrub (seek_ms) still forces one
-    // poll so the seek commits.
-    let poll_interval_ms = if self.seek_ms.is_some()
+    // Poll while playing at the user's cadence (settings, default 5s);
+    // while paused poll less often so a playback started externally
+    // (e.g. in the Spotify app) gets picked up without hammering the API.
+    // A pending scrub (seek_ms) still forces one poll so the seek commits.
+    let mut poll_interval_ms = if self.seek_ms.is_some()
       || !matches!(
         self.current_playback_context,
         Some(CurrentPlaybackContext {
@@ -897,7 +912,7 @@ impl App {
           ..
         })
       ) {
-      5_000
+      self.user_config.behavior.playback_poll_secs.clamp(1, 30) as u128 * 1_000
     } else {
       15_000
     };
@@ -907,6 +922,15 @@ impl App {
       .elapsed()
       .as_millis();
 
+    // Near track end the next song is imminent: poll every second so it
+    // appears promptly instead of up to 5s late. ~10 extra cheap requests
+    // per track, inside the token bucket.
+    if let Some(remaining_ms) = self.playback_remaining_ms() {
+      if remaining_ms < 10_000 {
+        poll_interval_ms = poll_interval_ms.min(1_000);
+      }
+    }
+
     if !self.is_fetching_current_playback && elapsed >= poll_interval_ms {
       self.is_fetching_current_playback = true;
       // Trigger the seek if the user has set a new position
@@ -915,6 +939,26 @@ impl App {
         None => self.dispatch(IoEvent::GetCurrentPlayback),
       }
     }
+  }
+
+  /// Milliseconds left in the current item, or None when unknown (no
+  /// context/item/progress/duration). Live progress advances between polls,
+  /// so elapsed time since the last poll is added while playing.
+  fn playback_remaining_ms(&self) -> Option<u128> {
+    let context = self.current_playback_context.as_ref()?;
+    let item = context.item.as_ref()?;
+    let progress = context.progress.as_ref()?;
+    let duration_ms: u128 = match item {
+      PlayableItem::Track(track) => track.duration.num_milliseconds() as u128,
+      PlayableItem::Episode(episode) => episode.duration.num_milliseconds() as u128,
+      _ => return None,
+    };
+    let elapsed = if context.is_playing {
+      self.instant_since_last_current_playback_poll.elapsed().as_millis()
+    } else {
+      0
+    };
+    Some(duration_ms.saturating_sub(progress.num_milliseconds() as u128 + elapsed))
   }
 
   pub fn update_on_tick(&mut self) -> bool {
@@ -1123,6 +1167,61 @@ impl App {
       .unwrap_or(0)
       .min(playlists.items.len().saturating_sub(1));
     playlists.items.get(index).map(|item| item.id.uri())
+  }
+
+  /// Bare id of the playlist shown in the track table, if any. Falls back
+  /// from the active to the selected sidebar index: keyboard navigation
+  /// changes the selection without activating, but the panel is the same.
+  pub fn viewed_playlist_id(&self) -> Option<String> {
+    if self.track_table.context != Some(TrackTableContext::MyPlaylists) {
+      return None;
+    }
+    let idx = self.active_playlist_index.or(self.selected_playlist_index)?;
+    self
+      .playlists
+      .as_ref()?
+      .items
+      .get(idx)
+      .map(|pl| pl.id.id().to_string())
+  }
+
+  /// Cut one row from the visible track table by full uri (unlike / remove
+  /// from playlist). Parallel added_at / raw_index entries go too, so clicks
+  /// keep playing the right song; raw indices above the removed raw position
+  /// shift down. Returns true when a row was removed.
+  pub fn remove_track_from_table(&mut self, uri: &str) -> bool {
+    let pre_len = self.track_table.tracks.len();
+    let Some(idx) = self.track_table.tracks.iter().position(|t| {
+      t.id
+        .as_ref()
+        .map(|id| id.uri())
+        .as_deref()
+        == Some(uri)
+    }) else {
+      return false;
+    };
+    let aligned =
+      self.track_table_added_at.len() == pre_len && self.track_table_raw_index.len() == pre_len;
+    let removed_raw = aligned.then(|| self.track_table_raw_index[idx]);
+    self.track_table.tracks.remove(idx);
+    if aligned {
+      self.track_table_added_at.remove(idx);
+      self.track_table_raw_index.remove(idx);
+      if let Some(p) = removed_raw {
+        for r in self.track_table_raw_index.iter_mut() {
+          if *r > p {
+            *r -= 1;
+          }
+        }
+      }
+    }
+    let len = self.track_table.tracks.len();
+    self.track_table.selected_index = if len == 0 {
+      0
+    } else {
+      self.track_table.selected_index.min(len - 1)
+    };
+    true
   }
 
   fn get_current_route_mut(&mut self) -> &mut Route {
@@ -1356,25 +1455,17 @@ impl App {
   }
 
   pub fn shuffle(&mut self) {
-    if let Some(context) = &self.current_playback_context.clone() {
-      // Smart shuffle is a 3-state cycle: Off -> On -> Smart -> Off
-      if self.smart_shuffle {
-        // Smart -> Off: disable shuffle and smart
-        self.smart_shuffle = false;
-        self.dispatch(IoEvent::Shuffle(true));
-      } else if context.shuffle_state {
-        // On -> Smart: keep shuffle on, enable smart recommendations
-        self.smart_shuffle = true;
-        // Fetch recommendations for current track as smart queue
-        if let Some(PlayableItem::Track(track)) = &context.item {
-          if let Some(id) = &track.id {
-            self.dispatch(IoEvent::GetRecommendationsForTrackId(id.to_string(), None));
-          }
-        }
-      } else {
-        // Off -> On
-        self.dispatch(IoEvent::Shuffle(false));
+    // Plain toggle. The local Smart step is gone (its recommendations
+    // endpoint is dead); `Smart ⇄` only reflects real external Smart
+    // Shuffle, synced from the API on every playback poll. The flip is
+    // optimistic so the icon paints on the next tick; the backend confirms
+    // on Ok and the next poll corrects on Err.
+    if let Some(context) = self.current_playback_context.clone() {
+      if let Some(live) = &mut self.current_playback_context {
+        live.shuffle_state = !context.shuffle_state;
       }
+      self.smart_shuffle = false;
+      self.dispatch(IoEvent::Shuffle(context.shuffle_state));
     };
   }
 
@@ -1629,6 +1720,8 @@ impl App {
     };
     self.pending_track_uri = Some(uri);
     self.playlist_picker_index = 0;
+    self.naming_playlist = false;
+    self.new_playlist_name.clear();
     self.push_navigation_stack(
       RouteId::Dialog,
       ActiveBlock::Dialog(DialogContext::AddToPlaylist),
@@ -1733,12 +1826,22 @@ impl App {
     }
   }
 
+  /// Full uri of the now-playing track, if a track (not an episode) is playing.
+  pub fn now_playing_track_id(&self) -> Option<String> {
+    match self.current_playback_context.as_ref()?.item.as_ref()? {
+      PlayableItem::Track(t) => t.id.as_ref().map(|id| id.to_string()),
+      _ => None,
+    }
+  }
+
   pub fn open_add_to_playlist_for_uri(&mut self, uri: String) {
     if !self.user_config.behavior.enable_add_to_playlist {
       return;
     }
     self.pending_track_uri = Some(uri);
     self.playlist_picker_index = 0;
+    self.naming_playlist = false;
+    self.new_playlist_name.clear();
     self.push_navigation_stack(RouteId::Dialog, ActiveBlock::Dialog(DialogContext::AddToPlaylist));
   }
 
@@ -1883,7 +1986,17 @@ impl App {
   }
 
   pub fn repeat(&mut self) {
-    if let Some(context) = &self.current_playback_context.clone() {
+    if let Some(context) = self.current_playback_context.clone() {
+      let next = match context.repeat_state {
+        RepeatState::Off => RepeatState::Context,
+        RepeatState::Context => RepeatState::Track,
+        RepeatState::Track => RepeatState::Off,
+      };
+      // Optimistic flip so the icon paints on the next tick; the backend
+      // confirms on Ok and the next poll corrects on Err.
+      if let Some(live) = &mut self.current_playback_context {
+        live.repeat_state = next;
+      }
       self.dispatch(IoEvent::Repeat(context.repeat_state));
     }
   }
@@ -2431,6 +2544,19 @@ impl App {
       23 => {
         self.toggle_process_suspend();
       }
+      24 => {
+        // Playback poll cadence while playing. Floor is 1s: sub-second
+        // polling would eat the token bucket and risk Spotify 429s.
+        self.user_config.behavior.playback_poll_secs =
+          match self.user_config.behavior.playback_poll_secs {
+            1 => 2,
+            2 => 5,
+            5 => 10,
+            10 => 15,
+            15 => 30,
+            _ => 1,
+          };
+      }
       _ => {}
     }
   }
@@ -2528,6 +2654,100 @@ mod tests {
     app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_millis(16_000);
     app.update_on_tick();
     assert!(app.is_fetching_current_playback);
+  }
+
+  fn playing_playback_with_progress(progress_ms: u64) -> CurrentPlaybackContext {
+    // mock_track(0) runs 180_000 ms; progress near that means the track end
+    // (and the next song) is imminent.
+    let item = serde_json::to_value(mock_track(0)).unwrap();
+    serde_json::from_value(json!({
+      "device": {
+        "id": "mock-device",
+        "is_active": true,
+        "is_private_session": false,
+        "is_restricted": false,
+        "name": "Mock Device",
+        "type": "Computer",
+        "volume_percent": 50,
+      },
+      "repeat_state": "off",
+      "shuffle_state": false,
+      "context": null,
+      "timestamp": 0,
+      "progress_ms": progress_ms,
+      "is_playing": true,
+      "item": item,
+      "currently_playing_type": "track",
+      "actions": { "disallows": {} },
+    }))
+    .unwrap()
+  }
+
+  #[test]
+  fn poll_shortens_near_track_end() {
+    use std::time::Duration;
+
+    // 5s left of 180s, last poll 1.5s ago: base 5s interval would wait,
+    // the adaptive 1s interval fires so the next song appears promptly.
+    let mut app = App::default();
+    app.current_playback_context = Some(playing_playback_with_progress(175_000));
+    app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_millis(1_500);
+    app.update_on_tick();
+    assert!(app.is_fetching_current_playback);
+
+    // Same age poll mid-track: still quiet until the 5s base interval.
+    let mut app = App::default();
+    app.current_playback_context = Some(playing_playback_with_progress(10_000));
+    app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_millis(1_500);
+    app.update_on_tick();
+    assert!(!app.is_fetching_current_playback);
+
+    // No item (e.g. paused mock): remaining unknown, no adaptive poll.
+    let mut app = App::default();
+    app.current_playback_context = Some(paused_playback());
+    assert_eq!(app.playback_remaining_ms(), None);
+  }
+
+  #[test]
+  fn repeat_flips_state_optimistically() {
+    use crate::backend::IoEvent;
+    use rspotify::model::RepeatState;
+    let mut app = App::default();
+    app.current_playback_context = Some(paused_playback());
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+
+    app.repeat();
+
+    assert_eq!(
+      app.current_playback_context.as_ref().unwrap().repeat_state,
+      RepeatState::Context
+    );
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(dispatched, vec![IoEvent::Repeat(RepeatState::Off)]);
+  }
+
+  #[test]
+  fn shuffle_toggles_without_smart_step() {
+    use crate::backend::IoEvent;
+    let mut app = App::default();
+    app.current_playback_context = Some(paused_playback());
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+
+    // First press: off -> on, plain Shuffle event.
+    app.shuffle();
+    assert!(app.current_playback_context.as_ref().unwrap().shuffle_state);
+    assert!(!app.smart_shuffle);
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(dispatched, vec![IoEvent::Shuffle(false)]);
+
+    // Second press: on -> off. No Smart detour, no recommendations fetch.
+    app.shuffle();
+    assert!(!app.current_playback_context.as_ref().unwrap().shuffle_state);
+    assert!(!app.smart_shuffle);
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(dispatched, vec![IoEvent::Shuffle(true)]);
   }
 
   #[test]
@@ -2789,6 +3009,16 @@ mod tests {
   }
 
   #[test]
+  fn gear_toggle_24_cycles_playback_poll_secs() {
+    let mut app = App::default();
+    assert_eq!(app.user_config.behavior.playback_poll_secs, 5);
+    for expected in [10, 15, 30, 1, 2, 5] {
+      app.toggle_setting(24);
+      assert_eq!(app.user_config.behavior.playback_poll_secs, expected);
+    }
+  }
+
+  #[test]
   fn sort_keeps_the_selection_on_the_same_track() {
     let mut app = App::default();
     app.track_table.tracks = vec![mock_track(0), mock_track(1), mock_track(2)];
@@ -2841,5 +3071,96 @@ mod tests {
       app.made_for_you_playlist_id(0),
       Some("mix1".to_string())
     );
+  }
+
+  fn mock_playlist(i: usize) -> SimplifiedPlaylist {
+    serde_json::from_value(json!({
+      "collaborative": false,
+      "external_urls": {},
+      "href": format!("spotify:playlist:mockplaylist{}", i),
+      "id": format!("mockplaylist{}", i),
+      "images": [],
+      "name": format!("Mock Playlist {}", i),
+      "owner": {
+        "display_name": "Mock User",
+        "external_urls": {},
+        "followers": null,
+        "href": "spotify:user:mockuser",
+        "id": "mockuser",
+        "images": [],
+      },
+      "public": null,
+      "snapshot_id": format!("snap{}", i),
+      "items": { "href": "", "total": 150 },
+    }))
+    .unwrap()
+  }
+
+  #[test]
+  fn remove_track_from_table_cuts_row_and_parallel_vecs() {
+    let mut app = App::default();
+    app.track_table.tracks = (0..5).map(mock_track).collect();
+    app.track_table_added_at = (0..5).map(|_| None).collect();
+    app.track_table_raw_index = vec![4, 3, 2, 1, 0];
+    app.track_table.selected_index = 4;
+    // Displayed 0 is raw 4 (the last raw position): no shifting needed.
+    assert!(app.remove_track_from_table("spotify:track:mocktrack0"));
+    assert_eq!(app.track_table.tracks.len(), 4);
+    assert_eq!(app.track_table_added_at.len(), 4);
+    assert_eq!(app.track_table_raw_index, vec![3, 2, 1, 0]);
+    assert_eq!(app.track_table.selected_index, 3);
+    // Unknown uri changes nothing.
+    assert!(!app.remove_track_from_table("spotify:track:nope"));
+    assert_eq!(app.track_table.tracks.len(), 4);
+  }
+
+  #[test]
+  fn remove_track_from_table_shifts_raw_indices_above_cut() {
+    let mut app = App::default();
+    app.track_table.tracks = (0..5).map(mock_track).collect();
+    app.track_table_added_at = (0..5).map(|_| None).collect();
+    app.track_table_raw_index = vec![0, 1, 2, 3, 4];
+    // Displayed 1 is raw 1: raw 2..4 shift down one.
+    assert!(app.remove_track_from_table("spotify:track:mocktrack1"));
+    assert_eq!(app.track_table_raw_index, vec![0, 1, 2, 3]);
+    assert_eq!(
+      app.track_table.tracks[1].id.as_ref().unwrap().id(),
+      "mocktrack2"
+    );
+  }
+
+  #[test]
+  fn remove_track_from_table_ignores_misaligned_parallel_vecs() {
+    let mut app = App::default();
+    app.track_table.tracks = (0..3).map(mock_track).collect();
+    // Stale parallel vecs (e.g. mid-sort): only the visible row goes.
+    assert!(app.remove_track_from_table("spotify:track:mocktrack0"));
+    assert_eq!(app.track_table.tracks.len(), 2);
+    assert!(app.track_table_added_at.is_empty());
+    assert!(app.track_table_raw_index.is_empty());
+  }
+
+  #[test]
+  fn viewed_playlist_id_prefers_active_falls_back_to_selected() {
+    let mut app = App::default();
+    app.playlists = Some(rspotify::model::Page {
+      href: String::new(),
+      items: vec![mock_playlist(0), mock_playlist(1)],
+      limit: 2,
+      next: None,
+      offset: 0,
+      previous: None,
+      total: 2,
+    });
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    // Nothing open yet: selected alone identifies the panel.
+    app.selected_playlist_index = Some(1);
+    assert_eq!(app.viewed_playlist_id(), Some("mockplaylist1".to_string()));
+    // Active wins once the playlist is opened.
+    app.active_playlist_index = Some(0);
+    assert_eq!(app.viewed_playlist_id(), Some("mockplaylist0".to_string()));
+    // Other contexts never match.
+    app.track_table.context = Some(TrackTableContext::SavedTracks);
+    assert_eq!(app.viewed_playlist_id(), None);
   }
 }

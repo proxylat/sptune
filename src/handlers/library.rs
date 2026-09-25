@@ -64,7 +64,13 @@ pub fn handler(key: Key, app: &mut App) {
       }
       // Liked Songs,
       "Liked Songs" => {
-        if app.track_table.context != Some(TrackTableContext::SavedTracks) {
+        // Same split as the playlist Enter guard: the view switch is free,
+        // only the fetch costs tokens. Stored context can still say
+        // SavedTracks while the screen shows an artist page, so the route
+        // decides whether we are already viewing.
+        let already_viewing = app.track_table.context == Some(TrackTableContext::SavedTracks)
+          && app.get_current_route().id == RouteId::TrackTable;
+        if !already_viewing {
           app.dispatch(IoEvent::GetCurrentSavedTracks(None));
           app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
         }

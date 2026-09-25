@@ -10,8 +10,8 @@ use crate::tui::layout::{
   build_playbar_controls, build_playbar_title, gear_click_rect, get_main_layout_margin,
   header_height, playbar_artist_row, playbar_controls_x, playbar_progress_rect, playbar_song_row,
   playbar_text_click_range, playbar_volume_rect, search_box_rect, song_table_columns,
-  song_table_viewport, sort_column_for, track_table_with_date, PlaybarButton, PLAYBAR_HEIGHT,
-  PLAYBAR_TIME_LEN, VOLUME_BAR_LEN, VOLUME_LABEL_LEN,
+  song_table_viewport, sort_column_for, track_table_with_date, PlaybarButton, PLAYBAR_HEART_WIDTH,
+  PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, VOLUME_BAR_LEN, VOLUME_LABEL_LEN,
 };
 use crate::tui::ColumnId;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -84,21 +84,26 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
       if x >= app.size.width || y >= app.size.height {
         return;
       }
-      if handle_confirm_remove_dialog_click(x, y, app) {
-        return;
-      }
-      if handle_add_to_playlist_dialog_click(x, y, app) {
-        return;
-      }
-      if handle_library_drag_down(x, y, app) {
-        return;
-      }
-      if handle_sidebar_drag_down(x, y, app) {
-        return;
-      }
-      // Press on the scrollbar thumb starts a drag
-      if handle_scrollbar_down(x, y, app) {
-        return;
+      // The device selector is a fullscreen route drawn over the main
+      // layout: sidebar/library/scrollbar geometry underneath is not visible,
+      // so those pre-checks must not swallow the click.
+      if app.get_current_route().active_block != ActiveBlock::SelectDevice {
+        if handle_confirm_remove_dialog_click(x, y, app) {
+          return;
+        }
+        if handle_add_to_playlist_dialog_click(x, y, app) {
+          return;
+        }
+        if handle_library_drag_down(x, y, app) {
+          return;
+        }
+        if handle_sidebar_drag_down(x, y, app) {
+          return;
+        }
+        // Press on the scrollbar thumb starts a drag
+        if handle_scrollbar_down(x, y, app) {
+          return;
+        }
       }
       // One click = select + activate (Enter). No double-click needed.
       if handle_left_click(x, y, app) {
@@ -325,8 +330,19 @@ fn handle_add_to_playlist_dialog_click(x: u16, y: u16, app: &mut App) -> bool {
   }
   let row = (y - inner.y) as usize;
   let idx = offset + row;
-  let total = app.playlists.as_ref().map_or(0, |p| p.items.len());
-  if idx >= total {
+  let items = app.playlists.as_ref().map_or(0, |p| p.items.len());
+  if idx > items {
+    return true;
+  }
+  if app.naming_playlist {
+    // Name entry is keyboard-only; clicks are swallowed so the dialog stays.
+    return true;
+  }
+  if idx == items {
+    // "+ New playlist" row: stay open and flip into name-entry mode.
+    app.playlist_picker_index = idx;
+    app.naming_playlist = true;
+    app.new_playlist_name.clear();
     return true;
   }
   // Select the hovered playlist and confirm (same as keyboard Enter)
@@ -347,41 +363,14 @@ fn handle_add_to_playlist_dialog_click(x: u16, y: u16, app: &mut App) -> bool {
   true
 }
 
-fn handle_add_to_playlist_hover(x: u16, y: u16, app: &mut App) -> bool {
-  if !matches!(
+/// Consumes mouse moves over the add-to-playlist dialog so the background
+/// doesn't react. The picker highlight stays static on purpose: selection is
+/// click/keyboard-only, never hover.
+fn handle_add_to_playlist_hover(_x: u16, _y: u16, app: &mut App) -> bool {
+  matches!(
     app.get_current_route().active_block,
     ActiveBlock::Dialog(DialogContext::AddToPlaylist)
-  ) {
-    return false;
-  }
-  let bounds = Rect::new(0, 0, app.size.width, app.size.height);
-  let width = std::cmp::min(bounds.width.saturating_sub(2), 45);
-  let count = app.playlists.as_ref().map_or(0, |p| p.items.len()) as u16;
-  let height = std::cmp::min(count as usize + 6, bounds.height as usize - 2) as u16;
-  if width == 0 || height == 0 {
-    return true;
-  }
-  let left = bounds.width.saturating_sub(width) / 2;
-  let top = bounds.height / 4;
-  let rect = Rect::new(left, top, width, height);
-  let inner = Rect::new(
-    rect.x + 2,
-    rect.y + 2,
-    rect.width.saturating_sub(4),
-    rect.height.saturating_sub(4),
-  );
-  let viewport = height.saturating_sub(4) as usize;
-  let offset = app.playlist_picker_index.saturating_sub(viewport / 2);
-  if x < inner.x || x >= inner.x + inner.width || y < inner.y || y >= inner.y + inner.height {
-    return true;
-  }
-  let row = (y - inner.y) as usize;
-  let idx = offset + row;
-  let total = app.playlists.as_ref().map_or(0, |p| p.items.len());
-  if idx < total {
-    app.playlist_picker_index = idx;
-  }
-  true
+  )
 }
 
 fn handle_add_to_playlist_scroll(up: bool, app: &mut App) -> bool {
@@ -391,8 +380,9 @@ fn handle_add_to_playlist_scroll(up: bool, app: &mut App) -> bool {
   ) {
     return false;
   }
-  let count = app.playlists.as_ref().map_or(0, |p| p.items.len());
-  if count == 0 {
+  let items = app.playlists.as_ref().map_or(0, |p| p.items.len());
+  let count = items + 1; // trailing "+ New playlist" row
+  if app.naming_playlist {
     return true;
   }
   if up {
@@ -407,6 +397,35 @@ fn handle_add_to_playlist_scroll(up: bool, app: &mut App) -> bool {
     app.playlist_picker_index = (app.playlist_picker_index + 1) % count;
   }
   true
+}
+
+// Device screen rows (mirrors draw_device_list geometry: full area,
+// margin 5, instructions on top 20%, bordered list on bottom 80%).
+// Returns true when a device row was hit, so the caller fires Enter.
+fn handle_device_list_click(x: u16, y: u16, app: &mut App) -> bool {
+  let count = app.devices.as_ref().map(|d| d.len()).unwrap_or(0);
+  if count == 0 {
+    return false;
+  }
+  let area = Rect::new(0, 0, app.size.width, app.size.height);
+  let chunks = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
+    .margin(5)
+    .split(area);
+  let list = chunks[1];
+  if y < list.y + 1 {
+    return false;
+  }
+  if x < list.x + 1 || x >= list.x + list.width.saturating_sub(1) {
+    return false;
+  }
+  let row = (y - (list.y + 1)) as usize;
+  if row < count {
+    app.selected_device_index = Some(row);
+    return true;
+  }
+  false
 }
 
 // Returns true when the click landed on a row of a list (so a double-click
@@ -433,7 +452,11 @@ fn handle_left_click(x: u16, y: u16, app: &mut App) -> bool {
       handle_settings_click(x, y, app);
       return false;
     }
-    ActiveBlock::Error | ActiveBlock::SelectDevice => return false,
+    ActiveBlock::Error => return false,
+    // Device screen: one click selects the row and activates it (Enter),
+    // so a mouse user can switch devices — or dismiss the screen by
+    // clicking the device they are already on.
+    ActiveBlock::SelectDevice => return handle_device_list_click(x, y, app),
     ActiveBlock::MusicView => {
       if let Some(PlayableItem::Track(track)) = app
         .current_playback_context
@@ -531,9 +554,9 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
   let vis_row = (y - settings.y - 1) as usize;
   let row = vis_row + app.help_scroll_offset as usize;
 
-  // Row -> toggle_setting index map for the categorized layout (34 rows):
+  // Row -> toggle_setting index map for the categorized layout (35 rows):
   // headers and the Shortcuts link are None.
-  const SHORTCUTS_ROW: usize = 30;
+  const SHORTCUTS_ROW: usize = 31;
   if row == SHORTCUTS_ROW {
     app.help_show_shortcuts = true;
     app.help_scroll_offset = 0;
@@ -543,7 +566,7 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
     app.calculate_help_menu_offset();
     return;
   }
-  const ROW_TO_TOGGLE: [Option<usize>; 34] = [
+  const ROW_TO_TOGGLE: [Option<usize>; 35] = [
     None,     // 0  ─ Appearence/Layout ─
     Some(0),  // 1  Black theme
     Some(5),  // 2  Theme
@@ -565,19 +588,20 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
     None,     // 18 ─ Playback ─
     Some(6),  // 19 Timestamp by typing
     Some(7),  // 20 Restore settings
-    None,     // 21 blank
-    None,     // 22 ─ Spotify in launch ─
-    Some(18), // 23 Auto launch with sptune
-    Some(19), // 24 Enable Chromium flags
-    Some(20), // 25 Auto suspend child processes
-    Some(21), // 26 Auto trim WorkingSet
-    Some(22), // 27 Memory limit per child process
-    None,     // 28 blank
-    None,     // 29 ─ Navigation ─
-    None,     // 30 Shortcuts →
-    None,     // 31 blank
-    None,     // 32 ─ Danger Zone ─
-    Some(17), // 33 Clear cache (always last)
+    Some(24), // 21 Playback poll
+    None,     // 22 blank
+    None,     // 23 ─ Spotify in launch ─
+    Some(18), // 24 Auto launch with sptune
+    Some(19), // 25 Enable Chromium flags
+    Some(20), // 26 Auto suspend child processes
+    Some(21), // 27 Auto trim WorkingSet
+    Some(22), // 28 Memory limit per child process
+    None,     // 29 blank
+    None,     // 30 ─ Navigation ─
+    None,     // 31 Shortcuts →
+    None,     // 32 blank
+    None,     // 33 ─ Danger Zone ─
+    Some(17), // 34 Clear cache (always last)
   ];
   if let Some(Some(toggle)) = ROW_TO_TOGGLE.get(row).copied() {
     app.toggle_setting(toggle);
@@ -1226,7 +1250,8 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
     .and_then(|c| c.item.as_ref())
     .is_some();
   if !has_track {
-    if app.saved_last_track.is_some() {
+    // Mirrors draw_playbar: no Resume target until the live state is known.
+    if app.playback_known && app.saved_last_track.is_some() {
       let rect = crate::tui::layout::playbar_resume_rect(playbar);
       if y == rect.y && x >= rect.x && x < rect.x + rect.width {
         app.resume_last_listening();
@@ -1314,6 +1339,17 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
     if let Some(uri) = app.playing_track_uri() {
       if !app.is_in_any_playlist(&uri) && x == playbar_song_row(playbar).x {
         app.open_add_to_playlist_for_uri(uri);
+        return;
+      }
+    }
+  }
+  // Liked heart right after the prefix (tracks only): toggles save on the
+  // now-playing track. Runs before the name range so it never opens the album.
+  if y == playbar_song_row(playbar).y {
+    let heart_x = playbar_song_row(playbar).x + 2;
+    if x >= heart_x && x < heart_x + PLAYBAR_HEART_WIDTH {
+      if let Some(id) = app.now_playing_track_id() {
+        app.dispatch(IoEvent::ToggleSaveTrack(id));
         return;
       }
     }
@@ -1749,7 +1785,9 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
         .recently_played
         .result
         .as_ref()
-        .map(|recently_played| recently_played.items.len())
+        .map(|recently_played| {
+          crate::tui::group_consecutive_plays(&recently_played.items).len()
+        })
         .unwrap_or(0);
       // The load-more row is drawn after the items, so count it when mapping.
       let total_rows = count + usize::from(app.recently_played_has_more());
@@ -2541,6 +2579,7 @@ mod tests {
     // Empty playbar: the centered Resume button is the only click target.
     let mut app = playback_app();
     app.current_playback_context = None;
+    app.playback_known = true;
     app.saved_last_track = Some("spotify:track:mock1".to_string());
     let (_, playbar, _) = main_layout(&app).unwrap();
     let rect = crate::tui::layout::playbar_resume_rect(playbar);
@@ -2550,6 +2589,23 @@ mod tests {
     app.is_loading = false;
     handle_mouse(click_event(rect.x.saturating_sub(2), rect.y), &mut app);
     assert!(!app.is_loading);
+  }
+
+  #[test]
+  fn click_playbar_before_first_poll_does_not_resume() {
+    // Live state unknown (startup): the Resume target must not exist, even
+    // with a saved track — the click is swallowed, nothing dispatches.
+    let mut app = playback_app();
+    app.current_playback_context = None;
+    app.playback_known = false;
+    app.saved_last_track = Some("spotify:track:mock1".to_string());
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+    let (_, playbar, _) = main_layout(&app).unwrap();
+    let rect = crate::tui::layout::playbar_resume_rect(playbar);
+    handle_mouse(click_event(rect.x + rect.width / 2, rect.y), &mut app);
+    assert!(!app.is_loading);
+    assert!(rx.try_iter().collect::<Vec<_>>().is_empty());
   }
 
   #[test]
@@ -3059,6 +3115,84 @@ mod tests {
   }
 
   #[test]
+  fn playlist_picker_hover_does_not_move_selection_click_confirms() {    let mut app = track_table_app(20);
+    app.playlists = Some(mock_playlist_page(3));
+    app.active_playlist_index = Some(0);
+    app.open_add_to_playlist();
+    assert!(matches!(
+      app.get_current_route().active_block,
+      ActiveBlock::Dialog(DialogContext::AddToPlaylist)
+    ));
+    assert_eq!(app.playlist_picker_index, 0);
+    // Dialog geometry for 200x50: width 45 at x=77, top y=12, inner list y=14.
+    let hover = MouseEvent {
+      kind: MouseEventKind::Moved,
+      column: 90,
+      row: 16,
+      modifiers: KeyModifiers::NONE,
+    };
+    handle_mouse(hover, &mut app);
+    // Still open, highlight unmoved: selection is click/keyboard-only.
+    assert!(matches!(
+      app.get_current_route().active_block,
+      ActiveBlock::Dialog(DialogContext::AddToPlaylist)
+    ));
+    assert_eq!(app.playlist_picker_index, 0);
+    // Click on the second row selects and confirms (dialog closes).
+    handle_mouse(click_event(90, 15), &mut app);
+    assert_eq!(app.playlist_picker_index, 1);
+    assert!(!matches!(
+      app.get_current_route().active_block,
+      ActiveBlock::Dialog(DialogContext::AddToPlaylist)
+    ));
+  }
+
+  #[test]
+  fn playlist_picker_new_row_click_starts_naming() {
+    let mut app = track_table_app(20);
+    app.playlists = Some(mock_playlist_page(3));
+    app.active_playlist_index = Some(0);
+    app.open_add_to_playlist();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+    // Dialog geometry for 200x50 with 3+1 rows: inner list y=14, so the
+    // trailing "+ New playlist" row sits at y=17.
+    handle_mouse(click_event(90, 17), &mut app);
+    assert!(app.naming_playlist);
+    assert_eq!(app.playlist_picker_index, 3);
+    // Dialog stays open, nothing dispatched, track still pending.
+    assert!(matches!(
+      app.get_current_route().active_block,
+      ActiveBlock::Dialog(DialogContext::AddToPlaylist)
+    ));
+    assert!(rx.try_iter().collect::<Vec<_>>().is_empty());
+    assert!(app.pending_track_uri.is_some());
+  }
+
+  #[test]
+  fn playbar_heart_click_toggles_save_on_now_playing() {
+    // size 200x50: playbar song row y=46, prefix at x=2, heart at x=4..6.
+    let mut app = playback_app();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+    handle_mouse(click_event(4, 46), &mut app);
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert!(
+      dispatched
+        .iter()
+        .any(|e| matches!(e, IoEvent::ToggleSaveTrack(id) if id.as_str() == "spotify:track:mocktrack0")),
+      "heart click must toggle save, got: {:?}",
+      dispatched
+    );
+    // No picker, no navigation: the click was consumed by the heart.
+    assert!(app.pending_track_uri.is_none());
+    assert_eq!(
+      app.get_current_route().active_block,
+      ActiveBlock::TrackTable
+    );
+  }
+
+  #[test]
   fn playlist_search_loses_focus_when_navigating_away() {
     let mut app = track_table_app(20);
     app.track_table.context = Some(TrackTableContext::MyPlaylists);
@@ -3255,6 +3389,76 @@ mod tests {
     handle_app(Key::Enter, &mut app);
     let dispatched: Vec<IoEvent> = rx.try_iter().collect();
     assert!(dispatched.is_empty(), "dispatched: {:?}", dispatched);
+  }
+
+  fn device_app() -> App {
+    fn mock_device(id: &str) -> rspotify::model::Device {
+      serde_json::from_value(json!({
+        "id": id,
+        "is_active": false,
+        "is_private_session": false,
+        "is_restricted": false,
+        "name": id,
+        "type": "Computer",
+        "volume_percent": 50,
+      }))
+      .unwrap()
+    }
+    // size 200x50, margin 5: list chunk = (5,13,190,32), so device row 0
+    // sits at y=14 and row 1 at y=15 (x=10 is inside the borders).
+    let mut app = track_table_app(0);
+    app.devices = Some(vec![mock_device("d-active"), mock_device("d-other")]);
+    let playback: rspotify::model::CurrentPlaybackContext = serde_json::from_value(json!({
+      "device": {
+        "id": "d-active",
+        "is_active": true,
+        "is_private_session": false,
+        "is_restricted": false,
+        "name": "Mock Device",
+        "type": "Computer",
+        "volume_percent": 50,
+      },
+      "repeat_state": "off",
+      "shuffle_state": false,
+      "context": null,
+      "timestamp": 0,
+      "is_playing": true,
+      "item": null,
+      "currently_playing_type": "track",
+      "actions": { "disallows": {} },
+    }))
+    .unwrap();
+    app.current_playback_context = Some(playback);
+    app.selected_device_index = Some(0);
+    app.push_navigation_stack(RouteId::SelectedDevice, ActiveBlock::SelectDevice);
+    app
+  }
+
+  #[test]
+  fn click_other_device_row_dispatches_transfer() {
+    let mut app = device_app();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+    handle_mouse(click_event(10, 15), &mut app);
+    assert_eq!(app.selected_device_index, Some(1));
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(
+      dispatched,
+      vec![IoEvent::TransferPlaybackToDevice("d-other".to_string())]
+    );
+  }
+
+  #[test]
+  fn click_current_device_row_closes_screen_without_request() {
+    let mut app = device_app();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+    handle_mouse(click_event(10, 14), &mut app);
+    assert!(rx.try_iter().collect::<Vec<_>>().is_empty());
+    assert_ne!(
+      app.get_current_route().id,
+      crate::app::RouteId::SelectedDevice
+    );
   }
 
   fn playback_app() -> App {

@@ -1,7 +1,21 @@
 use super::{super::app::App, common_key_events};
-use crate::{app::RecommendationsContext, backend::IoEvent, event::Key};
+use crate::{
+  app::RecommendationsContext,
+  backend::IoEvent,
+  event::Key,
+  tui::group_consecutive_plays,
+};
 use anyhow::anyhow;
-use rspotify::model::Id;
+use rspotify::model::{Id, PlayHistory};
+
+/// Resolve a grouped-row index to its first raw history entry.
+fn grouped_selected_item(
+  items: &[PlayHistory],
+  group_index: usize,
+) -> Option<&PlayHistory> {
+  let groups = group_consecutive_plays(items);
+  items.get(groups.get(group_index)?.first_raw)
+}
 
 pub fn handler(key: Key, app: &mut App) {
   if common_key_events::down_event(key)
@@ -16,19 +30,17 @@ pub fn handler(key: Key, app: &mut App) {
     k if common_key_events::left_event(k) => common_key_events::handle_left_event(app),
     k if common_key_events::down_event(k) => {
       if let Some(recently_played_result) = &app.recently_played.result {
-        let next_index = common_key_events::on_down_press_handler(
-          &recently_played_result.items,
-          Some(app.recently_played.index),
-        );
+        let groups = group_consecutive_plays(&recently_played_result.items);
+        let next_index =
+          common_key_events::on_down_press_handler(&groups, Some(app.recently_played.index));
         app.recently_played.index = next_index;
       }
     }
     k if common_key_events::up_event(k) => {
       if let Some(recently_played_result) = &app.recently_played.result {
-        let next_index = common_key_events::on_up_press_handler(
-          &recently_played_result.items,
-          Some(app.recently_played.index),
-        );
+        let groups = group_consecutive_plays(&recently_played_result.items);
+        let next_index =
+          common_key_events::on_up_press_handler(&groups, Some(app.recently_played.index));
         app.recently_played.index = next_index;
       }
     }
@@ -40,19 +52,23 @@ pub fn handler(key: Key, app: &mut App) {
     }
     k if common_key_events::middle_event(k) => {
       if let Some(recently_played_result) = &app.recently_played.result {
-        let next_index = common_key_events::on_middle_press_handler(&recently_played_result.items);
+        let groups = group_consecutive_plays(&recently_played_result.items);
+        let next_index = common_key_events::on_middle_press_handler(&groups);
         app.recently_played.index = next_index;
       }
     }
     k if common_key_events::low_event(k) => {
       if let Some(recently_played_result) = &app.recently_played.result {
-        let next_index = common_key_events::on_low_press_handler(&recently_played_result.items);
+        let groups = group_consecutive_plays(&recently_played_result.items);
+        let next_index = common_key_events::on_low_press_handler(&groups);
         app.recently_played.index = next_index;
       }
     }
     Key::Char('s') => {
       if let Some(recently_played_result) = &app.recently_played.result.clone() {
-        if let Some(selected_track) = recently_played_result.items.get(app.recently_played.index) {
+        if let Some(selected_track) =
+          grouped_selected_item(&recently_played_result.items, app.recently_played.index)
+        {
           if let Some(track_id) = &selected_track.track.id {
             app.dispatch(IoEvent::ToggleSaveTrack(track_id.to_string()));
           };
@@ -62,15 +78,25 @@ pub fn handler(key: Key, app: &mut App) {
     Key::Enter => {
       if let Some(recently_played_result) = &app.recently_played.result.clone() {
         let items = &recently_played_result.items;
-        if app.recently_played.index >= items.len() {
+        // The view shows one row per consecutive-play group, so the queue
+        // hands over one copy per group — repeats are not queued.
+        let groups = group_consecutive_plays(items);
+        if app.recently_played.index >= groups.len() {
           if app.recently_played_has_more() {
             app.load_more_recently_played();
           }
           return;
         }
-        let track_uris: Vec<String> = items
+        let track_uris: Vec<String> = groups
           .iter()
-          .filter_map(|item| item.track.id.as_ref().map(|id| id.uri()))
+          .filter_map(|group| {
+            items
+              .get(group.first_raw)?
+              .track
+              .id
+              .as_ref()
+              .map(|id| id.uri())
+          })
           .collect();
         if track_uris.is_empty() {
           app.handle_error(anyhow!(
@@ -80,9 +106,13 @@ pub fn handler(key: Key, app: &mut App) {
         }
         // Episode/local tracks carry no playable uri, so keep the queue offset
         // aligned with the playable subset.
-        let offset = items[..app.recently_played.index]
+        let offset = groups[..app.recently_played.index]
           .iter()
-          .filter(|item| item.track.id.is_some())
+          .filter(|group| {
+            items
+              .get(group.first_raw)
+              .is_some_and(|item| item.track.id.is_some())
+          })
           .count();
 
         app.dispatch(IoEvent::StartPlayback(None, Some(track_uris), Some(offset)));
@@ -91,7 +121,7 @@ pub fn handler(key: Key, app: &mut App) {
     Key::Char('r') => {
       if let Some(recently_played_result) = &app.recently_played.result.clone() {
         let selected_track_history_item =
-          recently_played_result.items.get(app.recently_played.index);
+          grouped_selected_item(&recently_played_result.items, app.recently_played.index);
 
         if let Some(item) = selected_track_history_item {
           if let Some(id) = &item.track.id {
@@ -104,7 +134,9 @@ pub fn handler(key: Key, app: &mut App) {
     }
     _ if key == app.user_config.keys.add_item_to_queue => {
       if let Some(recently_played_result) = &app.recently_played.result.clone() {
-        if let Some(history) = recently_played_result.items.get(app.recently_played.index) {
+        if let Some(history) =
+          grouped_selected_item(&recently_played_result.items, app.recently_played.index)
+        {
           app.dispatch(IoEvent::AddItemToQueue(
             history
               .track
@@ -123,6 +155,73 @@ pub fn handler(key: Key, app: &mut App) {
 #[cfg(test)]
 mod tests {
   use super::{super::super::app::ActiveBlock, *};
+  use serde_json::json;
+
+  fn mock_history(id: &str, name: &str) -> rspotify::model::PlayHistory {
+    serde_json::from_value(json!({
+      "track": {
+        "album": {
+          "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "Mock Artist" }],
+          "external_urls": {},
+          "href": null,
+          "id": null,
+          "images": [],
+          "name": "Mock Album",
+        },
+        "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "Mock Artist" }],
+        "disc_number": 1,
+        "duration_ms": 180_000,
+        "explicit": false,
+        "external_ids": {},
+        "external_urls": {},
+        "href": null,
+        "id": id,
+        "is_local": false,
+        "name": name,
+        "preview_url": null,
+        "track_number": 1,
+        "type": "track",
+      },
+      "played_at": "2024-01-01T00:00:00Z",
+      "context": null,
+    }))
+    .unwrap()
+  }
+
+  #[test]
+  fn enter_hands_over_one_copy_per_group() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = App::default();
+    app.io_tx = Some(tx);
+    app.recently_played.result = Some(rspotify::model::CursorBasedPage {
+      href: String::new(),
+      items: vec![
+        mock_history("a", "A"),
+        mock_history("a", "A"),
+        mock_history("b", "B"),
+      ],
+      limit: 3,
+      next: None,
+      cursors: None,
+      total: Some(3),
+    });
+    // Group 1 = B (second row); the A×2 group collapses to a single uri.
+    app.recently_played.index = 1;
+
+    handler(Key::Enter, &mut app);
+
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(dispatched.len(), 1);
+    match &dispatched[0] {
+      IoEvent::StartPlayback(_, Some(uris), Some(offset)) => {
+        assert_eq!(uris.len(), 2);
+        assert!(uris[0].ends_with("track:a"));
+        assert!(uris[1].ends_with("track:b"));
+        assert_eq!(*offset, 1);
+      }
+      other => panic!("unexpected event: {:?}", other),
+    }
+  }
 
   #[test]
   fn on_left_press() {

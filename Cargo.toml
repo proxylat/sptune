@@ -30,6 +30,12 @@ reqwest = { version = "0.13", features = ["json"] }
 chrono = "0.4"
 futures = "0.3"
 clap_complete = "4.6.5"
+[target.'cfg(windows)'.dependencies]
+win-gsmtc = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# tokio-only: no async-io background threads; runs on our watcher runtime.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 
 [patch.crates-io]

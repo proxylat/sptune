@@ -37,6 +37,13 @@ pub fn handle_app(key: Key, app: &mut App) {
     track_table::handler(key, app);
     return;
   }
+  // While naming a new playlist every keystroke belongs to the name:
+  // route straight to the dialog handler so typing never fires global
+  // shortcuts (space toggles playback, d opens devices, digits seek...).
+  if app.naming_playlist {
+    dialog::handler(key, app);
+    return;
+  }
   // First handle any global event and then move to block event
   match key {
     Key::Esc => {
@@ -92,8 +99,11 @@ pub fn handle_app(key: Key, app: &mut App) {
     _ if Some(key) == app.user_config.keys.toggle_sidebar => {
       app.sidebar_minimized = !app.sidebar_minimized;
     }
-    // Resume Last Listening — only when the API reports nothing playing.
+    // Resume Last Listening — only when the API reports nothing playing,
+    // and only once the live state is known (startup must not resume over
+    // a session that the first poll hasn't revealed yet).
     _ if Some(key) == app.user_config.keys.resume_last_track
+      && app.playback_known
       && app.saved_last_track.is_some()
       && app
         .current_playback_context

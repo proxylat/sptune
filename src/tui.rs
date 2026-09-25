@@ -13,7 +13,7 @@ use layout::{
   build_playbar_controls, build_playbar_title, create_artist_string, format_playlist_duration,
   get_artist_highlight_state, get_color, get_percentage_width, get_search_results_highlight_state,
   millis_to_minutes, repeat_label, song_table_columns, track_table_with_date, PlaybarButton,
-  PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, REFRESH_GLYPH, VOLUME_BAR_LEN,
+  PLAYBAR_HEART_WIDTH, PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, PLAYLIST_SEARCH_PLACEHOLDER, REFRESH_GLYPH, VOLUME_BAR_LEN,
 };
 use ratatui::{
   layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -26,6 +26,7 @@ use ratatui::{
 };
 use rspotify::model::show::ResumePoint;
 use rspotify::model::PlayableItem;
+use rspotify::model::PlayHistory;
 use rspotify::model::RepeatState;
 use rspotify::prelude::Id;
 use unicode_width::UnicodeWidthStr;
@@ -272,6 +273,10 @@ fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'a>> {
   rows.push(mk_row(format!(
     "Restore settings on start: {}",
     on_off(app.user_config.behavior.restore_settings)
+  )));
+  rows.push(mk_row(format!(
+    "Playback poll: {}s",
+    app.user_config.behavior.playback_poll_secs
   )));
   rows.push(ListItem::new(Span::raw("".to_string())));
   rows.push(mk_header("─ Spotify in launch ─", header_style));
@@ -2089,7 +2094,7 @@ fn draw_playlist_search_box(f: &mut Frame, app: &App, layout_chunk: Rect, title:
     if query.is_empty() { 1 } else { query.chars().count() as u16 + 3 }
   } else if query.is_empty() {
     use unicode_width::UnicodeWidthStr;
-    let placeholder: &str = if cfg!(windows) { "/" } else { "" };
+    let placeholder: &str = PLAYLIST_SEARCH_PLACEHOLDER;
     UnicodeWidthStr::width(placeholder) as u16
   } else {
     query.chars().count() as u16
@@ -2139,7 +2144,7 @@ fn draw_playlist_search_box(f: &mut Frame, app: &App, layout_chunk: Rect, title:
       }
     }
   } else if query.is_empty() {
-    let placeholder_glyph: &str = if cfg!(windows) { "/" } else { "" };
+    let placeholder_glyph: &str = PLAYLIST_SEARCH_PLACEHOLDER;
     let placeholder = Span::styled(placeholder_glyph, Style::default().fg(theme.inactive));
     vec![placeholder]
   } else {
@@ -2408,6 +2413,17 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
       .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
       .border_style(Style::default().fg(app.user_config.theme.playbar_background));
     f.render_widget(block, layout_chunk);
+    // Live state not known yet (startup): never offer Resume — the user
+    // may have music playing elsewhere and the first poll hasn't landed.
+    if !app.playback_known {
+      let hint = Paragraph::new(Span::styled(
+        "Connecting…",
+        Style::default().fg(app.user_config.theme.inactive),
+      ))
+      .alignment(Alignment::Center);
+      f.render_widget(hint, layout_chunk);
+      return;
+    }
     if app.saved_last_track.is_some() {
       let rect = layout::playbar_resume_rect(layout_chunk);
       let button = Paragraph::new(Span::styled(
@@ -2485,7 +2501,9 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
       let repeat_text = repeat_label(current_playback_context.repeat_state);
       let controls_row = layout::playbar_controls_row(layout_chunk);
       let controls_start = layout::playbar_controls_x(layout_chunk, &controls);
-      let name_limit = (controls_start.saturating_sub(controls_row.x + 1)) as usize;
+      // Room for the [+ / ✓] prefix plus the liked heart; both fixed-width.
+      let name_limit =
+        (controls_start.saturating_sub(controls_row.x + 1 + 2 + PLAYBAR_HEART_WIDTH)) as usize;
       let name_text: String = if track_name.chars().count() > name_limit {
         track_name
           .chars()
@@ -2495,7 +2513,10 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
       } else {
         track_name
       };
-      let dim_style = Style::default().fg(theme.playbar_background);
+      // Off-state icons use the dim gray, never the playbar background
+      // color: background-as-foreground is invisible on dark terminals
+      // (shuffle/repeat looked "hidden" / "disappearing").
+      let dim_style = Style::default().fg(theme.inactive);
       let accent_style = Style::default().fg(theme.playbar_progress);
       let repeat_style = match current_playback_context.repeat_state {
         RepeatState::Off => dim_style,
@@ -2604,15 +2625,39 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
       } else {
         "+ ".to_string()
       };
-      // prefix is 2 cols, keep truncation inside song_row
+      // prefix is 2 cols, heart is PLAYBAR_HEART_WIDTH cols, keep truncation inside song_row
       let prefix_style = if in_playlist {
         Style::default().fg(theme.active).add_modifier(Modifier::BOLD)
       } else {
         Style::default().fg(theme.active).add_modifier(Modifier::BOLD)
       };
+      // Liked heart next to the prefix (blank for episodes): filled when the
+      // now-playing track is liked, outline otherwise. Fixed width always.
+      let (heart_text, heart_style) = match track_item {
+        PlayableItem::Track(track) => {
+          let liked = track
+            .id
+            .as_ref()
+            .map(|id| app.liked_song_ids_set.contains(&id.to_string()))
+            .unwrap_or(false);
+          if liked {
+            (
+              format!("{} ", app.user_config.behavior.liked_icon),
+              Style::default().fg(theme.active).add_modifier(Modifier::BOLD),
+            )
+          } else {
+            (
+              "♡ ".to_string(),
+              Style::default().fg(theme.inactive),
+            )
+          }
+        }
+        _ => ("  ".to_string(), Style::default()),
+      };
       f.render_widget(
         Paragraph::new(Line::from(vec![
           Span::styled(prefix, prefix_style),
+          Span::styled(heart_text, heart_style),
           Span::styled(name_text, name_style),
         ])),
         song_row,
@@ -3278,6 +3323,46 @@ pub fn draw_made_for_you(f: &mut Frame, app: &App, layout_chunk: Rect) {
   );
 }
 
+/// One row of the grouped Recently Played view: a run of consecutive plays
+/// of the same track. `first_raw` indexes the raw history items so actions
+/// (play, save, queue) resolve to the real entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayGroup {
+  pub first_raw: usize,
+  pub count: usize,
+}
+
+/// Collapse consecutive replays of the same track into one row, request-log
+/// style. The group key is the track id; id-less items (episodes, local
+/// files) never merge — each keeps its own row.
+pub fn group_consecutive_plays(items: &[PlayHistory]) -> Vec<PlayGroup> {
+  let mut groups: Vec<PlayGroup> = Vec::with_capacity(items.len());
+  for (i, item) in items.iter().enumerate() {
+    let key = item.track.id.clone().map(|id| id.to_string());
+    let continues = key.as_ref().is_some_and(|k| {
+      i > 0
+        && items[i - 1]
+          .track
+          .id
+          .clone()
+          .map(|id| id.to_string())
+          .as_ref()
+          == Some(k)
+    });
+    if continues {
+      if let Some(last) = groups.last_mut() {
+        last.count += 1;
+      }
+    } else {
+      groups.push(PlayGroup {
+        first_raw: i,
+        count: 1,
+      });
+    }
+  }
+  groups
+}
+
 pub fn draw_recently_played_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
   let b = &app.user_config.behavior;
   let columns = song_table_columns(
@@ -3320,14 +3405,20 @@ pub fn draw_recently_played_table(f: &mut Frame, app: &App, layout_chunk: Rect) 
 
     let selected_song_index = app.recently_played.index;
 
-    let mut items = recently_played
-      .items
+    let groups = group_consecutive_plays(&recently_played.items);
+    let mut items = groups
       .iter()
       .enumerate()
-      .map(|(index, item)| {
+      .map(|(index, group)| {
+        let item = &recently_played.items[group.first_raw];
         let track_id = item.track.id.clone().map(|id| id.to_string());
+        let title = if group.count > 1 {
+          format!("{} (×{})", item.track.name, group.count)
+        } else {
+          item.track.name.clone()
+        };
         let mut cells = song_row_cells(
-          &item.track.name,
+          &title,
           &create_artist_string(&item.track.artists),
           &item.track.album.name,
           "",
@@ -3650,7 +3741,8 @@ fn draw_confirm_remove_dialog(f: &mut Frame, app: &App) {
 fn draw_add_to_playlist_dialog(f: &mut Frame, app: &App) {
   let bounds = f.area();
   let width = std::cmp::min(bounds.width - 2, 45);
-  let count = app.playlists.as_ref().map_or(0, |p| p.items.len());
+  let items = app.playlists.as_ref().map_or(0, |p| p.items.len());
+  let count = items + 1; // trailing "+ New playlist" row
   let height = std::cmp::min(count.saturating_add(6), bounds.height as usize - 2) as u16;
   let left = (bounds.width - width) / 2;
   let top = bounds.height / 4;
@@ -3671,7 +3763,7 @@ fn draw_add_to_playlist_dialog(f: &mut Frame, app: &App) {
   let viewport = height.saturating_sub(4) as usize;
   let offset = app.playlist_picker_index.saturating_sub(viewport / 2);
 
-  let lines: Vec<Line> = app
+  let mut lines: Vec<Line> = app
     .playlists
     .as_ref()
     .map(|playlists| {
@@ -3685,16 +3777,40 @@ fn draw_add_to_playlist_dialog(f: &mut Frame, app: &App) {
           let selected = i == app.playlist_picker_index;
           Line::from(Span::styled(
             playlist.name.as_str(),
-            Style::default().fg(if selected {
-              app.user_config.theme.selected
+            if selected {
+              // BOLD like every other list: color alone is invisible on
+              // terminals where selected ≈ text.
+              Style::default()
+                .fg(app.user_config.theme.selected)
+                .add_modifier(Modifier::BOLD)
             } else {
-              app.user_config.theme.text
-            }),
+              Style::default().fg(app.user_config.theme.text)
+            },
           ))
         })
         .collect()
     })
     .unwrap_or_default();
+  // Trailing "+ New playlist" row (index == items). In name-entry mode it
+  // shows the typed name with a block cursor.
+  if offset <= items && items < offset + viewport {
+    let selected = app.playlist_picker_index == items;
+    let label = if app.naming_playlist {
+      format!("> {}▌", app.new_playlist_name)
+    } else {
+      "+ New playlist".to_string()
+    };
+    let style = if selected {
+      Style::default()
+        .fg(app.user_config.theme.selected)
+        .add_modifier(Modifier::BOLD)
+    } else if app.naming_playlist {
+      Style::default().fg(app.user_config.theme.active)
+    } else {
+      Style::default().fg(app.user_config.theme.text)
+    };
+    lines.push(Line::from(Span::styled(label, style)));
+  }
 
   let text = Paragraph::new(lines)
     .wrap(Wrap { trim: true })
@@ -3707,8 +3823,13 @@ fn draw_add_to_playlist_dialog(f: &mut Frame, app: &App) {
     }),
   );
 
+  let hint_text = if app.naming_playlist {
+    "type name   Enter create   Esc back"
+  } else {
+    "↑/↓ pick   Enter add   q cancel"
+  };
   let hint = Paragraph::new(Line::from(Span::styled(
-    "↑/↓ pick   Enter add   q cancel",
+    hint_text,
     Style::default().fg(app.user_config.theme.inactive),
   )))
   .alignment(Alignment::Center);
@@ -4003,6 +4124,62 @@ mod tests {
   use ratatui::backend::TestBackend;
   use ratatui::Terminal;
   use serde_json::json;
+
+  fn mock_history(id: Option<&str>, name: &str) -> PlayHistory {
+    serde_json::from_value(json!({
+      "track": {
+        "album": {
+          "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "Mock Artist" }],
+          "external_urls": {},
+          "href": null,
+          "id": null,
+          "images": [],
+          "name": "Mock Album",
+        },
+        "artists": [{ "external_urls": {}, "href": null, "id": null, "name": "Mock Artist" }],
+        "disc_number": 1,
+        "duration_ms": 180_000,
+        "explicit": false,
+        "external_ids": {},
+        "external_urls": {},
+        "href": null,
+        "id": id,
+        "is_local": false,
+        "name": name,
+        "preview_url": null,
+        "track_number": 1,
+        "type": "track",
+      },
+      "played_at": "2024-01-01T00:00:00Z",
+      "context": null,
+    }))
+    .unwrap()
+  }
+
+  #[test]
+  fn groups_collapse_consecutive_replays_only() {
+    let items = vec![
+      mock_history(Some("a"), "A"),
+      mock_history(Some("a"), "A"),
+      mock_history(Some("a"), "A"),
+      mock_history(Some("b"), "B"),
+      mock_history(Some("a"), "A"),
+      mock_history(None, "Local"),
+      mock_history(None, "Local"),
+    ];
+    let groups = group_consecutive_plays(&items);
+    // The second A run stays separate; id-less rows never merge.
+    assert_eq!(
+      groups,
+      vec![
+        PlayGroup { first_raw: 0, count: 3 },
+        PlayGroup { first_raw: 3, count: 1 },
+        PlayGroup { first_raw: 4, count: 1 },
+        PlayGroup { first_raw: 5, count: 1 },
+        PlayGroup { first_raw: 6, count: 1 },
+      ]
+    );
+  }
 
   fn render_grid(n_items: usize, selected: usize, w: u16, h: u16) -> Vec<Vec<String>> {
     render_grid_offset(n_items, selected, None, w, h)
@@ -4864,5 +5041,83 @@ mod tests {
     let num_idx = row[..num_byte].chars().count();
     let name_idx = row[..name_byte].chars().count();
     assert_eq!(name_idx - num_idx, 4 + spacing + gap, "row gap:\n{row}");
+  }
+
+  #[test]
+  fn playlist_picker_selected_row_is_bold() {    // The picker marks its row with color + BOLD (color alone is invisible
+    // on terminals where selected ≈ text).
+    let mut app = App::default();
+    app.playlists = Some(rspotify::model::Page {
+      href: String::new(),
+      items: (0..3)
+        .map(|i| {
+          serde_json::from_value(json!({
+            "collaborative": false,
+            "external_urls": {},
+            "href": format!("spotify:playlist:mockplaylist{}", i),
+            "id": format!("mockplaylist{}", i),
+            "images": [],
+            "name": format!("Mock Playlist {}", i),
+            "owner": {
+              "display_name": "Mock User",
+              "external_urls": {},
+              "followers": null,
+              "href": "spotify:user:mockuser",
+              "id": "mockuser",
+              "images": [],
+            },
+            "public": null,
+            "snapshot_id": format!("snap{}", i),
+            "items": { "href": "", "total": 150 },
+          }))
+          .unwrap()
+        })
+        .collect(),
+      limit: 3,
+      next: None,
+      offset: 0,
+      previous: None,
+      total: 3,
+    });
+    app.playlist_picker_index = 1;
+    let backend = TestBackend::new(200, 50);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| draw_add_to_playlist_dialog(f, &app)).unwrap();
+    // Dialog geometry for 200x50: width 45 at x=77, top y=12, inner list at
+    // x=79 starting y=14 — index 1 sits on y=15.
+    let buffer = terminal.backend().buffer();
+    let bold_at = |x: u16, y: u16| {
+      buffer
+        .cell((x, y))
+        .map(|c| c.modifier.contains(Modifier::BOLD))
+        .unwrap_or(false)
+    };
+    assert!(bold_at(79, 15), "selected playlist row must be bold");
+    assert!(!bold_at(79, 14), "unselected row must not be bold");
+    assert!(!bold_at(79, 16), "unselected row must not be bold");
+  }
+
+  #[test]
+  fn playbar_heart_reflects_liked_state() {
+    // Song row starts with [+ / ✓] then the heart: filled when the
+    // now-playing track is liked, outline otherwise, name right after.
+    let song_row_text = |liked: bool| {
+      let mut app = playback_app_with_track("mocktrack1");
+      if liked {
+        app.liked_song_ids_set.insert("spotify:track:mocktrack1".to_string());
+      }
+      let backend = TestBackend::new(200, 10);
+      let mut terminal = Terminal::new(backend).unwrap();
+      terminal.draw(|f| draw_playbar(f, &app, Rect::new(0, 0, 200, 10))).unwrap();
+      (0..60)
+        .map(|x| {
+          terminal.backend().buffer().cell((x, 1)).map(|c| c.symbol()).unwrap_or(" ")
+        })
+        .collect::<String>()
+    };
+    let liked_row = song_row_text(true);
+    assert!(liked_row.contains("+ ♥ Mock Song"), "liked row:\n{liked_row}");
+    let unliked_row = song_row_text(false);
+    assert!(unliked_row.contains("+ ♡ Mock Song"), "unliked row:\n{unliked_row}");
   }
 }

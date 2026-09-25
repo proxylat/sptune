@@ -64,15 +64,21 @@ pub fn handler(key: Key, app: &mut App) {
       if let (Some(playlists), Some(selected_playlist_index)) =
         (&app.playlists, &app.selected_playlist_index)
       {
-        // Re-opening the playlist that is already open must not re-fetch.
-        if app.track_table.context == Some(TrackTableContext::MyPlaylists)
+        // The view switch is free: always navigate, even to the already-open
+        // playlist (the user may be on an artist page — stored state still
+        // says "open" but the screen shows something else). Only the fetch
+        // costs tokens, so only it is deduped, and only while we are already
+        // viewing this playlist. A warm cache is served without token cost
+        // by the backend anyway.
+        let already_viewing = app.track_table.context == Some(TrackTableContext::MyPlaylists)
           && app.active_playlist_index == Some(*selected_playlist_index)
-        {
-          return;
-        }
+          && app.get_current_route().id == RouteId::TrackTable;
         app.active_playlist_index = Some(selected_playlist_index.to_owned());
         app.track_table.context = Some(TrackTableContext::MyPlaylists);
         app.playlist_offset = 0;
+        if already_viewing {
+          return;
+        }
         if let Some(selected_playlist) = playlists.items.get(selected_playlist_index.to_owned()) {
           let playlist_id = selected_playlist.id.to_string();
           app.dispatch(IoEvent::GetPlaylistItems(playlist_id, app.playlist_offset));
@@ -147,10 +153,38 @@ mod tests {
     app.selected_playlist_index = Some(1);
     app.active_playlist_index = Some(1);
     app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
 
     handler(Key::Enter, &mut app);
 
     assert!(rx.try_iter().collect::<Vec<_>>().is_empty());
+  }
+
+  #[test]
+  fn enter_on_the_open_playlist_from_another_page_refetches() {
+    // Stored state still says "open" (active == selected, context set) but
+    // the screen shows an artist page — the click must navigate back, not
+    // hit the already-open early return.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = App::default();
+    app.io_tx = Some(tx);
+    app.playlists = Some(mock_playlist_page(3));
+    app.selected_playlist_index = Some(1);
+    app.active_playlist_index = Some(1);
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.push_navigation_stack(RouteId::Artist, ActiveBlock::ArtistBlock);
+
+    handler(Key::Enter, &mut app);
+
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(
+      dispatched,
+      vec![IoEvent::GetPlaylistItems(
+        "spotify:playlist:mockplaylist1".to_string(),
+        0
+      )]
+    );
+    assert_eq!(app.active_playlist_index, Some(1));
   }
 
   #[test]

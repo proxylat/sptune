@@ -1,4 +1,5 @@
 pub mod chromium_flags;
+pub mod media_watch;
 pub mod spotify;
 #[cfg(windows)]
 pub mod windows;

@@ -145,21 +145,57 @@ fn handle_playlist_dialog(app: &mut App) {
 }
 
 // Pick a playlist for the captured track; Enter adds it, arrows move the
-// selection, q/Esc closes without adding.
+// selection, q/Esc closes without adding. The last row is "+ New playlist":
+// Enter there flips into name-entry mode (typed chars build the name,
+// Enter creates it private and adds the track, Esc back to the list).
 fn handle_add_to_playlist_dialog(key: Key, app: &mut App) {
-  let count = app.playlists.as_ref().map_or(0, |p| p.items.len());
+  if app.naming_playlist {
+    match key {
+      Key::Enter => {
+        let name = app.new_playlist_name.trim().to_string();
+        if name.is_empty() {
+          return;
+        }
+        let Some(uri) = app.pending_track_uri.take() else {
+          app.pop_navigation_stack();
+          return;
+        };
+        app.naming_playlist = false;
+        app.new_playlist_name.clear();
+        app.pop_navigation_stack();
+        app.dispatch(crate::backend::IoEvent::CreatePlaylistThenAdd(name, uri));
+      }
+      Key::Esc => {
+        app.naming_playlist = false;
+        app.new_playlist_name.clear();
+      }
+      Key::Backspace => {
+        app.new_playlist_name.pop();
+      }
+      Key::Char(c) => {
+        if app.new_playlist_name.len() < 100 {
+          app.new_playlist_name.push(c);
+        }
+      }
+      _ => {}
+    }
+    return;
+  }
+  let items = app.playlists.as_ref().map_or(0, |p| p.items.len());
+  let count = items + 1; // trailing "+ New playlist" row
   match key {
     Key::Down | Key::Char('j') => {
-      if count > 0 {
-        app.playlist_picker_index = (app.playlist_picker_index + 1) % count;
-      }
+      app.playlist_picker_index = (app.playlist_picker_index + 1) % count;
     }
     Key::Up | Key::Char('k') => {
-      if count > 0 {
-        app.playlist_picker_index = (app.playlist_picker_index + count - 1) % count;
-      }
+      app.playlist_picker_index = (app.playlist_picker_index + count - 1) % count;
     }
     Key::Enter => {
+      if app.playlist_picker_index == items {
+        app.naming_playlist = true;
+        app.new_playlist_name.clear();
+        return;
+      }
       let Some(uri) = app.pending_track_uri.take() else {
         app.pop_navigation_stack();
         return;
@@ -211,5 +247,152 @@ fn handle_confirm_remove_dialog(key: Key, app: &mut App) {
       }
     }
     _ => {}
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::app::RouteId;
+  use crate::backend::IoEvent;
+  use serde_json::json;
+
+  fn picker_app() -> App {
+    let mut app = App::default();
+    app.playlists = Some(rspotify::model::Page {
+      href: String::new(),
+      items: (0..2)
+        .map(|i| {
+          serde_json::from_value(json!({
+            "collaborative": false,
+            "external_urls": {},
+            "href": format!("spotify:playlist:mockplaylist{}", i),
+            "id": format!("mockplaylist{}", i),
+            "images": [],
+            "name": format!("Mock Playlist {}", i),
+            "owner": {
+              "display_name": "Mock User",
+              "external_urls": {},
+              "followers": null,
+              "href": "spotify:user:mockuser",
+              "id": "mockuser",
+              "images": [],
+            },
+            "public": null,
+            "snapshot_id": format!("snap{}", i),
+            "items": { "href": "", "total": 10 },
+          }))
+          .unwrap()
+        })
+        .collect(),
+      limit: 2,
+      next: None,
+      offset: 0,
+      previous: None,
+      total: 2,
+    });
+    app.pending_track_uri = Some("spotify:track:mocktrack0".to_string());
+    app.playlist_picker_index = 0;
+    app.push_navigation_stack(
+      RouteId::Dialog,
+      ActiveBlock::Dialog(DialogContext::AddToPlaylist),
+    );
+    let (tx, _rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+    app
+  }
+
+  #[test]
+  fn enter_on_new_row_starts_naming() {
+    let mut app = picker_app();
+    app.playlist_picker_index = 2; // trailing "+ New playlist" row
+    handler(Key::Enter, &mut app);
+    assert!(app.naming_playlist);
+    // Dialog stays open, track still pending.
+    assert!(matches!(
+      app.get_current_route().active_block,
+      ActiveBlock::Dialog(DialogContext::AddToPlaylist)
+    ));
+    assert!(app.pending_track_uri.is_some());
+  }
+
+  #[test]
+  fn naming_enter_dispatches_create_then_add() {
+    let mut app = picker_app();
+    app.naming_playlist = true;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+    for c in "Gym".chars() {
+      handler(Key::Char(c), &mut app);
+    }
+    handler(Key::Enter, &mut app);
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(
+      dispatched,
+      vec![IoEvent::CreatePlaylistThenAdd(
+        "Gym".to_string(),
+        "spotify:track:mocktrack0".to_string(),
+      )]
+    );
+    assert!(!matches!(
+      app.get_current_route().active_block,
+      ActiveBlock::Dialog(DialogContext::AddToPlaylist)
+    ));
+  }
+
+  #[test]
+  fn naming_empty_enter_stays_and_esc_cancels() {
+    let mut app = picker_app();
+    app.naming_playlist = true;
+    handler(Key::Enter, &mut app); // empty name: no-op
+    assert!(app.naming_playlist);
+    handler(Key::Char('x'), &mut app);
+    handler(Key::Backspace, &mut app);
+    assert!(app.new_playlist_name.is_empty());
+    handler(Key::Esc, &mut app);
+    assert!(!app.naming_playlist);
+    assert!(matches!(
+      app.get_current_route().active_block,
+      ActiveBlock::Dialog(DialogContext::AddToPlaylist)
+    ));
+  }
+
+  #[test]
+  fn picker_nav_wraps_over_new_row() {
+    let mut app = picker_app();
+    handler(Key::Up, &mut app); // 0 -> 2 (New row)
+    assert_eq!(app.playlist_picker_index, 2);
+    handler(Key::Down, &mut app); // 2 -> 0
+    assert_eq!(app.playlist_picker_index, 0);
+  }
+
+  // Typing the name must go through the real entry point: handle_app runs
+  // global shortcuts (space, d, digits...) before block handlers, so these
+  // tests fail if the naming capture in handle_app regresses.
+  #[test]
+  fn naming_typing_through_handle_app_fires_no_shortcuts() {
+    let mut app = picker_app();
+    app.naming_playlist = true;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+    // 'd' opens devices, space toggles playback — both must land in the name.
+    for c in "a d".chars() {
+      crate::handlers::handle_app(Key::Char(c), &mut app);
+    }
+    assert_eq!(app.new_playlist_name, "a d");
+    assert!(rx.try_iter().collect::<Vec<_>>().is_empty());
+  }
+
+  #[test]
+  fn naming_esc_through_handle_app_cancels_without_closing() {
+    let mut app = picker_app();
+    app.naming_playlist = true;
+    crate::handlers::handle_app(Key::Esc, &mut app);
+    assert!(!app.naming_playlist);
+    // Dialog stays open (back to the list), not popped.
+    assert!(matches!(
+      app.get_current_route().active_block,
+      ActiveBlock::Dialog(DialogContext::AddToPlaylist)
+    ));
   }
 }

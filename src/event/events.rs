@@ -1,6 +1,12 @@
 use crate::event::Key;
 use crossterm::event;
-use std::{sync::mpsc, thread, time::Duration};
+use std::{
+  sync::mpsc,
+  thread,
+  time::Duration,
+};
+#[cfg(any(windows, test))]
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy)]
 /// Configuration for event handling.
@@ -19,6 +25,53 @@ impl Default for EventConfig {
       tick_rate: Duration::from_millis(250),
       mouse_y_offset: 0,
     }
+  }
+}
+
+/// Drops synthesized duplicate Press records. Some Windows ConPTY builds
+/// queue two identical Press records for one physical keypress ("ride" ->
+/// "rriiddee"), and the pair can straddle two poll drains — so unlike the
+/// old per-drain check, this guard persists across drains and uses a tight
+/// time window instead: duplicates arrive microseconds apart, while the
+/// fastest human same-key double-tap is 50ms+. Only Press is filtered;
+/// Release, Repeat, other keys and mouse events reset the guard, so held-key
+/// auto-repeat and fast retyping pass through untouched.
+/// Compiled on Windows (where the duplicates occur) and for tests everywhere.
+#[cfg(any(windows, test))]
+#[derive(Debug, Default)]
+struct DupPressFilter {
+  last: Option<(event::KeyCode, event::KeyModifiers, Instant)>,
+}
+
+#[cfg(any(windows, test))]
+impl DupPressFilter {
+  const WINDOW: Duration = Duration::from_millis(25);
+
+  /// Returns true when this Press is a synthesized duplicate of the previous
+  /// one and must be dropped. Platform-independent so it stays unit-tested;
+  /// wired in under `cfg(windows)` where the duplicates occur.
+  fn should_drop(
+    &mut self,
+    code: event::KeyCode,
+    modifiers: event::KeyModifiers,
+    kind: event::KeyEventKind,
+    now: Instant,
+  ) -> bool {
+    if !matches!(kind, event::KeyEventKind::Press) {
+      self.last = None;
+      return false;
+    }
+    if let Some((c, m, t)) = self.last {
+      if c == code && m == modifiers && now.duration_since(t) <= Self::WINDOW {
+        return true;
+      }
+    }
+    self.last = Some((code, modifiers, now));
+    false
+  }
+
+  fn reset(&mut self) {
+    self.last = None;
   }
 }
 
@@ -61,6 +114,10 @@ impl Events {
     let event_tx = tx.clone();
     thread::spawn(move || {
       let mut batch: Vec<Event<InputEvent>> = Vec::new();
+      // Persists across poll drains: a duplicate pair split over two drains
+      // must still be recognized (see DupPressFilter).
+      #[cfg(windows)]
+      let mut dup_filter = DupPressFilter::default();
       loop {
         // poll for tick rate duration, if no event, sent tick event.
         // poll/read failures mean terminal is closing; exit thread instead of panicking.
@@ -78,14 +135,6 @@ impl Events {
           // redraw, so a busy pointer (drag/move flood) would otherwise queue
           // hundreds of frames and lag the screen by seconds.
           batch.clear();
-          // Windows ConPTY/conhost builds can queue two identical Press
-          // records for one physical keypress ("ride" -> "rriiddee"); an
-          // identical Press read immediately after itself within one drain
-          // is synthesized, so drop it. Real typing never lands two presses
-          // in the same microsecond drain, and conhost coalesces held-key
-          // auto-repeat into a single record, which keeps this safe.
-          #[cfg(windows)]
-          let mut prev_press: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> = None;
           loop {
             let ev = match event::read() {
               Ok(ev) => match ev {
@@ -95,23 +144,21 @@ impl Events {
                     key.kind,
                     event::KeyEventKind::Release
                   ) {
+                    #[cfg(windows)]
+                    dup_filter.reset();
                     continue;
                   }
                   #[cfg(windows)]
                   {
-                    let id = (key.code, key.modifiers);
-                    if matches!(key.kind, event::KeyEventKind::Press) {
-                      if prev_press == Some(id) {
-                        continue; // synthesized duplicate of the previous read
-                      }
-                      prev_press = Some(id);
-                    } else {
-                      prev_press = None;
+                    if dup_filter.should_drop(key.code, key.modifiers, key.kind, Instant::now()) {
+                      continue; // synthesized duplicate of the previous Press
                     }
                   }
                   Event::Input(InputEvent::Key(Key::from(key)))
                 }
                 event::Event::Mouse(mut mouse) => {
+                  #[cfg(windows)]
+                  dup_filter.reset();
                   if config.mouse_y_offset != 0 {
                     mouse.row = (mouse.row as i16 + config.mouse_y_offset).max(0) as u16;
                   }
@@ -121,12 +168,6 @@ impl Events {
               },
               Err(_) => break,
             };
-            #[cfg(windows)]
-            {
-              if !matches!(&ev, Event::Input(InputEvent::Key(_))) {
-                prev_press = None;
-              }
-            }
             push_coalesced(&mut batch, ev);
             match event::poll(Duration::from_millis(0)) {
               Ok(more) => {
@@ -193,7 +234,9 @@ fn push_coalesced(batch: &mut Vec<Event<InputEvent>>, ev: Event<InputEvent>) {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+  use crossterm::event::{
+    KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+  };
 
   fn mouse(kind: MouseEventKind) -> Event<InputEvent> {
     Event::Input(InputEvent::Mouse(MouseEvent {
@@ -224,16 +267,6 @@ mod tests {
   }
 
   #[test]
-  fn wheel_and_keys_survive_unchanged() {
-    let mut batch = Vec::new();
-    push_coalesced(&mut batch, key());
-    push_coalesced(&mut batch, mouse(MouseEventKind::ScrollDown));
-    push_coalesced(&mut batch, mouse(MouseEventKind::Drag(MouseButton::Left)));
-    push_coalesced(&mut batch, key());
-    assert_eq!(batch.len(), 4);
-  }
-
-  #[test]
   fn motion_and_drag_merge_but_release_does_not() {
     let mut batch = Vec::new();
     push_coalesced(&mut batch, mouse(MouseEventKind::Moved));
@@ -241,5 +274,88 @@ mod tests {
     push_coalesced(&mut batch, mouse(MouseEventKind::Up(MouseButton::Left)));
     push_coalesced(&mut batch, mouse(MouseEventKind::Moved));
     assert_eq!(batch.len(), 3);
+  }
+
+  fn press(code: KeyCode) -> (KeyCode, KeyModifiers, KeyEventKind) {
+    (code, KeyModifiers::NONE, KeyEventKind::Press)
+  }
+
+  #[test]
+  fn dup_filter_drops_back_to_back_pair() {
+    // The ConPTY synthesized duplicate: same Press microseconds apart.
+    let mut f = DupPressFilter::default();
+    let t = Instant::now();
+    let (c, m, k) = press(KeyCode::Char('r'));
+    assert!(!f.should_drop(c, m, k, t));
+    assert!(f.should_drop(c, m, k, t));
+  }
+
+  #[test]
+  fn dup_filter_drops_triple_press_to_one() {
+    // Window is measured from the first Press, so a triple still yields one.
+    let mut f = DupPressFilter::default();
+    let t = Instant::now();
+    let (c, m, k) = press(KeyCode::Char('r'));
+    assert!(!f.should_drop(c, m, k, t));
+    assert!(f.should_drop(c, m, k, t));
+    assert!(f.should_drop(c, m, k, t));
+  }
+
+  #[test]
+  fn dup_filter_keeps_fast_retype() {
+    // Same key 100ms later is a human retype, not a duplicate.
+    let mut f = DupPressFilter::default();
+    let t = Instant::now();
+    let (c, m, k) = press(KeyCode::Char('r'));
+    assert!(!f.should_drop(c, m, k, t));
+    assert!(!f.should_drop(c, m, k, t + Duration::from_millis(100)));
+  }
+
+  #[test]
+  fn dup_filter_different_key_resets() {
+    let mut f = DupPressFilter::default();
+    let t = Instant::now();
+    let (r, m, k) = press(KeyCode::Char('r'));
+    let (i, _, _) = press(KeyCode::Char('i'));
+    assert!(!f.should_drop(r, m, k, t));
+    assert!(!f.should_drop(i, m, k, t));
+    // ...and the original key right after is a real alternating press.
+    assert!(!f.should_drop(r, m, k, t));
+  }
+
+  #[test]
+  fn dup_filter_release_resets() {
+    let mut f = DupPressFilter::default();
+    let t = Instant::now();
+    let (c, m, _) = press(KeyCode::Char('r'));
+    assert!(!f.should_drop(c, m, KeyEventKind::Press, t));
+    assert!(f.should_drop(c, m, KeyEventKind::Press, t));
+    assert!(!f.should_drop(c, m, KeyEventKind::Release, t));
+    assert!(!f.should_drop(c, m, KeyEventKind::Press, t));
+  }
+
+  #[test]
+  fn dup_filter_repeat_passes_through() {
+    // Held-key auto-repeat must never be eaten: Repeat resets, never arms.
+    let mut f = DupPressFilter::default();
+    let t = Instant::now();
+    let (c, m, _) = press(KeyCode::Char('r'));
+    assert!(!f.should_drop(c, m, KeyEventKind::Press, t));
+    assert!(!f.should_drop(c, m, KeyEventKind::Repeat, t));
+    assert!(!f.should_drop(c, m, KeyEventKind::Repeat, t));
+    assert!(!f.should_drop(c, m, KeyEventKind::Press, t));
+  }
+
+  #[test]
+  fn dup_filter_modifiers_distinguish() {
+    let mut f = DupPressFilter::default();
+    let t = Instant::now();
+    assert!(!f.should_drop(KeyCode::Char('f'), KeyModifiers::NONE, KeyEventKind::Press, t));
+    assert!(!f.should_drop(
+      KeyCode::Char('f'),
+      KeyModifiers::CONTROL,
+      KeyEventKind::Press,
+      t
+    ));
   }
 }

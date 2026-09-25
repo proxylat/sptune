@@ -353,6 +353,7 @@ pub struct BehaviorConfigString {
   pub enable_remove_from_playlist: Option<bool>,
   pub max_display_length: Option<u16>,
   pub enable_animations: Option<bool>,
+  pub playback_poll_secs: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -383,6 +384,10 @@ pub struct BehaviorConfig {
   /// Maximum characters for name columns (song, artist, album). 0 = no limit.
   pub max_display_length: u16,
   pub enable_animations: bool,
+  /// Playback "what's playing?" poll cadence while playing, in seconds.
+  /// Cycle: 1 -> 2 -> 5 -> 10 -> 15 -> 30. Floor is 1s: sub-second
+  /// polling would eat the token bucket and risk Spotify 429s.
+  pub playback_poll_secs: u64,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -514,7 +519,7 @@ impl UserConfig {
         add_to_playlist: Key::Char('a'),
         refresh: None,
         clear_cache: None,
-        search_in_playlist: Some(Key::Char('f')),
+        search_in_playlist: Some(Key::Ctrl('f')),
         remove_from_playlist: None,
         toggle_sidebar: Some(Key::Char('\\')),
         resume_last_track: Some(Key::Char('R')),
@@ -545,6 +550,7 @@ impl UserConfig {
         enable_remove_from_playlist: false,
         max_display_length: 0,
         enable_animations: true,
+        playback_poll_secs: 5,
       },
       terminal: {
         let mut t = TerminalConfig::default();
@@ -737,6 +743,10 @@ impl UserConfig {
 
     if let Some(max_display_length) = behavior_config.max_display_length {
       self.behavior.max_display_length = max_display_length;
+    }
+
+    if let Some(playback_poll_secs) = behavior_config.playback_poll_secs {
+      self.behavior.playback_poll_secs = playback_poll_secs.clamp(1, 30);
     }
 
     if let Some(paused_icon) = behavior_config.paused_icon {

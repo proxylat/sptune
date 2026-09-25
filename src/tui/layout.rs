@@ -31,6 +31,11 @@ pub const SETTINGS_ROW_COUNT: u16 = 33;
 
 // Prefix for list panel titles; clicking the title row refreshes the list.
 pub const REFRESH_GLYPH: &str = "♻ ";
+// Placeholder in the in-playlist search box. Plain ASCII on every platform:
+// the previous Font Awesome PUA glyph (U+F002) renders as tofu on stock
+// console fonts, and cfg!(windows) is compile-time so cross-built binaries
+// got the wrong branch anyway.
+pub const PLAYLIST_SEARCH_PLACEHOLDER: &str = "/";
 pub const SIDEBAR_TOGGLE_GLYPH: &str = "≡";
 pub const NUMBER_TO_TITLE_GAP: u16 = 2;
 
@@ -53,6 +58,11 @@ pub fn playbar_volume_rect(playbar: Rect) -> Rect {
     1,
   )
 }
+
+// Liked-heart cell next to the playbar [+ / ✓] prefix: glyph + space, always
+// 2 cols (blank for episodes) so the song name never shifts. Shared by the
+// drawer, the truncation math and the mouse hit-test.
+pub const PLAYBAR_HEART_WIDTH: u16 = 2;
 
 // The playbar row holding the song name, full inner width. Shares the first
 // inner row (y+1) with the centered transport buttons: the name renders left
@@ -685,7 +695,10 @@ pub fn list_scroll(app: &App, block: ActiveBlock, rect: Rect) -> Option<ListScro
     },
     ActiveBlock::RecentlyPlayed => {
       let recently_played = app.recently_played.result.as_ref()?;
-      selection(app.recently_played.index, recently_played.items.len())
+      selection(
+        app.recently_played.index,
+        super::group_consecutive_plays(&recently_played.items).len(),
+      )
     }
     ActiveBlock::AlbumList => {
       let albums = app.library.saved_albums.get_results(None)?;
@@ -822,7 +835,7 @@ pub fn repeat_label(repeat: RepeatState) -> Option<String> {
 // Playbar title: the trailing cells of the title text are the fullscreen
 // toggle (see handle_playbar_click). ASCII so every terminal renders it.
 pub fn build_playbar_title(_play_title: &str, device_name: &str) -> String {
-  format!("{:-7} ({})——[ ]", "Device", device_name)
+  format!("{:-7}({})——[ ]", "Device", device_name)
 }
 
 // Which track-table contexts have a Date Added column (they carry added_at).
