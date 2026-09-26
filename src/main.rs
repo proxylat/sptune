@@ -5,6 +5,7 @@ mod client_creds;
 mod handlers;
 mod platform;
 mod redirect_uri;
+mod soloist_setup;
 mod soloist_ws;
 mod tui;
 
@@ -226,6 +227,12 @@ of the app. Beware that this comes at a CPU cost!",
         .value_name("SHELL"),
     )
     .arg(
+      Arg::new("setup-soloist")
+        .long("setup-soloist")
+        .help("Run the interactive Soloist headless-playback setup, then continue startup.")
+        .action(clap::ArgAction::SetTrue),
+    )
+    .arg(
       Arg::new("no-cache")
         .long("no-cache")
         .help("Run without reading or writing the on-disk caches")
@@ -274,6 +281,10 @@ of the app. Beware that this comes at a CPU cost!",
     user_config.path_to_config.replace(path);
   }
   user_config.load_config()?;
+  let had_config_file = user_config
+    .path_to_config
+    .as_ref()
+    .is_some_and(|p| p.config_file_path.exists());
 
   if let Some(tick_rate) = matches.get_one::<u64>("tick-rate") {
     if *tick_rate >= 1000 {
@@ -286,6 +297,12 @@ of the app. Beware that this comes at a CPU cost!",
   let mut client_config = ClientConfig::new();
   client_config.load_config()?;
   let config_paths = client_config.get_or_build_paths()?;
+
+  // Soloist setup: explicit flag on any OS, or first run on Linux (fresh
+  // config.yml). Runs before auth so startup launches Soloist directly.
+  if matches.get_flag("setup-soloist") || (!had_config_file && cfg!(target_os = "linux")) {
+    crate::soloist_setup::run_setup(&mut client_config, &mut user_config).await?;
+  }
 
   // Start authorization with spotify
   let oauth = OAuth {

@@ -48,6 +48,8 @@ soloist:
 
 Key resolution: `SOLOIST_API_KEY` env var, else `soloist_api_key:` in `~/.config/sptune/client.yml`. Pair the device once from the official Spotify app (same network); after that it persists — transfer only works after pairing. Enabled but no key, or binary missing, prints a hint and continues without soloist.
 
+First run on Linux walks you through setup (API key, device name, binary download) automatically; existing installs can re-run it anytime with `sptune --setup-soloist`.
+
 How it works: sptune launches soloist with its own data dir (`~/.config/sptune/soloist`, so it never collides with a manually-run Soloist) and the local WebSocket API enabled. Playback state (track, position, play/pause, volume, shuffle/repeat) is pushed over that socket, replacing the 5s Web API poll while Soloist is the active device. Control commands (play/pause/seek/volume) still go through the Spotify Web API; the socket is read-only. If you start playback on another device, or Soloist exits, sptune falls back to API polling automatically.
 
 ## Docs

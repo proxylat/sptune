@@ -44,6 +44,10 @@ fn resolve_binary(cfg: &SoloistConfig) -> Option<PathBuf> {
   })
 }
 
+/// True when a soloist binary is usable (explicit path or PATH lookup).
+pub fn binary_found(cfg: &SoloistConfig) -> bool {
+  resolve_binary(cfg).is_some()
+}
 /// Spawn soloist as a headless Spotify Connect device. Blocking ~1s: an
 /// instant exit almost always means an expired build, and this runs before
 /// the TUI opens so the hint reaches the terminal.

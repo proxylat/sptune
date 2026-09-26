@@ -144,6 +144,30 @@ impl ClientConfig {
     Ok(())
   }
 
+  /// Persist a Soloist API key alongside the existing client.yml fields.
+  /// Assumes the file exists (load_config creates it on first run).
+  pub fn save_soloist_api_key(&mut self, key: &str) -> Result<()> {
+    let paths = self.get_or_build_paths()?;
+    let config_string = fs::read_to_string(&paths.config_file_path)?;
+    let mut config_yml: ClientConfig = serde_yml::from_str(&config_string)?;
+
+    self.soloist_api_key = Some(key.to_string());
+    config_yml.soloist_api_key = Some(key.to_string());
+
+    let new_config = serde_yml::to_string(&config_yml)?;
+    let mut config_file = fs::File::create(&paths.config_file_path)?;
+    write!(config_file, "{}", new_config)?;
+    #[cfg(unix)]
+    {
+      let _ = fs::set_permissions(&paths.config_file_path, fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(windows)]
+    {
+      lock_file_to_current_user(&paths.config_file_path);
+    }
+    Ok(())
+  }
+
   pub fn load_config(&mut self) -> Result<()> {
     let paths = self.get_or_build_paths()?;
     if paths.config_file_path.exists() {

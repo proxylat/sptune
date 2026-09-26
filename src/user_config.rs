@@ -974,6 +974,43 @@ impl UserConfig {
     }
   }
 
+  /// Patch only the `soloist` section of config.yml, preserving every other
+  /// section's values (comments are not preserved by serde). Also updates self.
+  pub fn save_soloist_config(
+    &mut self,
+    enabled: bool,
+    device_name: &str,
+    binary_path: &str,
+  ) -> Result<()> {
+    let paths = match &self.path_to_config {
+      Some(p) => p.clone(),
+      None => {
+        self.get_or_build_paths()?;
+        self.path_to_config.as_ref().unwrap().clone()
+      }
+    };
+    let mut doc: UserConfigString = if paths.config_file_path.exists() {
+      let s = fs::read_to_string(&paths.config_file_path)?;
+      if s.trim().is_empty() {
+        UserConfigString::default()
+      } else {
+        serde_yml::from_str(&s)?
+      }
+    } else {
+      UserConfigString::default()
+    };
+    doc.soloist = Some(SoloistConfigString {
+      enabled: Some(enabled),
+      device_name: Some(device_name.to_string()),
+      binary_path: Some(binary_path.to_string()),
+    });
+    fs::write(&paths.config_file_path, serde_yml::to_string(&doc)?)?;
+    self.soloist.enabled = enabled;
+    self.soloist.device_name = device_name.to_string();
+    self.soloist.binary_path = binary_path.to_string();
+    Ok(())
+  }
+
   pub fn apply_truecolor_downgrade(&mut self) {
     if !self.terminal.truecolor {
       self.theme = self.theme.downgraded();
