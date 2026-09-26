@@ -1,12 +1,8 @@
 use crate::event::Key;
 use crossterm::event;
-use std::{
-  sync::mpsc,
-  thread,
-  time::Duration,
-};
 #[cfg(any(windows, test))]
 use std::time::Instant;
+use std::{sync::mpsc, thread, time::Duration};
 
 #[derive(Debug, Clone, Copy)]
 /// Configuration for event handling.
@@ -70,6 +66,7 @@ impl DupPressFilter {
     false
   }
 
+  #[cfg(windows)]
   fn reset(&mut self) {
     self.last = None;
   }
@@ -103,7 +100,6 @@ impl Events {
     Events::with_config(EventConfig {
       tick_rate: Duration::from_millis(tick_rate),
       mouse_y_offset,
-      ..Default::default()
     })
   }
 
@@ -135,38 +131,32 @@ impl Events {
           // redraw, so a busy pointer (drag/move flood) would otherwise queue
           // hundreds of frames and lag the screen by seconds.
           batch.clear();
-          loop {
-            let ev = match event::read() {
-              Ok(ev) => match ev {
-                event::Event::Key(key) => {
-                  // crossterm 0.29 emits Press+Release; only handle Press/Repeat to avoid doubled chars ("ride" -> "rriiddee")
-                  if matches!(
-                    key.kind,
-                    event::KeyEventKind::Release
-                  ) {
-                    #[cfg(windows)]
-                    dup_filter.reset();
-                    continue;
-                  }
-                  #[cfg(windows)]
-                  {
-                    if dup_filter.should_drop(key.code, key.modifiers, key.kind, Instant::now()) {
-                      continue; // synthesized duplicate of the previous Press
-                    }
-                  }
-                  Event::Input(InputEvent::Key(Key::from(key)))
-                }
-                event::Event::Mouse(mut mouse) => {
+          while let Ok(ev) = event::read() {
+            let ev = match ev {
+              event::Event::Key(key) => {
+                // crossterm 0.29 emits Press+Release; only handle Press/Repeat to avoid doubled chars ("ride" -> "rriiddee")
+                if matches!(key.kind, event::KeyEventKind::Release) {
                   #[cfg(windows)]
                   dup_filter.reset();
-                  if config.mouse_y_offset != 0 {
-                    mouse.row = (mouse.row as i16 + config.mouse_y_offset).max(0) as u16;
-                  }
-                  Event::Input(InputEvent::Mouse(mouse))
+                  continue;
                 }
-                _ => continue,
-              },
-              Err(_) => break,
+                #[cfg(windows)]
+                {
+                  if dup_filter.should_drop(key.code, key.modifiers, key.kind, Instant::now()) {
+                    continue; // synthesized duplicate of the previous Press
+                  }
+                }
+                Event::Input(InputEvent::Key(Key::from(key)))
+              }
+              event::Event::Mouse(mut mouse) => {
+                #[cfg(windows)]
+                dup_filter.reset();
+                if config.mouse_y_offset != 0 {
+                  mouse.row = (mouse.row as i16 + config.mouse_y_offset).max(0) as u16;
+                }
+                Event::Input(InputEvent::Mouse(mouse))
+              }
+              _ => continue,
             };
             push_coalesced(&mut batch, ev);
             match event::poll(Duration::from_millis(0)) {
@@ -222,7 +212,7 @@ fn push_coalesced(batch: &mut Vec<Event<InputEvent>>, ev: Event<InputEvent>) {
           prev.kind,
           event::MouseEventKind::Drag(_) | event::MouseEventKind::Moved
         ) {
-          *prev = mouse.clone();
+          *prev = *mouse;
           return;
         }
       }
@@ -245,10 +235,6 @@ mod tests {
       row: 1,
       modifiers: KeyModifiers::NONE,
     }))
-  }
-
-  fn key() -> Event<InputEvent> {
-    Event::Input(InputEvent::Key(Key::Enter))
   }
 
   #[test]
@@ -350,7 +336,12 @@ mod tests {
   fn dup_filter_modifiers_distinguish() {
     let mut f = DupPressFilter::default();
     let t = Instant::now();
-    assert!(!f.should_drop(KeyCode::Char('f'), KeyModifiers::NONE, KeyEventKind::Press, t));
+    assert!(!f.should_drop(
+      KeyCode::Char('f'),
+      KeyModifiers::NONE,
+      KeyEventKind::Press,
+      t
+    ));
     assert!(!f.should_drop(
       KeyCode::Char('f'),
       KeyModifiers::CONTROL,

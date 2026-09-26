@@ -2,7 +2,8 @@ use std::{
   collections::HashMap,
   fs,
   path::PathBuf,
-  time::{SystemTime, UNIX_EPOCH},
+  sync::Mutex,
+  time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::library_cache::CACHE_ENABLED;
@@ -17,6 +18,8 @@ const APP_CONFIG_DIR: &str = "sptune";
 // the filename drops them so every playlist refetches with dates.
 const CACHE_FILE: &str = "playlist_cache_v2.json";
 const MAX_CACHED_PLAYLISTS: usize = 20;
+/// Entries older than this are evicted on load (ToS: no indefinite storage).
+const CACHE_TTL_SECS: u64 = 30 * 86400;
 
 /// Stable identity of a playlist item (track or episode uri).
 pub fn playlist_item_uri(item: &PlaylistItem) -> Option<String> {
@@ -27,8 +30,8 @@ pub fn playlist_item_uri(item: &PlaylistItem) -> Option<String> {
   }
 }
 
-/// Cached track list of a playlist, keyed by playlist id. Entries never
-/// expire; the screen is served from cache and merged with a delta probe
+/// Cached track list of a playlist, keyed by playlist id. Entries live 30
+/// days; the screen is served from cache and merged with a delta probe
 // ponytail: terms — only PlaylistItem/FullTrack metadata, no audio features; reconciled via snapshot_id tail probe (backend.rs:1787); SAVED_CHECK_TTL 300s (backend.rs:643) for ❤️
 /// (tail fetch) on open, so a changed playlist picks up new tracks only.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -46,6 +49,16 @@ pub struct PlaylistCache {
   path: PathBuf,
   pub map: HashMap<String, CachedPlaylist>,
   loaded: bool,
+  // Coalesce disk writes: a 585-track fill calls update() per page, so at
+  // most one write spawns per window; stragglers are covered by the next
+  // spawn and, at worst, healed by the once-per-launch probe.
+  last_save: std::sync::Arc<Mutex<Instant>>,
+}
+
+impl Default for PlaylistCache {
+  fn default() -> Self {
+    Self::new()
+  }
 }
 
 impl PlaylistCache {
@@ -56,12 +69,16 @@ impl PlaylistCache {
         .unwrap_or_default(),
       map: HashMap::new(),
       loaded: false,
+      last_save: std::sync::Arc::new(Mutex::new(
+        Instant::now()
+          .checked_sub(Duration::from_secs(10))
+          .unwrap_or_else(Instant::now),
+      )),
     }
   }
 
   /// Redirect the backing file (used by tests; the field is private).
-  #[cfg(test)]
-  pub(crate) fn set_path(&mut self, path: std::path::PathBuf) {
+  pub fn set_path(&mut self, path: std::path::PathBuf) {
     self.path = path;
     self.loaded = false;
   }
@@ -75,7 +92,8 @@ impl PlaylistCache {
       return;
     }
     if let Ok(contents) = fs::read_to_string(&self.path) {
-      if let Ok(map) = serde_json::from_str::<HashMap<String, CachedPlaylist>>(&contents) {
+      if let Ok(mut map) = serde_json::from_str::<HashMap<String, CachedPlaylist>>(&contents) {
+        map.retain(|_, e| now_secs().saturating_sub(e.fetched_at) < CACHE_TTL_SECS);
         self.map = map;
       }
     }
@@ -89,8 +107,17 @@ impl PlaylistCache {
     self.map.get(playlist_id)
   }
 
-  /// Accumulate a fetched page. `append` is true for load-more/delta pages.
-  pub fn update(&mut self, playlist_id: &str, items: Vec<PlaylistItem>, total: u32, append: bool) {
+  /// Accumulate a fetched page. `append` is true for load-more/delta pages,
+  /// which land on their own `offset` (truncate + extend) so a retried or
+  /// double-dispatched page converges instead of duplicating.
+  pub fn update(
+    &mut self,
+    playlist_id: &str,
+    items: Vec<PlaylistItem>,
+    total: u32,
+    offset: u32,
+    append: bool,
+  ) {
     if !CACHE_ENABLED.load(Ordering::Relaxed) {
       return;
     }
@@ -109,6 +136,7 @@ impl PlaylistCache {
     let entry = self.map.entry(playlist_id.to_string()).or_default();
     entry.fetched_at = now_secs();
     if append {
+      entry.items.truncate(offset as usize);
       entry.items.extend(items);
       if total > entry.total {
         entry.total = total;
@@ -193,13 +221,37 @@ impl PlaylistCache {
     if let Ok(json) = serde_json::to_string(&self.map) {
       // ponytail: async disk to not block Network thread; sync in tests for determinism
       if cfg!(test) {
-        let _ = fs::write(&self.path, json);
-      } else {
-        let path = self.path.clone();
-        std::thread::spawn(move || {
-          let _ = fs::write(path, json);
-        });
+        Self::write_atomic(&self.path, &json);
+        return;
       }
+      let due = self
+        .last_save
+        .lock()
+        .map(|mut t| {
+          if t.elapsed() >= Duration::from_secs(2) {
+            *t = Instant::now();
+            true
+          } else {
+            false
+          }
+        })
+        .unwrap_or(true);
+      if !due {
+        return;
+      }
+      let path = self.path.clone();
+      std::thread::spawn(move || {
+        Self::write_atomic(&path, &json);
+      });
+    }
+  }
+
+  /// Temp-file + rename so a kill mid-write can never leave a truncated
+  /// cache behind (a partial file used to force a full refetch next launch).
+  fn write_atomic(path: &std::path::Path, json: &str) {
+    let tmp = path.with_extension("json.tmp");
+    if fs::write(&tmp, json).is_ok() {
+      let _ = fs::rename(&tmp, path);
     }
   }
 }
@@ -272,9 +324,9 @@ mod tests {
     fs::create_dir_all(&dir).unwrap();
     let mut cache = PlaylistCache::new();
     cache.path = dir.join(CACHE_FILE);
+    cache.update("p1", vec![item("spotify:track:t1")], 1, 0, false);
 
-    cache.update("p1", vec![item("spotify:track:t1")], 1, false);
-    cache.update("p1", vec![item("spotify:track:t2")], 2, true);
+    cache.update("p1", vec![item("spotify:track:t2")], 2, 1, true);
     let entry = cache.lookup("p1").unwrap();
     assert_eq!(entry.items.len(), 2);
 

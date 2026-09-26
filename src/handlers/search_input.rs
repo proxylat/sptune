@@ -110,7 +110,7 @@ fn process_input(app: &mut App, input: String) {
   }
 
   // Default fallback behavior: treat the input as a raw search phrase.
-  app.dispatch(IoEvent::GetSearchResults(input, app.get_user_country()));
+  app.dispatch(IoEvent::GetSearchResults(input));
   app.push_navigation_stack(RouteId::Search, ActiveBlock::SearchResultBlock);
 }
 

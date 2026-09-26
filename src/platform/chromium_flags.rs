@@ -67,7 +67,6 @@ pub const LEAN_FLAGS: &[&str] = &[
   "--disable-lcd-text",
   "--disable-smooth-scrolling",
   "--disable-canvas-aa",
-  "--no-sandbox",
   "--disable-dev-shm-usage",
   "--disable-infobars",
   "--disk-cache-size=0",
@@ -95,7 +94,6 @@ pub fn preset_safe() -> Vec<&'static str> {
           | "--disable-gpu-program-cache"
           | "--disable-gpu-shader-disk-cache"
           | "--disable-software-rasterizer"
-          | "--no-sandbox"
           | "--disable-dev-shm-usage"
       )
     })
@@ -156,7 +154,10 @@ pub fn load_flags() -> Vec<String> {
       }
     }
   }
-  preset_by_name("lean").into_iter().map(|s| s.to_string()).collect()
+  preset_by_name("lean")
+    .into_iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 pub fn flags_to_arg_string(flags: &[String]) -> String {
@@ -206,7 +207,11 @@ mod tests {
   }
   #[test]
   fn network_filter() {
-    assert!(is_network_service("foo --utility-sub-type=network.mojom.NetworkService bar"));
-    assert!(!is_network_service("foo --utility-sub-type=audio.mojom.AudioService bar"));
+    assert!(is_network_service(
+      "foo --utility-sub-type=network.mojom.NetworkService bar"
+    ));
+    assert!(!is_network_service(
+      "foo --utility-sub-type=audio.mojom.AudioService bar"
+    ));
   }
 }

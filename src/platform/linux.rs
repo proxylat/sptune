@@ -6,7 +6,9 @@ fn cgroup_base() -> std::path::PathBuf {
   // systemd --user delegation preferred: $XDG_RUNTIME_DIR not writable for cgroup, so try user.slice if it exists
   if let Ok(uid) = std::fs::read_to_string("/proc/self/loginuid") {
     let uid = uid.trim();
-    let p = std::path::PathBuf::from(format!("/sys/fs/cgroup/user.slice/user-{uid}.slice/sptune-spotify"));
+    let p = std::path::PathBuf::from(format!(
+      "/sys/fs/cgroup/user.slice/user-{uid}.slice/sptune-spotify"
+    ));
     if std::path::Path::new("/sys/fs/cgroup/user.slice").exists() {
       return p;
     }

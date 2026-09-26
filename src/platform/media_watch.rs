@@ -38,9 +38,7 @@ pub fn should_refresh_signal(signal: &OsMediaSignal) -> bool {
     OsMediaSignal::TrackChanged
     | OsMediaSignal::PlaybackChanged
     | OsMediaSignal::NoCurrentSession => true,
-    OsMediaSignal::SessionBecameCurrent { name, id } => {
-      is_spotify_session(name.as_deref(), id)
-    }
+    OsMediaSignal::SessionBecameCurrent { name, id } => is_spotify_session(name.as_deref(), id),
   }
 }
 
@@ -66,8 +64,7 @@ async fn watch_gsmtc(io_tx: std::sync::mpsc::Sender<IoEvent>) {
     return;
   };
   // session id -> source AUMID, so CurrentSessionChanged can gate on Spotify.
-  let mut sources: std::collections::HashMap<usize, String> =
-    std::collections::HashMap::new();
+  let mut sources: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
   while let Some(evt) = rx.recv().await {
     match evt {
       gsmtc::ManagerEvent::SessionCreated {
@@ -85,9 +82,7 @@ async fn watch_gsmtc(io_tx: std::sync::mpsc::Sender<IoEvent>) {
             while let Some(evt) = rx.recv().await {
               let signal = match evt {
                 // New media item = new track, always refresh.
-                gsmtc::SessionUpdateEvent::Media(..) => {
-                  Some(OsMediaSignal::TrackChanged)
-                }
+                gsmtc::SessionUpdateEvent::Media(..) => Some(OsMediaSignal::TrackChanged),
                 // Model covers playback + timeline: forward status flips
                 // only, so position/volume noise stays silent.
                 gsmtc::SessionUpdateEvent::Model(m) => {
@@ -164,9 +159,8 @@ const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 )]
 trait MprisPlayer {
   #[zbus(property)]
-  fn metadata(
-    &self,
-  ) -> zbus::Result<std::collections::HashMap<String, zbus::zvariant::OwnedValue>>;
+  fn metadata(&self)
+    -> zbus::Result<std::collections::HashMap<String, zbus::zvariant::OwnedValue>>;
 
   #[zbus(property)]
   fn playback_status(&self) -> zbus::Result<String>;
@@ -263,9 +257,7 @@ async fn watch_mpris(io_tx: std::sync::mpsc::Sender<IoEvent>, conn: zbus::Connec
 /// players (appear -> focus check, vanish -> re-check and clear).
 /// Unrelated players map to None.
 #[cfg(target_os = "linux")]
-fn spotify_membership_signal(
-  signal: zbus::fdo::NameOwnerChanged,
-) -> Option<OsMediaSignal> {
+fn spotify_membership_signal(signal: zbus::fdo::NameOwnerChanged) -> Option<OsMediaSignal> {
   let Ok(args) = signal.args() else {
     return None;
   };
@@ -316,10 +308,12 @@ mod tests {
 
   #[test]
   fn session_focus_refreshes_only_for_spotify() {
-    assert!(should_refresh_signal(&OsMediaSignal::SessionBecameCurrent {
-      name: Some("Spotify".into()),
-      id: "spotify".into(),
-    }));
+    assert!(should_refresh_signal(
+      &OsMediaSignal::SessionBecameCurrent {
+        name: Some("Spotify".into()),
+        id: "spotify".into(),
+      }
+    ));
     assert!(!should_refresh_signal(
       &OsMediaSignal::SessionBecameCurrent {
         name: Some("Chrome".into()),

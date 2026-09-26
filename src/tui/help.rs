@@ -191,11 +191,6 @@ pub fn get_help_docs(key_bindings: &KeyBindings) -> Vec<Vec<String>> {
       String::from("Selected block"),
     ],
     vec![
-      String::from("Play recommendations for song/artist"),
-      String::from("r"),
-      String::from("Selected block"),
-    ],
-    vec![
       String::from("Refresh current list (configurable, no default)"),
       key_bindings
         .refresh
@@ -322,6 +317,11 @@ pub fn get_help_docs(key_bindings: &KeyBindings) -> Vec<Vec<String>> {
         .map(ToString::to_string)
         .unwrap_or_else(|| "none".to_string()),
       String::from("Settings menu"),
+    ],
+    vec![
+      String::from("Powered by Spotify — music data from the Spotify Web API"),
+      String::from(""),
+      String::from(""),
     ],
   ]
 }

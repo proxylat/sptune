@@ -15,9 +15,11 @@ use serde::{Deserialize, Serialize};
 const CONFIG_DIR: &str = ".config";
 const APP_CONFIG_DIR: &str = "sptune";
 const CACHE_FILE: &str = "library_cache.json";
+/// Entries older than this are evicted on load (ToS: no indefinite storage).
+const CACHE_TTL_SECS: u64 = 30 * 86400;
 
 /// Disk cache of whole "my library" lists (playlists, saved
-/// tracks/albums/shows), keyed by endpoint. Entries never expire; the
+/// tracks/albums/shows), keyed by endpoint. Entries live 30 days; the
 /// screen is served from cache and merged with a delta probe on open, so a
 /// throttled endpoint never blanks the UI.
 // ponytail: terms — caches only track metadata (FullTrack/SavedTrack), never audio features; TTL infinite but reconciled on each open via snapshot/total delta (backend.rs:2710); attribution intact via Spotify Web API; no Cache-Control headers from API so client-side only
@@ -32,8 +34,14 @@ pub struct CachedList {
 #[derive(Clone, Debug)]
 pub struct LibraryCache {
   path: PathBuf,
-  map: HashMap<String, CachedList>,
+  pub map: HashMap<String, CachedList>,
   loaded: bool,
+}
+
+impl Default for LibraryCache {
+  fn default() -> Self {
+    Self::new()
+  }
 }
 
 impl LibraryCache {
@@ -56,7 +64,8 @@ impl LibraryCache {
       return;
     }
     if let Ok(contents) = fs::read_to_string(&self.path) {
-      if let Ok(map) = serde_json::from_str::<HashMap<String, CachedList>>(&contents) {
+      if let Ok(mut map) = serde_json::from_str::<HashMap<String, CachedList>>(&contents) {
+        map.retain(|_, e| now_secs().saturating_sub(e.fetched_at) < CACHE_TTL_SECS);
         self.map = map;
       }
     }

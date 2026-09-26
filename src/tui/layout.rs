@@ -517,11 +517,7 @@ pub fn sidebar_width(app: &App, chunk: Rect) -> u16 {
       return w.clamp(SIDEBAR_MIN_WIDTH, chunk.width / 2);
     }
   }
-  let playlist_len = app
-    .playlists
-    .as_ref()
-    .map(|p| p.items.len())
-    .unwrap_or(0);
+  let playlist_len = app.playlists.as_ref().map(|p| p.items.len()).unwrap_or(0);
   let playlist_digits = format!("{}", playlist_len).len();
   let content_len = if app.sidebar_minimized {
     playlist_digits
@@ -566,7 +562,12 @@ pub fn library_playlists_split(app: &App, chunk: Rect) -> (Rect, Rect) {
 
 pub fn library_handle_rect(app: &App, chunk: Rect) -> Rect {
   let (lib, _) = library_playlists_split(app, chunk);
-  Rect::new(chunk.x, lib.y + lib.height.saturating_sub(1), chunk.width, 1)
+  Rect::new(
+    chunk.x,
+    lib.y + lib.height.saturating_sub(1),
+    chunk.width,
+    1,
+  )
 }
 
 // Combined sidebar: one outer block with a horizontal separator inside.
@@ -584,7 +585,12 @@ pub fn sidebar_combined_split(app: &App, chunk: Rect) -> (Rect, Rect, Rect) {
     return (inner, Rect::default(), Rect::default());
   }
   // Reserve 1 row for the separator.
-  let for_lib = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
+  let for_lib = Rect::new(
+    inner.x,
+    inner.y,
+    inner.width,
+    inner.height.saturating_sub(1),
+  );
   let (tmp_lib, _) = library_playlists_split(app, for_lib);
   let lib_h = tmp_lib.height.min(inner.height.saturating_sub(1));
   let library = Rect::new(inner.x, inner.y, inner.width, lib_h);
@@ -770,7 +776,10 @@ pub fn playbar_processes_label(suspended: bool) -> &'static str {
 pub fn playbar_processes_range(playbar: Rect, device_name: &str, suspended: bool) -> (u16, u16) {
   let title = build_playbar_title("", device_name);
   let start = playbar.x + 1 + title.width() as u16 + 2; // ── separator after [ ]
-  (start, start + playbar_processes_label(suspended).width() as u16)
+  (
+    start,
+    start + playbar_processes_label(suspended).width() as u16,
+  )
 }
 
 pub fn playbar_controls_row(playbar: Rect) -> Rect {
@@ -799,7 +808,10 @@ pub fn playbar_controls_x(playbar: Rect, controls: &[(PlaybarButton, String)]) -
 // group keeps a constant width. All strings are fixed-width so the group
 // never re-centers between states; the centering math uses unicode widths.
 // Smart shuffle is "Smart ⇄" padded to 7 cols so the group never moves.
-pub fn build_playbar_controls(is_playing: bool, smart_shuffle: bool) -> Vec<(PlaybarButton, String)> {
+pub fn build_playbar_controls(
+  is_playing: bool,
+  smart_shuffle: bool,
+) -> Vec<(PlaybarButton, String)> {
   let shuffle_text = if smart_shuffle {
     "Smart ⇄".to_string()
   } else {
@@ -879,11 +891,17 @@ pub fn song_table_columns(
   } else {
     0
   };
-  let right = if show_remove || show_in_playlist { 6 } else { 0 };
+  let right = if show_remove || show_in_playlist {
+    6
+  } else {
+    0
+  };
   // Number column stays 4 wide (anchored). Title is GAP narrower than the
   // flex share so draw_table can pad its cell with leading spaces, pushing the
   // song names right without moving the track numbers.
-  let flex = width.saturating_sub(4 + right + artist + date + length).max(1);
+  let flex = width
+    .saturating_sub(4 + right + artist + date + length)
+    .max(1);
   let album = if show_album {
     (flex * 2 / 5).min(flex.saturating_sub(4)).max(1)
   } else {
@@ -955,7 +973,7 @@ mod tests {
     assert_eq!(right.width, 197);
   }
 
-    #[test]
+  #[test]
   fn song_table_columns_number_column_is_four_wide() {
     // The leftmost column is the 4-wide number slot; the right-most None
     // column (✓ / ✕) appears only when remove or in-playlist is requested.
@@ -964,17 +982,23 @@ mod tests {
     assert!(matches!(id, ColumnId::Liked));
     assert_eq!(x, 0);
     assert_eq!(w, 4);
-    assert!(!no_right.iter().any(|(id, _, _)| matches!(id, ColumnId::None)));
+    assert!(!no_right
+      .iter()
+      .any(|(id, _, _)| matches!(id, ColumnId::None)));
 
     let with_playlist = song_table_columns(120, false, true, true, true, false, false, true);
     let (id, x, w) = with_playlist[0];
     assert!(matches!(id, ColumnId::Liked));
     assert_eq!(x, 0);
     assert_eq!(w, 4);
-    assert!(with_playlist.iter().any(|(id, _, _)| matches!(id, ColumnId::None)));
+    assert!(with_playlist
+      .iter()
+      .any(|(id, _, _)| matches!(id, ColumnId::None)));
 
     let with_remove = song_table_columns(120, false, true, true, true, false, true, false);
-    assert!(with_remove.iter().any(|(id, _, _)| matches!(id, ColumnId::None)));
+    assert!(with_remove
+      .iter()
+      .any(|(id, _, _)| matches!(id, ColumnId::None)));
   }
 
   #[test]

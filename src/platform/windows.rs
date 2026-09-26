@@ -205,7 +205,11 @@ fn process_snapshot() -> Vec<(u32, u32, String)> {
     let mut entry = ffi::ProcessEntry32W::new();
     if ffi::Process32FirstW(snapshot, &mut entry) != 0 {
       loop {
-        let len = entry.sz_exe_file.iter().position(|&c| c == 0).unwrap_or(260);
+        let len = entry
+          .sz_exe_file
+          .iter()
+          .position(|&c| c == 0)
+          .unwrap_or(260);
         let exe = String::from_utf16_lossy(&entry.sz_exe_file[..len]);
         out.push((entry.th32_process_id, entry.th32_parent_process_id, exe));
         if ffi::Process32NextW(snapshot, &mut entry) == 0 {
@@ -224,7 +228,11 @@ fn process_snapshot() -> Vec<(u32, u32, String)> {
 fn cmdline_of_pid(pid: u32) -> Option<String> {
   use std::ffi::c_void;
   unsafe {
-    let handle = ffi::OpenProcess(ffi::PROCESS_QUERY_INFORMATION | ffi::PROCESS_VM_READ, 0, pid);
+    let handle = ffi::OpenProcess(
+      ffi::PROCESS_QUERY_INFORMATION | ffi::PROCESS_VM_READ,
+      0,
+      pid,
+    );
     if handle.is_null() {
       return None;
     }
@@ -238,7 +246,8 @@ fn cmdline_of_pid(pid: u32) -> Option<String> {
           buf.as_mut_ptr() as *mut c_void,
           buf.len(),
           &mut n,
-        ) != 0 && n == buf.len()
+        ) != 0
+          && n == buf.len()
       };
       // PROCESS_BASIC_INFORMATION: PebBaseAddress at offset 8 (x64)
       let mut pbi = [0u8; 48];
@@ -400,9 +409,7 @@ pub fn find_root_pid() -> Option<u32> {
   };
   let mut candidates: Vec<u32> = snapshot
     .iter()
-    .filter(|(_, ppid, exe)| {
-      exe.to_lowercase().contains("spotify.exe") && !is_spotify_pid(*ppid)
-    })
+    .filter(|(_, ppid, exe)| exe.to_lowercase().contains("spotify.exe") && !is_spotify_pid(*ppid))
     .map(|(pid, _, _)| *pid)
     .collect();
   candidates.sort_unstable();

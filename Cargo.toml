@@ -30,6 +30,7 @@ reqwest = { version = "0.13", features = ["json"] }
 chrono = "0.4"
 futures = "0.3"
 clap_complete = "4.6.5"
+tokio-tungstenite = "0.30.0"
 [target.'cfg(windows)'.dependencies]
 win-gsmtc = "0.1"
 
@@ -40,6 +41,22 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [patch.crates-io]
 rspotify-model = { path = "vendor/rspotify-model" }
+
+[dev-dependencies]
+criterion = "0.8.2"
+iai-callgrind = "0.16.1"
+
+[[bench]]
+name = "cache"
+harness = false
+
+[[bench]]
+name = "config"
+harness = false
+
+[[bench]]
+name = "iai"
+harness = false
 
 [[bin]]
 bench = false

@@ -1,6 +1,6 @@
 use super::common_key_events;
 use crate::{
-  app::{ActiveBlock, App, RecommendationsContext, RouteId},
+  app::{ActiveBlock, App, RouteId},
   backend::IoEvent,
   event::Key,
 };
@@ -55,18 +55,6 @@ pub fn handler(key: Key, app: &mut App) {
       let artist = artists.get(app.artists_list_index);
       if let Some(artist) = artist {
         app.dispatch(IoEvent::StartPlayback(Some(artist.id.uri()), None, None));
-      }
-    }
-    Key::Char('r') => {
-      let artists = app.artists.to_owned();
-      let artist = artists.get(app.artists_list_index);
-      if let Some(artist) = artist {
-        let artist_name = artist.name.clone();
-        let artist_id_list: Option<Vec<String>> = Some(vec![artist.id.to_string()]);
-
-        app.recommendations_context = Some(RecommendationsContext::Artist);
-        app.recommendations_seed = artist_name;
-        app.get_recommendations_for_seed(artist_id_list, None, None);
       }
     }
     k if k == app.user_config.keys.next_page => app.get_current_user_saved_artists_next(),

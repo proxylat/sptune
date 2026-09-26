@@ -11,6 +11,8 @@ const FILE_NAME: &str = "config.yml";
 const CONFIG_DIR: &str = ".config";
 const APP_CONFIG_DIR: &str = "sptune";
 
+pub const DEFAULT_SPOTIFY_MEMORY_LIMIT_MB: usize = 150;
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct UserTheme {
   pub active: Option<String>,
@@ -97,9 +99,9 @@ fn nearest_ansi(r: u8, g: u8, b: u8) -> Color {
   let mut best = PALETTE[0].0;
   let mut best_dist = u32::MAX;
   for (c, pr, pg, pb) in PALETTE {
-    let dr = (r as i32 - pr as i32) as i32;
-    let dg = (g as i32 - pg as i32) as i32;
-    let db = (b as i32 - pb as i32) as i32;
+    let dr = r as i32 - pr as i32;
+    let dg = g as i32 - pg as i32;
+    let db = b as i32 - pb as i32;
     let dist = (dr * dr + dg * dg + db * db) as u32;
     if dist < best_dist {
       best_dist = dist;
@@ -144,7 +146,7 @@ impl Theme {
 pub fn theme_presets() -> [(&'static str, Theme); 2] {
   [
     (
-      "Spotify",
+      "Green",
       Theme {
         active: Color::Rgb(29, 185, 84),
         banner: Color::Rgb(30, 215, 96),
@@ -418,7 +420,31 @@ impl Default for SpotifyConfig {
       use_chromium_flags: false,
       suspend_children: false,
       trim_working_set: false,
-      memory_limit_mb: crate::platform::DEFAULT_SPOTIFY_MEMORY_LIMIT_MB as u32,
+      memory_limit_mb: DEFAULT_SPOTIFY_MEMORY_LIMIT_MB as u32,
+    }
+  }
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SoloistConfigString {
+  pub enabled: Option<bool>,
+  pub device_name: Option<String>,
+  pub binary_path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SoloistConfig {
+  pub enabled: bool,
+  pub device_name: String,
+  pub binary_path: String,
+}
+
+impl Default for SoloistConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      device_name: "sptune".to_string(),
+      binary_path: String::new(),
     }
   }
 }
@@ -470,6 +496,7 @@ pub struct UserConfigString {
   behavior: Option<BehaviorConfigString>,
   theme: Option<UserTheme>,
   spotify: Option<SpotifyConfigString>,
+  soloist: Option<SoloistConfigString>,
   terminal: Option<TerminalConfigString>,
   platform: Option<PlatformOverridesString>,
 }
@@ -480,8 +507,15 @@ pub struct UserConfig {
   pub theme: Theme,
   pub behavior: BehaviorConfig,
   pub spotify: SpotifyConfig,
+  pub soloist: SoloistConfig,
   pub terminal: TerminalConfig,
   pub path_to_config: Option<UserConfigPaths>,
+}
+
+impl Default for UserConfig {
+  fn default() -> Self {
+    Self::new()
+  }
 }
 
 impl UserConfig {
@@ -489,6 +523,7 @@ impl UserConfig {
     let mut cfg = UserConfig {
       theme: Default::default(),
       spotify: SpotifyConfig::default(),
+      soloist: SoloistConfig::default(),
       keys: KeyBindings {
         back: Key::Char('q'),
         next_page: Key::Ctrl('d'),
@@ -870,6 +905,9 @@ impl UserConfig {
       if let Some(spotify) = config_yml.spotify {
         self.load_spotify_config(spotify);
       }
+      if let Some(soloist) = config_yml.soloist {
+        self.load_soloist_config(soloist);
+      }
       if let Some(terminal) = config_yml.terminal {
         self.load_terminal_config(terminal);
       }
@@ -896,11 +934,11 @@ impl UserConfig {
   }
 
   pub fn padded_liked_icon(&self) -> String {
-    format!("{} ", &self.behavior.liked_icon)
+    format!("{} ", self.behavior.liked_icon)
   }
 
   pub fn padded_in_playlist_icon(&self) -> String {
-    format!(" {} ", &self.behavior.in_playlist_icon)
+    format!(" {} ", self.behavior.in_playlist_icon)
   }
 
   pub fn load_spotify_config(&mut self, s: SpotifyConfigString) {
@@ -921,6 +959,18 @@ impl UserConfig {
     }
     if let Some(v) = s.memory_limit_mb {
       self.spotify.memory_limit_mb = v;
+    }
+  }
+
+  pub fn load_soloist_config(&mut self, s: SoloistConfigString) {
+    if let Some(v) = s.enabled {
+      self.soloist.enabled = v;
+    }
+    if let Some(v) = s.device_name {
+      self.soloist.device_name = v;
+    }
+    if let Some(v) = s.binary_path {
+      self.soloist.binary_path = v;
     }
   }
 
@@ -952,7 +1002,7 @@ fn parse_theme_item(theme_item: &str) -> Result<Color> {
     "White" => Color::White,
     _ => {
       let colors = theme_item.split(',').collect::<Vec<&str>>();
-      if let (Some(r), Some(g), Some(b)) = (colors.get(0), colors.get(1), colors.get(2)) {
+      if let (Some(r), Some(g), Some(b)) = (colors.first(), colors.get(1), colors.get(2)) {
         Color::Rgb(
           r.trim().parse::<u8>()?,
           g.trim().parse::<u8>()?,

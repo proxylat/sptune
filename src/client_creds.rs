@@ -15,12 +15,28 @@ const CONFIG_DIR: &str = ".config";
 const APP_CONFIG_DIR: &str = "sptune";
 const TOKEN_CACHE_FILE: &str = ".spotify_token_cache.json";
 
+// Windows has no unix permission bits: lock a secrets file to the current
+// user only via icacls (strip inheritance, grant full control to %USERNAME%).
+// Best effort — failures are ignored so a locked-down box never breaks launch.
+#[cfg(windows)]
+fn lock_file_to_current_user(path: &Path) {
+  if let Ok(user) = std::env::var("USERNAME") {
+    let _ = std::process::Command::new("icacls")
+      .arg(path)
+      .arg("/inheritance:r")
+      .arg("/grant:r")
+      .arg(format!("{}:(F)", user))
+      .output();
+  }
+}
+
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClientConfig {
   pub client_id: String,
   pub device_id: Option<String>,
   // FIXME: port should be defined in `user_config` not in here
   pub port: Option<u16>,
+  pub soloist_api_key: Option<String>,
 }
 
 pub struct ConfigPaths {
@@ -34,6 +50,7 @@ impl ClientConfig {
       client_id: "".to_string(),
       device_id: None,
       port: None,
+      soloist_api_key: None,
     }
   }
 
@@ -82,6 +99,18 @@ impl ClientConfig {
           }
         }
 
+        #[cfg(windows)]
+        {
+          // Token cache is written by rspotify, not us — re-lock on every
+          // launch in case it was recreated. Two fast icacls spawns.
+          if token_cache_path.exists() {
+            lock_file_to_current_user(token_cache_path);
+          }
+          if config_file_path.exists() {
+            lock_file_to_current_user(config_file_path);
+          }
+        }
+
         let paths = ConfigPaths {
           config_file_path: config_file_path.to_path_buf(),
           token_cache_path: token_cache_path.to_path_buf(),
@@ -108,6 +137,10 @@ impl ClientConfig {
     {
       let _ = fs::set_permissions(&paths.config_file_path, fs::Permissions::from_mode(0o600));
     }
+    #[cfg(windows)]
+    {
+      lock_file_to_current_user(&paths.config_file_path);
+    }
     Ok(())
   }
 
@@ -120,6 +153,7 @@ impl ClientConfig {
       self.client_id = config_yml.client_id;
       self.device_id = config_yml.device_id;
       self.port = config_yml.port;
+      self.soloist_api_key = config_yml.soloist_api_key;
 
       Ok(())
     } else {
@@ -158,6 +192,7 @@ impl ClientConfig {
         client_id,
         device_id: None,
         port: Some(port),
+        soloist_api_key: None,
       };
 
       let content_yml = serde_yml::to_string(&config_yml)?;
@@ -168,10 +203,15 @@ impl ClientConfig {
       {
         let _ = fs::set_permissions(&paths.config_file_path, fs::Permissions::from_mode(0o600));
       }
+      #[cfg(windows)]
+      {
+        lock_file_to_current_user(&paths.config_file_path);
+      }
 
       self.client_id = config_yml.client_id.clone();
       self.device_id = config_yml.device_id.clone();
       self.port = config_yml.port;
+      self.soloist_api_key = config_yml.soloist_api_key.clone();
 
       println!(
         "\nConfig saved. Make sure http://127.0.0.1:{}/callback is in your Spotify dashboard Redirect URIs.",

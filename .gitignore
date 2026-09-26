@@ -9,6 +9,12 @@
 !LICENSE
 !README.md
 !/chromium_flags.yml.example
+!/PLAN.md
+!/benches/
+!/tests/
+!/scripts/
+!/.github/
+!/.codemap/
 # Source code
 !/src/
 !/vendor/
@@ -21,6 +27,9 @@ client.yml
 .spotify_token_cache.json
 .cached_device_id.txt
 *.rs.bk
+# Codemap generated outputs (state modules.json/config.json IS tracked)
+.codemap/codemap.html
+.codemap/codemap.md
 # Editor / temp junk
 *.swp
 *.swo

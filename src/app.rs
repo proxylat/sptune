@@ -4,21 +4,18 @@ use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
-use rspotify::{
-  model::Country,
-  model::{
-    album::{FullAlbum, SavedAlbum, SimplifiedAlbum},
-    artist::FullArtist,
-    context::CurrentPlaybackContext,
-    device::Device,
-    page::{CursorBasedPage, Page},
-    playing::PlayHistory,
-    playlist::{PlaylistItem, SimplifiedPlaylist},
-    show::{FullShow, Show, SimplifiedEpisode, SimplifiedShow},
-    track::{FullTrack, SavedTrack, SimplifiedTrack},
-    user::PrivateUser,
-    Id, PlayableItem, RepeatState,
-  },
+use rspotify::model::{
+  album::{FullAlbum, SavedAlbum, SimplifiedAlbum},
+  artist::FullArtist,
+  context::CurrentPlaybackContext,
+  device::Device,
+  page::{CursorBasedPage, Page},
+  playing::PlayHistory,
+  playlist::{PlaylistItem, SimplifiedPlaylist},
+  show::{FullShow, Show, SimplifiedEpisode, SimplifiedShow},
+  track::{FullTrack, SavedTrack, SimplifiedTrack},
+  user::PrivateUser,
+  Id, PlayableItem, RepeatState,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Sender;
@@ -122,7 +119,13 @@ fn cached_playlist_max_width(app: &App) -> usize {
     let w = app
       .playlists
       .as_ref()
-      .map(|p| p.items.iter().map(|i| disp_width(&i.name)).max().unwrap_or(0))
+      .map(|p| {
+        p.items
+          .iter()
+          .map(|i| disp_width(&i.name))
+          .max()
+          .unwrap_or(0)
+      })
       .unwrap_or(0);
     *slot = (key.0, key.1, w);
     w
@@ -263,7 +266,6 @@ pub enum RouteId {
   Artists,
   Podcasts,
   PodcastEpisodes,
-  Recommendations,
   Dialog,
 }
 
@@ -281,7 +283,6 @@ pub enum TrackTableContext {
   AlbumSearch,
   PlaylistSearch,
   SavedTracks,
-  RecommendedTracks,
   MadeForYou,
 }
 
@@ -305,12 +306,6 @@ pub enum AlbumTableContext {
 pub enum EpisodeTableContext {
   Simplified,
   Full,
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub enum RecommendationsContext {
-  Artist,
-  Song,
 }
 
 pub struct SearchResult {
@@ -401,6 +396,8 @@ pub struct App {
   pub saved_album_tracks_index: usize,
   pub api_error: String,
   pub current_playback_context: Option<CurrentPlaybackContext>,
+  /// True while the soloist WS loop is feeding playback state; suppresses the Web API poll.
+  pub soloist_live: bool,
   pub devices: Option<Vec<Device>>,
   // Inputs:
   // input is the string for input;
@@ -442,9 +439,6 @@ pub struct App {
   pub pending_for_you_add: Option<String>,
   pub playlists: Option<Page<SimplifiedPlaylist>>,
   pub recently_played: SpotifyResultAndSelectedIndex<Option<CursorBasedPage<PlayHistory>>>,
-  pub recommended_tracks: Vec<FullTrack>,
-  pub recommendations_seed: String,
-  pub recommendations_context: Option<RecommendationsContext>,
   pub search_results: SearchResult,
   pub selected_album_simplified: Option<SelectedAlbum>,
   pub selected_album_full: Option<SelectedFullAlbum>,
@@ -475,9 +469,13 @@ pub struct App {
   pub api_tokens_updated: Option<Instant>,
   pub api_backoff_until: Option<Instant>,
   pub track_table_added_at: Vec<Option<DateTime<Utc>>>,
-  // Date Added was requested while the playlist was only partially loaded;
-  // the sort materializes once the remaining pages arrive.
+  // Date Added was clicked while the playlist was only partially loaded;
+  // the sort applies to the loaded slice (display-only hint, never a fetch).
   pub date_added_pending: bool,
+  // Playlist id whose background fill may still mutate the UI. Set by a
+  // partial first-page apply, cleared by any newer open/serve; the fill loop
+  // exits as soon as another list takes over.
+  pub fill_target: Option<String>,
   // For each displayed row, its position in the RAW playlist (including
   // episodes the table skips). Survives re-sorts; drives StartPlayback's
   // context offset so a sorted view plays the clicked song, not the one at
@@ -508,6 +506,10 @@ pub struct App {
   pub playback_known: bool,
   pub is_fetching_next_page: bool,
   pub spotify_token_expiry: SystemTime,
+  /// Set when the stored grant is dead (pre-PKCE refresh token). Refresh
+  /// would fail forever, so the 401 path and the expiry tick must stop
+  /// re-dispatching RefreshAuthentication; the user must restart to re-login.
+  pub auth_reauth_required: bool,
   pub dialog: Option<String>,
   pub confirm: bool,
   /// Cached playlist contents mirrored from the backend cache: playlist id ->
@@ -581,6 +583,7 @@ impl Default for App {
       large_search_limit: 50,
       api_error: String::new(),
       current_playback_context: None,
+      soloist_live: false,
       devices: None,
       input: vec![],
       input_idx: 0,
@@ -593,9 +596,6 @@ impl Default for App {
       playlist_view: None,
       pending_for_you_add: None,
       playlists: None,
-      recommended_tracks: vec![],
-      recommendations_context: None,
-      recommendations_seed: "".to_string(),
       search_results: SearchResult {
         hovered_block: SearchResultBlock::SongSearch,
         selected_block: SearchResultBlock::Empty,
@@ -629,6 +629,7 @@ impl Default for App {
       api_backoff_until: None,
       track_table_added_at: vec![],
       date_added_pending: false,
+      fill_target: None,
       track_table_raw_index: vec![],
       episode_table_context: EpisodeTableContext::Full,
       selected_show_simplified: None,
@@ -650,6 +651,7 @@ impl Default for App {
       playback_known: false,
       is_fetching_next_page: false,
       spotify_token_expiry: SystemTime::now(),
+      auth_reauth_required: false,
       dialog: None,
       confirm: false,
       playlist_uri_map: HashMap::new(),
@@ -822,12 +824,12 @@ impl App {
   }
 
   /// True for "next page" continuation fetches (offset > 0 or inherently a
-  /// continuation). Initial opens (offset 0) are not throttled.
+  /// continuation). Initial opens (offset 0) are not throttled. The
+  /// first-open background fill is exempt too: it completes the visible
+  /// list, and dropping it leaves a partial cache forever.
   fn is_load_more_event(action: &IoEvent) -> bool {
     match action {
-      IoEvent::GetMoreSearchResults(_)
-      | IoEvent::GetMoreRecentlyPlayed(_)
-      | IoEvent::LoadAllPlaylistItems(_) => true,
+      IoEvent::GetMoreSearchResults(_) | IoEvent::GetMoreRecentlyPlayed(_) => true,
       IoEvent::GetPlaylistItems(_, offset)
       | IoEvent::GetMadeForYouPlaylistItems(_, offset)
       | IoEvent::GetAlbumTracksMore(_, offset)
@@ -853,7 +855,9 @@ impl App {
     // refresh — it must not flash the loading indicator.
     self.is_loading = !matches!(
       action,
-      IoEvent::GetCurrentPlayback | IoEvent::CurrentUserSavedTracksContains(_)
+      IoEvent::GetCurrentPlayback
+        | IoEvent::CurrentUserSavedTracksContains(_)
+        | IoEvent::SoloistWsWatch { .. }
     );
     if let Some(io_tx) = &self.io_tx {
       if let Err(e) = io_tx.send(action) {
@@ -900,6 +904,10 @@ impl App {
   }
 
   fn poll_current_playback(&mut self) {
+    // WS loop owns state while live; it maintains the poll anchor itself.
+    if self.soloist_live {
+      return;
+    }
     // Poll while playing at the user's cadence (settings, default 5s);
     // while paused poll less often so a playback started externally
     // (e.g. in the Spotify app) gets picked up without hammering the API.
@@ -933,11 +941,10 @@ impl App {
 
     if !self.is_fetching_current_playback && elapsed >= poll_interval_ms {
       self.is_fetching_current_playback = true;
-      // Trigger the seek if the user has set a new position
-      match self.seek_ms {
-        Some(seek_ms) => self.apply_seek(seek_ms as u32),
-        None => self.dispatch(IoEvent::GetCurrentPlayback),
-      }
+      // A pending seek was already dispatched by seek_to (click, release,
+      // seek dialog); this tick only fetches, and the response clears
+      // seek_ms. Re-applying the seek here duplicated it every tick.
+      self.dispatch(IoEvent::GetCurrentPlayback);
     }
   }
 
@@ -954,7 +961,10 @@ impl App {
       _ => return None,
     };
     let elapsed = if context.is_playing {
-      self.instant_since_last_current_playback_poll.elapsed().as_millis()
+      self
+        .instant_since_last_current_playback_poll
+        .elapsed()
+        .as_millis()
     } else {
       0
     };
@@ -1038,26 +1048,6 @@ impl App {
       0u32
     };
     self.seek_to(new_progress as u32);
-  }
-
-  pub fn get_recommendations_for_seed(
-    &mut self,
-    seed_artists: Option<Vec<String>>,
-    seed_tracks: Option<Vec<String>>,
-    first_track: Option<FullTrack>,
-  ) {
-    let user_country = self.get_user_country();
-    self.dispatch(IoEvent::GetRecommendationsForSeed(
-      seed_artists,
-      seed_tracks,
-      Box::new(first_track),
-      user_country,
-    ));
-  }
-
-  pub fn get_recommendations_for_track_id(&mut self, id: String) {
-    let user_country = self.get_user_country();
-    self.dispatch(IoEvent::GetRecommendationsForTrackId(id, user_country));
   }
 
   pub fn increase_volume(&mut self) {
@@ -1176,7 +1166,9 @@ impl App {
     if self.track_table.context != Some(TrackTableContext::MyPlaylists) {
       return None;
     }
-    let idx = self.active_playlist_index.or(self.selected_playlist_index)?;
+    let idx = self
+      .active_playlist_index
+      .or(self.selected_playlist_index)?;
     self
       .playlists
       .as_ref()?
@@ -1191,13 +1183,12 @@ impl App {
   /// shift down. Returns true when a row was removed.
   pub fn remove_track_from_table(&mut self, uri: &str) -> bool {
     let pre_len = self.track_table.tracks.len();
-    let Some(idx) = self.track_table.tracks.iter().position(|t| {
-      t.id
-        .as_ref()
-        .map(|id| id.uri())
-        .as_deref()
-        == Some(uri)
-    }) else {
+    let Some(idx) = self
+      .track_table
+      .tracks
+      .iter()
+      .position(|t| t.id.as_ref().map(|id| id.uri()).as_deref() == Some(uri))
+    else {
       return false;
     };
     let aligned =
@@ -1748,7 +1739,9 @@ impl App {
       .playlists
       .as_ref()
       .and_then(|p| {
-        let idx = self.selected_playlist_index.or(self.active_playlist_index)?;
+        let idx = self
+          .selected_playlist_index
+          .or(self.active_playlist_index)?;
         p.items.get(idx).map(|pl| pl.name.clone())
       })
       .unwrap_or_default();
@@ -1842,7 +1835,10 @@ impl App {
     self.playlist_picker_index = 0;
     self.naming_playlist = false;
     self.new_playlist_name.clear();
-    self.push_navigation_stack(RouteId::Dialog, ActiveBlock::Dialog(DialogContext::AddToPlaylist));
+    self.push_navigation_stack(
+      RouteId::Dialog,
+      ActiveBlock::Dialog(DialogContext::AddToPlaylist),
+    );
   }
 
   pub fn user_unfollow_playlist_search_result(&mut self) {
@@ -1967,7 +1963,10 @@ impl App {
   }
 
   pub fn made_for_you_playlist_id(&self, index: usize) -> Option<String> {
-    self.made_for_you_custom.get(index).map(|(_, id)| id.clone())
+    self
+      .made_for_you_custom
+      .get(index)
+      .map(|(_, id)| id.clone())
   }
 
   pub fn get_panel_data(&mut self) {
@@ -2002,12 +2001,7 @@ impl App {
   }
 
   pub fn get_artist(&mut self, artist_id: String, input_artist_name: String) {
-    let user_country = self.get_user_country();
-    self.dispatch(IoEvent::GetArtist(
-      artist_id.clone(),
-      input_artist_name,
-      user_country,
-    ));
+    self.dispatch(IoEvent::GetArtist(artist_id.clone(), input_artist_name));
     // Albums load eagerly so the artist profile never shows an empty
     // Albums tab; the remaining tabs stay lazy (fetched on first visit).
     self.dispatch(IoEvent::GetArtistAlbumsMore(artist_id, 0));
@@ -2389,11 +2383,6 @@ impl App {
     }
   }
 
-  pub fn get_user_country(&self) -> Option<Country> {
-    // keep their market=None default instead of a dead field read
-    None
-  }
-
   pub fn calculate_help_menu_offset(&mut self) {
     let old_offset = self.help_scroll_offset;
 
@@ -2506,15 +2495,16 @@ impl App {
           !self.user_config.behavior.enable_remove_from_playlist;
       }
       15 => {
-        self.user_config.behavior.max_display_length = match self.user_config.behavior.max_display_length {
-          0 => 15,
-          15 => 20,
-          20 => 25,
-          25 => 30,
-          30 => 40,
-          40 => 50,
-          _ => 0,
-        };
+        self.user_config.behavior.max_display_length =
+          match self.user_config.behavior.max_display_length {
+            0 => 15,
+            15 => 20,
+            20 => 25,
+            25 => 30,
+            30 => 40,
+            40 => 50,
+            _ => 0,
+          };
       }
       16 => {
         self.user_config.behavior.enable_animations = !self.user_config.behavior.enable_animations;
@@ -2535,7 +2525,8 @@ impl App {
         self.user_config.spotify.trim_working_set = !self.user_config.spotify.trim_working_set;
       }
       22 => {
-        self.user_config.spotify.memory_limit_mb = if self.user_config.spotify.memory_limit_mb == 0 {
+        self.user_config.spotify.memory_limit_mb = if self.user_config.spotify.memory_limit_mb == 0
+        {
           150
         } else {
           0
@@ -2706,6 +2697,24 @@ mod tests {
     let mut app = App::default();
     app.current_playback_context = Some(paused_playback());
     assert_eq!(app.playback_remaining_ms(), None);
+  }
+
+  #[test]
+  fn poll_tick_with_pending_seek_fetches_instead_of_reseeking() {
+    use crate::backend::IoEvent;
+    use std::time::Duration;
+
+    // A click already dispatched the Seek via seek_to; the poll tick must
+    // only fetch (the response clears seek_ms), never re-apply the seek.
+    let mut app = App::default();
+    app.current_playback_context = Some(playing_playback_with_progress(10_000));
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+    app.seek_ms = Some(90_000);
+    app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_millis(6_000);
+    app.update_on_tick();
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(dispatched, vec![IoEvent::GetCurrentPlayback]);
   }
 
   #[test]
@@ -3051,26 +3060,19 @@ mod tests {
     assert_eq!(app.made_for_you_name(1), Some("mix2".to_string()));
     // The pasted playlists extend the For you list.
     assert_eq!(app.made_for_you_len(), 2);
-    assert_eq!(
-      app.made_for_you_playlist_id(0),
-      Some("mix1".to_string())
-    );
+    assert_eq!(app.made_for_you_playlist_id(0), Some("mix1".to_string()));
     assert_eq!(app.made_for_you_name(0), Some("My Mix".to_string()));
   }
 
   #[test]
   fn expand_made_for_you_opens_the_pasted_playlist() {
     let mut app = App::default();
-    app.made_for_you_custom.push(("My Mix".to_string(), "mix1".to_string()));
+    app
+      .made_for_you_custom
+      .push(("My Mix".to_string(), "mix1".to_string()));
     app.expand_made_for_you(0);
-    assert_eq!(
-      app.track_table.context,
-      Some(TrackTableContext::MadeForYou)
-    );
-    assert_eq!(
-      app.made_for_you_playlist_id(0),
-      Some("mix1".to_string())
-    );
+    assert_eq!(app.track_table.context, Some(TrackTableContext::MadeForYou));
+    assert_eq!(app.made_for_you_playlist_id(0), Some("mix1".to_string()));
   }
 
   fn mock_playlist(i: usize) -> SimplifiedPlaylist {

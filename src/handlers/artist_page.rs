@@ -1,5 +1,5 @@
 use super::common_key_events;
-use crate::app::{ActiveBlock, App, ArtistBlock, RecommendationsContext, TrackTableContext};
+use crate::app::{ActiveBlock, App, ArtistBlock, TrackTableContext};
 use crate::backend::IoEvent;
 use crate::event::Key;
 use rspotify::model::Id;
@@ -45,7 +45,8 @@ fn handle_down_press_on_selected_block(app: &mut App) {
         } else {
           artist.appears_on.items.len().saturating_sub(1)
         };
-        artist.selected_appears_on_index = (artist.selected_appears_on_index + 1).min(max_selectable);
+        artist.selected_appears_on_index =
+          (artist.selected_appears_on_index + 1).min(max_selectable);
       }
       _ => {}
     }
@@ -101,7 +102,8 @@ fn handle_up_press_on_selected_block(app: &mut App) {
       }
       ArtistBlock::Singles => {
         let next_index = artist.selected_singles_index.saturating_sub(1);
-        artist.selected_singles_index = next_index.min(artist.singles.items.len().saturating_sub(1));
+        artist.selected_singles_index =
+          next_index.min(artist.singles.items.len().saturating_sub(1));
       }
       ArtistBlock::EPs => {
         let next_index = artist.selected_eps_index.saturating_sub(1);
@@ -109,7 +111,8 @@ fn handle_up_press_on_selected_block(app: &mut App) {
       }
       ArtistBlock::AppearsOn => {
         let next_index = artist.selected_appears_on_index.saturating_sub(1);
-        artist.selected_appears_on_index = next_index.min(artist.appears_on.items.len().saturating_sub(1));
+        artist.selected_appears_on_index =
+          next_index.min(artist.appears_on.items.len().saturating_sub(1));
       }
       _ => {}
     }
@@ -128,10 +131,16 @@ fn handle_high_press_on_selected_block(app: &mut App) {
       ArtistBlock::TopTracks => {
         artist.selected_top_track_index = common_key_events::on_high_press_handler();
       }
-      ArtistBlock::Albums => artist.selected_album_index = common_key_events::on_high_press_handler(),
-      ArtistBlock::Singles => artist.selected_singles_index = common_key_events::on_high_press_handler(),
+      ArtistBlock::Albums => {
+        artist.selected_album_index = common_key_events::on_high_press_handler()
+      }
+      ArtistBlock::Singles => {
+        artist.selected_singles_index = common_key_events::on_high_press_handler()
+      }
       ArtistBlock::EPs => artist.selected_eps_index = common_key_events::on_high_press_handler(),
-      ArtistBlock::AppearsOn => artist.selected_appears_on_index = common_key_events::on_high_press_handler(),
+      ArtistBlock::AppearsOn => {
+        artist.selected_appears_on_index = common_key_events::on_high_press_handler()
+      }
       _ => {}
     }
   }
@@ -141,19 +150,23 @@ fn handle_middle_press_on_selected_block(app: &mut App) {
   if let Some(artist) = &mut app.artist {
     match artist.artist_selected_block {
       ArtistBlock::TopTracks => {
-        artist.selected_top_track_index = common_key_events::on_middle_press_handler(&artist.top_tracks)
+        artist.selected_top_track_index =
+          common_key_events::on_middle_press_handler(&artist.top_tracks)
       }
       ArtistBlock::Albums => {
-        artist.selected_album_index = common_key_events::on_middle_press_handler(&artist.albums.items)
+        artist.selected_album_index =
+          common_key_events::on_middle_press_handler(&artist.albums.items)
       }
       ArtistBlock::Singles => {
-        artist.selected_singles_index = common_key_events::on_middle_press_handler(&artist.singles.items)
+        artist.selected_singles_index =
+          common_key_events::on_middle_press_handler(&artist.singles.items)
       }
       ArtistBlock::EPs => {
         artist.selected_eps_index = common_key_events::on_middle_press_handler(&artist.eps.items)
       }
       ArtistBlock::AppearsOn => {
-        artist.selected_appears_on_index = common_key_events::on_middle_press_handler(&artist.appears_on.items)
+        artist.selected_appears_on_index =
+          common_key_events::on_middle_press_handler(&artist.appears_on.items)
       }
       _ => {}
     }
@@ -164,37 +177,22 @@ fn handle_low_press_on_selected_block(app: &mut App) {
   if let Some(artist) = &mut app.artist {
     match artist.artist_selected_block {
       ArtistBlock::TopTracks => {
-        artist.selected_top_track_index = common_key_events::on_low_press_handler(&artist.top_tracks)
+        artist.selected_top_track_index =
+          common_key_events::on_low_press_handler(&artist.top_tracks)
       }
       ArtistBlock::Albums => {
         artist.selected_album_index = common_key_events::on_low_press_handler(&artist.albums.items)
       }
       ArtistBlock::Singles => {
-        artist.selected_singles_index = common_key_events::on_low_press_handler(&artist.singles.items)
+        artist.selected_singles_index =
+          common_key_events::on_low_press_handler(&artist.singles.items)
       }
       ArtistBlock::EPs => {
         artist.selected_eps_index = common_key_events::on_low_press_handler(&artist.eps.items)
       }
       ArtistBlock::AppearsOn => {
-        artist.selected_appears_on_index = common_key_events::on_low_press_handler(&artist.appears_on.items)
-      }
-      _ => {}
-    }
-  }
-}
-
-fn handle_recommend_event_on_selected_block(app: &mut App) {
-  //recommendations.
-  if let Some(artist) = &mut app.artist.clone() {
-    match artist.artist_selected_block {
-      ArtistBlock::TopTracks => {
-        let selected_index = artist.selected_top_track_index;
-        if let Some(track) = artist.top_tracks.get(selected_index) {
-          let track_id_list: Option<Vec<String>> = track.id.as_ref().map(|id| vec![id.to_string()]);
-          app.recommendations_context = Some(RecommendationsContext::Song);
-          app.recommendations_seed = track.name.clone();
-          app.get_recommendations_for_seed(None, track_id_list, Some(track.clone()));
-        }
+        artist.selected_appears_on_index =
+          common_key_events::on_low_press_handler(&artist.appears_on.items)
       }
       _ => {}
     }
@@ -237,7 +235,12 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
       ArtistBlock::Singles => {
         if artist.selected_singles_index >= artist.singles.items.len() {
           app.load_more_singles();
-        } else if let Some(al) = artist.singles.items.get(artist.selected_singles_index).cloned() {
+        } else if let Some(al) = artist
+          .singles
+          .items
+          .get(artist.selected_singles_index)
+          .cloned()
+        {
           app.track_table.context = Some(TrackTableContext::AlbumSearch);
           app.dispatch(IoEvent::GetAlbumTracks(Box::new(al)));
         }
@@ -346,23 +349,16 @@ pub fn handler(key: Key, app: &mut App) {
           handle_enter_event_on_hovered_block(app);
         }
       }
-      Key::Char('r') => {
-        if artist.artist_selected_block != ArtistBlock::Empty {
-          handle_recommend_event_on_selected_block(app);
-        }
-      }
       Key::Char('w') => match artist.artist_selected_block {
-        ArtistBlock::Albums
-        | ArtistBlock::Singles
-        | ArtistBlock::EPs
-        | ArtistBlock::AppearsOn => app.current_user_saved_album_add(ActiveBlock::ArtistBlock),
+        ArtistBlock::Albums | ArtistBlock::Singles | ArtistBlock::EPs | ArtistBlock::AppearsOn => {
+          app.current_user_saved_album_add(ActiveBlock::ArtistBlock)
+        }
         _ => (),
       },
       Key::Char('D') => match artist.artist_selected_block {
-        ArtistBlock::Albums
-        | ArtistBlock::Singles
-        | ArtistBlock::EPs
-        | ArtistBlock::AppearsOn => app.current_user_saved_album_delete(ActiveBlock::ArtistBlock),
+        ArtistBlock::Albums | ArtistBlock::Singles | ArtistBlock::EPs | ArtistBlock::AppearsOn => {
+          app.current_user_saved_album_delete(ActiveBlock::ArtistBlock)
+        }
         _ => (),
       },
       _ if key == app.user_config.keys.add_item_to_queue => {

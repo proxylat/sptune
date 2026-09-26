@@ -485,7 +485,7 @@ impl<'a> CliApp<'a> {
           .playlist(
             rspotify::model::PlaylistId::from_id_or_uri(id).unwrap(),
             None,
-            None,
+            Some(rspotify::model::Market::FromToken),
           )
           .await
         {
@@ -538,7 +538,7 @@ impl<'a> CliApp<'a> {
   pub async fn play(&mut self, name: String, item: Type, queue: bool, random: bool) -> Result<()> {
     self
       .net
-      .handle_network_event(IoEvent::GetSearchResults(name.clone(), None))
+      .handle_network_event(IoEvent::GetSearchResults(name.clone()))
       .await;
     // Get the uri of the first found
     // item + the offset or return an error message
@@ -605,7 +605,7 @@ impl<'a> CliApp<'a> {
   pub async fn query(&mut self, search: String, format: String, item: Type) -> String {
     self
       .net
-      .handle_network_event(IoEvent::GetSearchResults(search.clone(), None))
+      .handle_network_event(IoEvent::GetSearchResults(search.clone()))
       .await;
 
     let app = self.net.app.lock().await;

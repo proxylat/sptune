@@ -49,58 +49,58 @@ pub fn handler(key: Key, app: &mut App) {
         .copied()
         .unwrap_or("")
       {
-      // Clicking the page we are already on must not re-fetch (or re-stack).
-      "For you" => {
-        if app.get_current_route().id != RouteId::MadeForYou {
-          app.push_navigation_stack(RouteId::MadeForYou, ActiveBlock::MadeForYou);
+        // Clicking the page we are already on must not re-fetch (or re-stack).
+        "For you" => {
+          if app.get_current_route().id != RouteId::MadeForYou {
+            app.push_navigation_stack(RouteId::MadeForYou, ActiveBlock::MadeForYou);
+          }
         }
-      }
-      // Recently Played,
-      "Recently Played" => {
-        if app.get_current_route().active_block != ActiveBlock::RecentlyPlayed {
-          app.dispatch(IoEvent::GetRecentlyPlayed);
-          app.push_navigation_stack(RouteId::RecentlyPlayed, ActiveBlock::RecentlyPlayed);
+        // Recently Played,
+        "Recently Played" => {
+          if app.get_current_route().active_block != ActiveBlock::RecentlyPlayed {
+            app.dispatch(IoEvent::GetRecentlyPlayed);
+            app.push_navigation_stack(RouteId::RecentlyPlayed, ActiveBlock::RecentlyPlayed);
+          }
         }
-      }
-      // Liked Songs,
-      "Liked Songs" => {
-        // Same split as the playlist Enter guard: the view switch is free,
-        // only the fetch costs tokens. Stored context can still say
-        // SavedTracks while the screen shows an artist page, so the route
-        // decides whether we are already viewing.
-        let already_viewing = app.track_table.context == Some(TrackTableContext::SavedTracks)
-          && app.get_current_route().id == RouteId::TrackTable;
-        if !already_viewing {
-          app.dispatch(IoEvent::GetCurrentSavedTracks(None));
-          app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+        // Liked Songs,
+        "Liked Songs" => {
+          // Same split as the playlist Enter guard: the view switch is free,
+          // only the fetch costs tokens. Stored context can still say
+          // SavedTracks while the screen shows an artist page, so the route
+          // decides whether we are already viewing.
+          let already_viewing = app.track_table.context == Some(TrackTableContext::SavedTracks)
+            && app.get_current_route().id == RouteId::TrackTable;
+          if !already_viewing {
+            app.dispatch(IoEvent::GetCurrentSavedTracks(None));
+            app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+          }
         }
-      }
-      // Albums,
-      "Albums" => {
-        if app.get_current_route().id != RouteId::AlbumList {
-          app.dispatch(IoEvent::GetCurrentUserSavedAlbums(None));
-          app.push_navigation_stack(RouteId::AlbumList, ActiveBlock::AlbumList);
+        // Albums,
+        "Albums" => {
+          if app.get_current_route().id != RouteId::AlbumList {
+            app.dispatch(IoEvent::GetCurrentUserSavedAlbums(None));
+            app.push_navigation_stack(RouteId::AlbumList, ActiveBlock::AlbumList);
+          }
         }
-      }
-      //  Artists,
-      "Artists" => {
-        if app.get_current_route().id != RouteId::Artists {
-          app.dispatch(IoEvent::GetFollowedArtists(None));
-          app.push_navigation_stack(RouteId::Artists, ActiveBlock::Artists);
+        //  Artists,
+        "Artists" => {
+          if app.get_current_route().id != RouteId::Artists {
+            app.dispatch(IoEvent::GetFollowedArtists(None));
+            app.push_navigation_stack(RouteId::Artists, ActiveBlock::Artists);
+          }
         }
-      }
-      // Podcasts,
-      "Podcasts" => {
-        if app.get_current_route().id != RouteId::Podcasts {
-          app.dispatch(IoEvent::GetCurrentUserSavedShows(None));
-          app.push_navigation_stack(RouteId::Podcasts, ActiveBlock::Podcasts);
+        // Podcasts,
+        "Podcasts" => {
+          if app.get_current_route().id != RouteId::Podcasts {
+            app.dispatch(IoEvent::GetCurrentUserSavedShows(None));
+            app.push_navigation_stack(RouteId::Podcasts, ActiveBlock::Podcasts);
+          }
         }
+        // This is required because Rust can't tell if this pattern in exhaustive
+        _ => {}
       }
-      // This is required because Rust can't tell if this pattern in exhaustive
-      _ => {}
     }
-  },
-  _ => (),
+    _ => (),
   };
 }
 

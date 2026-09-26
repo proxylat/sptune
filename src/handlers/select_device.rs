@@ -163,10 +163,7 @@ mod tests {
 
     assert!(rx.try_iter().collect::<Vec<_>>().is_empty());
     // …but still leaves the screen: a single-device setup must have a way out.
-    assert_ne!(
-      app.get_current_route().id,
-      RouteId::SelectedDevice
-    );
+    assert_ne!(app.get_current_route().id, RouteId::SelectedDevice);
   }
 
   #[test]

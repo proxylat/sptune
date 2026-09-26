@@ -1,11 +1,8 @@
 use super::{
-  super::app::{
-    ActiveBlock, App, DialogContext, RecommendationsContext, RouteId, SearchResultBlock,
-    TrackTableContext,
-  },
+  super::app::{ActiveBlock, App, DialogContext, RouteId, SearchResultBlock, TrackTableContext},
   common_key_events,
 };
-use crate::backend::IoEvent;
+use crate::backend::{is_unplayable, IoEvent};
 use crate::event::Key;
 use rspotify::model::Id;
 
@@ -327,6 +324,9 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
       if let (Some(index), Some(tracks)) = (index, tracks.as_ref()) {
         if index >= tracks.items.len() {
           app.load_more_search_block(&SearchResultBlock::SongSearch);
+        } else if is_unplayable(&tracks.items[index]) {
+          // Relinking: don't queue an unplayable track into uris-playback.
+          app.handle_error(anyhow::anyhow!("Track is unplayable in your market"));
         } else {
           let track_uris = tracks
             .items
@@ -418,41 +418,6 @@ fn handle_enter_event_on_hovered_block(app: &mut App) {
     }
     SearchResultBlock::Empty => {}
   };
-}
-
-fn handle_recommended_tracks(app: &mut App) {
-  match app.search_results.selected_block {
-    SearchResultBlock::AlbumSearch => {}
-    SearchResultBlock::SongSearch => {
-      if let Some(index) = &app.search_results.selected_tracks_index {
-        if let Some(result) = app.search_results.tracks.clone() {
-          if let Some(track) = result.items.get(index.to_owned()) {
-            let track_id_list: Option<Vec<String>> =
-              track.id.as_ref().map(|id| vec![id.to_string()]);
-
-            app.recommendations_context = Some(RecommendationsContext::Song);
-            app.recommendations_seed = track.name.clone();
-            app.get_recommendations_for_seed(None, track_id_list, Some(track.clone()));
-          };
-        };
-      };
-    }
-    SearchResultBlock::ArtistSearch => {
-      if let Some(index) = &app.search_results.selected_artists_index {
-        if let Some(result) = app.search_results.artists.clone() {
-          if let Some(artist) = result.items.get(index.to_owned()) {
-            let artist_id_list: Option<Vec<String>> = Some(vec![artist.id.to_string()]);
-            app.recommendations_context = Some(RecommendationsContext::Artist);
-            app.recommendations_seed = artist.name.clone();
-            app.get_recommendations_for_seed(artist_id_list, None, None);
-          };
-        };
-      };
-    }
-    SearchResultBlock::PlaylistSearch => {}
-    SearchResultBlock::ShowSearch => {}
-    SearchResultBlock::Empty => {}
-  }
 }
 
 pub fn handler(key: Key, app: &mut App) {
@@ -574,7 +539,6 @@ pub fn handler(key: Key, app: &mut App) {
       SearchResultBlock::ShowSearch => app.user_unfollow_show(ActiveBlock::SearchResultBlock),
       SearchResultBlock::Empty => {}
     },
-    Key::Char('r') => handle_recommended_tracks(app),
     _ if key == app.user_config.keys.add_item_to_queue => handle_add_item_to_queue(app),
     // Add `s` to "see more" on each option
     _ => {}

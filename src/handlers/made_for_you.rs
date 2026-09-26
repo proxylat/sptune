@@ -16,8 +16,7 @@ pub fn handler(key: Key, app: &mut App) {
   match key {
     k if common_key_events::left_event(k) => common_key_events::handle_left_event(app),
     k if common_key_events::up_event(k) => {
-      let next_index =
-        common_key_events::on_up_press_handler(&names, Some(app.made_for_you_index));
+      let next_index = common_key_events::on_up_press_handler(&names, Some(app.made_for_you_index));
       app.made_for_you_index = next_index;
     }
     k if common_key_events::down_event(k) => {

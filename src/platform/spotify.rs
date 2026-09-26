@@ -73,7 +73,11 @@ pub fn launch(cfg: &SpotifyConfig) -> anyhow::Result<std::process::Child> {
   // children that spawn seconds after the browser process).
   #[cfg(not(any(target_os = "linux", windows)))]
   {
-    let _ = (cfg.memory_limit_mb, cfg.suspend_children, cfg.trim_working_set);
+    let _ = (
+      cfg.memory_limit_mb,
+      cfg.suspend_children,
+      cfg.trim_working_set,
+    );
   }
   Ok(child)
 }

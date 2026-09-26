@@ -1,7 +1,6 @@
 use super::{super::app::App, common_key_events};
 use crate::{
-  app::RecommendationsContext,
-  backend::IoEvent,
+  backend::{original_track_id, IoEvent},
   event::Key,
   tui::group_consecutive_plays,
 };
@@ -9,10 +8,7 @@ use anyhow::anyhow;
 use rspotify::model::{Id, PlayHistory};
 
 /// Resolve a grouped-row index to its first raw history entry.
-fn grouped_selected_item(
-  items: &[PlayHistory],
-  group_index: usize,
-) -> Option<&PlayHistory> {
+fn grouped_selected_item(items: &[PlayHistory], group_index: usize) -> Option<&PlayHistory> {
   let groups = group_consecutive_plays(items);
   items.get(groups.get(group_index)?.first_raw)
 }
@@ -69,8 +65,10 @@ pub fn handler(key: Key, app: &mut App) {
         if let Some(selected_track) =
           grouped_selected_item(&recently_played_result.items, app.recently_played.index)
         {
-          if let Some(track_id) = &selected_track.track.id {
-            app.dispatch(IoEvent::ToggleSaveTrack(track_id.to_string()));
+          // Relinking: save/remove by original id, not the relinked one.
+          let id = original_track_id(&selected_track.track);
+          if !id.is_empty() {
+            app.dispatch(IoEvent::ToggleSaveTrack(id));
           };
         };
       };
@@ -117,20 +115,6 @@ pub fn handler(key: Key, app: &mut App) {
 
         app.dispatch(IoEvent::StartPlayback(None, Some(track_uris), Some(offset)));
       };
-    }
-    Key::Char('r') => {
-      if let Some(recently_played_result) = &app.recently_played.result.clone() {
-        let selected_track_history_item =
-          grouped_selected_item(&recently_played_result.items, app.recently_played.index);
-
-        if let Some(item) = selected_track_history_item {
-          if let Some(id) = &item.track.id {
-            app.recommendations_context = Some(RecommendationsContext::Song);
-            app.recommendations_seed = item.track.name.clone();
-            app.get_recommendations_for_track_id(id.to_string());
-          }
-        }
-      }
     }
     _ if key == app.user_config.keys.add_item_to_queue => {
       if let Some(recently_played_result) = &app.recently_played.result.clone() {

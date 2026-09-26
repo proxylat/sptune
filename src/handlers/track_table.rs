@@ -1,8 +1,8 @@
 use super::{
-  super::app::{App, RecommendationsContext, TrackTable, TrackTableContext},
+  super::app::{App, TrackTable, TrackTableContext},
   common_key_events,
 };
-use crate::backend::IoEvent;
+use crate::backend::{is_unplayable, original_track_id, IoEvent};
 use crate::event::Key;
 use crate::lcg::rand_idx;
 use crate::tui::layout::song_table_viewport;
@@ -23,7 +23,11 @@ pub fn handler(key: Key, app: &mut App) {
       Key::Char(c) => {
         if let Some(query) = app.playlist_filter.as_mut() {
           let idx = app.playlist_filter_idx.min(query.chars().count());
-          let byte_idx = query.chars().take(idx).map(|ch| ch.len_utf8()).sum::<usize>();
+          let byte_idx = query
+            .chars()
+            .take(idx)
+            .map(|ch| ch.len_utf8())
+            .sum::<usize>();
           query.insert(byte_idx, c);
           app.playlist_filter_idx += 1;
           app.playlist_filter_cursor_position += cw(c);
@@ -37,7 +41,9 @@ pub fn handler(key: Key, app: &mut App) {
             let removed = chars.remove(idx);
             *query = chars.into_iter().collect();
             app.playlist_filter_idx -= 1;
-            app.playlist_filter_cursor_position = app.playlist_filter_cursor_position.saturating_sub(cw(removed));
+            app.playlist_filter_cursor_position = app
+              .playlist_filter_cursor_position
+              .saturating_sub(cw(removed));
           }
         }
       }
@@ -56,7 +62,8 @@ pub fn handler(key: Key, app: &mut App) {
           if let Some(query) = app.playlist_filter.as_deref() {
             let ch = query.chars().nth(app.playlist_filter_idx - 1).unwrap();
             app.playlist_filter_idx -= 1;
-            app.playlist_filter_cursor_position = app.playlist_filter_cursor_position.saturating_sub(cw(ch));
+            app.playlist_filter_cursor_position =
+              app.playlist_filter_cursor_position.saturating_sub(cw(ch));
           }
         }
       }
@@ -192,7 +199,6 @@ pub fn handler(key: Key, app: &mut App) {
               }
             };
           }
-          TrackTableContext::RecommendedTracks => {}
           TrackTableContext::SavedTracks => {
             app.get_current_user_saved_tracks_next();
           }
@@ -237,7 +243,6 @@ pub fn handler(key: Key, app: &mut App) {
               }
             };
           }
-          TrackTableContext::RecommendedTracks => {}
           TrackTableContext::SavedTracks => {
             app.get_current_user_saved_tracks_previous();
           }
@@ -265,10 +270,6 @@ pub fn handler(key: Key, app: &mut App) {
     Key::Char('S') => play_random_song(app),
     k if k == app.user_config.keys.jump_to_end => jump_to_end(app),
     k if k == app.user_config.keys.jump_to_start => jump_to_start(app),
-    //recommended song radio
-    Key::Char('R') => {
-      handle_recommended_tracks(app);
-    }
     _ if key == app.user_config.keys.add_item_to_queue => on_queue(app),
     _ => {}
   }
@@ -316,23 +317,21 @@ fn play_random_song(app: &mut App) {
           ));
         }
       }
-      TrackTableContext::RecommendedTracks => {}
       TrackTableContext::SavedTracks => {
         if let Some(saved_tracks) = &app.library.saved_tracks.get_results(None) {
+          // Relinking: relinked URIs are playable; drop market-unplayable ones.
           let track_uris: Vec<String> = saved_tracks
             .items
             .iter()
-            .map(|item| {
-              item
-                .track
-                .id
-                .as_ref()
-                .map(|id| id.uri())
-                .unwrap_or_default()
-            })
+            .filter(|item| !is_unplayable(&item.track))
+            .filter_map(|item| item.track.id.as_ref().map(|id| id.uri()))
             .collect();
-          let pick = rand_idx(track_uris.len());
-          app.dispatch(IoEvent::StartPlayback(None, Some(track_uris), Some(pick)))
+          if track_uris.is_empty() {
+            app.handle_error(anyhow::anyhow!("No playable tracks in your market"));
+          } else {
+            let pick = rand_idx(track_uris.len());
+            app.dispatch(IoEvent::StartPlayback(None, Some(track_uris), Some(pick)))
+          }
         }
       }
       TrackTableContext::AlbumSearch => {}
@@ -387,22 +386,11 @@ fn play_random_song(app: &mut App) {
 fn handle_save_track_event(app: &mut App) {
   let (selected_index, tracks) = (&app.track_table.selected_index, &app.track_table.tracks);
   if let Some(track) = tracks.get(*selected_index) {
-    if let Some(id) = &track.id {
-      let id = id.to_string();
+    // Relinking: save/remove by original id, not the relinked one.
+    let id = original_track_id(track);
+    if !id.is_empty() {
       app.dispatch(IoEvent::ToggleSaveTrack(id));
     };
-  };
-}
-
-fn handle_recommended_tracks(app: &mut App) {
-  let (selected_index, tracks) = (&app.track_table.selected_index, &app.track_table.tracks);
-  if let Some(track) = tracks.get(*selected_index) {
-    let first_track = track.clone();
-    let track_id_list = track.id.as_ref().map(|id| vec![id.to_string()]);
-
-    app.recommendations_context = Some(RecommendationsContext::Song);
-    app.recommendations_seed = first_track.name.clone();
-    app.get_recommendations_for_seed(None, track_id_list, Some(first_track));
   };
 }
 
@@ -424,7 +412,6 @@ fn jump_to_end(app: &mut App) {
           }
         }
       }
-      TrackTableContext::RecommendedTracks => {}
       TrackTableContext::SavedTracks => {}
       TrackTableContext::AlbumSearch => {}
       TrackTableContext::PlaylistSearch => {}
@@ -449,19 +436,6 @@ fn on_enter(app: &mut App) {
           let track_uri = track.id.as_ref().map(|id| id.uri());
           app.dispatch(IoEvent::StartPlaybackAt(context_uri, track_uri));
         };
-      }
-      TrackTableContext::RecommendedTracks => {
-        app.dispatch(IoEvent::StartPlayback(
-          None,
-          Some(
-            app
-              .recommended_tracks
-              .iter()
-              .map(|x| x.id.as_ref().map(|id| id.uri()).unwrap_or_default())
-              .collect::<Vec<String>>(),
-          ),
-          Some(app.track_table.selected_index),
-        ));
       }
       TrackTableContext::SavedTracks => {
         if let Some(saved_tracks) = &app.library.saved_tracks.get_results(None) {
@@ -527,16 +501,6 @@ fn on_queue(app: &mut App) {
           app.dispatch(IoEvent::AddItemToQueue(uri));
         };
       }
-      TrackTableContext::RecommendedTracks => {
-        if let Some(full_track) = app.recommended_tracks.get(app.track_table.selected_index) {
-          let uri = full_track
-            .id
-            .as_ref()
-            .map(|id| id.uri())
-            .unwrap_or_default();
-          app.dispatch(IoEvent::AddItemToQueue(uri));
-        }
-      }
       TrackTableContext::SavedTracks => {
         if let Some(page) = app.library.saved_tracks.get_results(None) {
           if let Some(saved_track) = page.items.get(app.track_table.selected_index) {
@@ -587,7 +551,6 @@ fn jump_to_start(app: &mut App) {
           }
         }
       }
-      TrackTableContext::RecommendedTracks => {}
       TrackTableContext::SavedTracks => {}
       TrackTableContext::AlbumSearch => {}
       TrackTableContext::PlaylistSearch => {}

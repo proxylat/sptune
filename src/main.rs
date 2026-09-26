@@ -2,15 +2,13 @@ mod app;
 mod backend;
 mod cli;
 mod client_creds;
-mod event;
 mod handlers;
-mod lcg;
-mod library_cache;
-mod playlist_cache;
-mod redirect_uri;
 mod platform;
+mod redirect_uri;
+mod soloist_ws;
 mod tui;
-mod user_config;
+
+use sptune::{event, lcg, library_cache, playlist_cache, user_config};
 
 use crate::app::RouteId;
 use crate::event::Key;
@@ -52,7 +50,7 @@ use std::{
 use tokio::sync::Mutex;
 use user_config::{theme_presets, UserConfig, UserConfigPaths};
 
-const SCOPES: [&str; 14] = [
+const SCOPES: [&str; 13] = [
   "playlist-read-collaborative",
   "playlist-read-private",
   "playlist-modify-private",
@@ -62,7 +60,6 @@ const SCOPES: [&str; 14] = [
   "user-library-modify",
   "user-library-read",
   "user-modify-playback-state",
-  "user-read-currently-playing",
   "user-read-playback-state",
   "user-read-playback-position",
   "user-read-private",
@@ -71,23 +68,46 @@ const SCOPES: [&str; 14] = [
 
 /// get token automatically with local webserver (PKCE, no client secret)
 pub async fn get_token_auto(spotify: &mut AuthCodePkceSpotify, port: u16) -> Option<Token> {
+  // A cached token without a refresh token is a poisoned leftover (older
+  // builds saved refresh responses that omitted it): the session could
+  // never refresh, so every launch ended in Ok(None) + the restart
+  // message. Ignore it and re-authenticate through the browser once; the
+  // fresh grant rewrites the file with a refresh token. Healthy grants
+  // always carry one, so this only ever fires on poisoned files.
+  let usable = |token: Token| {
+    token
+      .refresh_token
+      .as_deref()
+      .is_some_and(|s| !s.is_empty())
+      .then_some(token)
+  };
   if let Ok(Some(token)) = spotify.read_token_cache(false).await {
-    return Some(token);
+    if let Some(token) = usable(token) {
+      return Some(token);
+    }
   }
 
   // ponytail: expired cached token is still usable — refresh_authentication
   // refetches via the stored refresh_token on the next event-loop tick.
   if let Ok(token) = Token::from_cache(spotify.get_config().cache_path.clone()) {
-    return Some(token);
+    if let Some(token) = usable(token) {
+      return Some(token);
+    }
   }
 
   let auth_url = spotify.get_authorize_url(None).ok()?;
   println!("\nOpening browser for Spotify authorization...");
   // On Windows cmd.exe splits '&' — tell user to paste into browser address bar, not terminal
-  println!("If it doesn't open, copy this URL into your browser:\n{}\n", auth_url);
+  println!(
+    "If it doesn't open, copy this URL into your browser:\n{}\n",
+    auth_url
+  );
   #[cfg(windows)]
   println!("(On Windows, paste into browser — don't run it in cmd)\n");
-  println!("Waiting for callback on http://127.0.0.1:{}/callback ...", port);
+  println!(
+    "Waiting for callback on http://127.0.0.1:{}/callback ...",
+    port
+  );
   open_url(&auth_url);
 
   match redirect_uri_web_server(port) {
@@ -163,6 +183,7 @@ fn panic_hook(info: &PanicHookInfo<'_>) {
   eprintln!("{:?}", Backtrace::capture());
   // Panic = sptune is going down: take Spotify with it, same as a clean exit.
   crate::platform::spotify::kill_all_spotify();
+  crate::platform::soloist::kill_spawned();
 }
 
 #[tokio::main]
@@ -176,7 +197,7 @@ async fn main() -> Result<()> {
     .author(env!("CARGO_PKG_AUTHORS"))
     .about(env!("CARGO_PKG_DESCRIPTION"))
     .after_help(
-      "Your spotify Client ID and Client Secret are stored in $HOME/.config/sptune/client.yml",
+      "Your Spotify Client ID is stored in $HOME/.config/sptune/client.yml\nPowered by Spotify — music data from the Spotify Web API. Spotify is a trademark of Spotify AB.\nHeadless playback (Linux): enable [soloist] in your config and set SOLOIST_API_KEY — get your own key at https://developer.spotify.com/dashboard/soloist (Premium required).",
     )
     .arg(
       Arg::new("tick-rate")
@@ -277,6 +298,11 @@ of the app. Beware that this comes at a CPU cost!",
   let config = rspotify::Config {
     cache_path: config_paths.token_cache_path,
     token_cached: true,
+    // ponytail: rspotify's auto_reauth calls PKCE refetch_token, which drops
+    // refresh_token (0.16.1) and poisons the in-memory token to Ok(None) on
+    // the next refresh. sptune owns refresh via refresh_authentication
+    // (carry-over + write-back) instead.
+    token_refreshing: false,
     ..Default::default()
   };
   let mut spotify = AuthCodePkceSpotify::with_config(creds, oauth, config);
@@ -418,9 +444,37 @@ of the app. Beware that this comes at a CPU cost!",
   app_guard.clamp_library_selection();
   let should_auto_launch = app_guard.user_config.spotify.auto_launch;
   let spotify_cfg = app_guard.user_config.spotify.clone();
+  let soloist_cfg = app_guard.user_config.soloist.clone();
   drop(app_guard);
   if should_auto_launch {
     let _ = crate::platform::spotify::launch(&spotify_cfg);
+  }
+  if soloist_cfg.enabled {
+    let api_key = std::env::var("SOLOIST_API_KEY")
+      .ok()
+      .filter(|k| !k.trim().is_empty())
+      .or_else(|| client_config.soloist_api_key.clone());
+    match api_key {
+      Some(key) => {
+        let app_dir: PathBuf = config_paths
+          .config_file_path
+          .parent()
+          .map(|p| p.to_path_buf())
+          .or_else(|| dirs::config_dir().map(|d| d.join("sptune")))
+          .unwrap_or_else(|| PathBuf::from(".").join("sptune"));
+        let soloist_data_dir = crate::platform::soloist::data_dir_under(&app_dir);
+        match crate::platform::soloist::launch(&soloist_cfg, &key, &soloist_data_dir) {
+          Ok(()) => crate::platform::soloist::mark_started(
+            soloist_data_dir,
+            soloist_cfg.device_name.clone(),
+          ),
+          Err(e) => eprintln!("soloist: {}", e),
+        }
+      }
+      None => eprintln!(
+        "soloist: enabled but no API key — generate your own (Premium required) at https://developer.spotify.com/dashboard/soloist and set SOLOIST_API_KEY or soloist_api_key in client.yml"
+      ),
+    }
   }
 
   // Work with the cli (not really async)
@@ -618,7 +672,8 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     for event in batch {
       // ponytail: cooldown 60s so a failed refetch (main.rs:505 every 250ms) doesn't tight-loop
       let now = SystemTime::now();
-      if now > app.spotify_token_expiry
+      if !app.auth_reauth_required
+        && now > app.spotify_token_expiry
         && now
           .duration_since(last_refresh_attempt)
           .unwrap_or(Duration::ZERO)
@@ -745,6 +800,20 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     if is_first_render {
       app.dispatch(IoEvent::GetPlaylists);
       app.dispatch(IoEvent::GetUser);
+      let soloist_transfer = app
+        .user_config
+        .soloist
+        .enabled
+        .then(|| app.user_config.soloist.device_name.clone());
+      if let Some(name) = soloist_transfer {
+        app.dispatch(IoEvent::TransferPlaybackToDeviceName(name));
+      }
+      if let Some((data_dir, device_name)) = crate::platform::soloist::take_runtime() {
+        app.dispatch(IoEvent::SoloistWsWatch {
+          data_dir,
+          device_name,
+        });
+      }
       // No GetCurrentPlayback here: startup already queued one before
       // AutoRestore, so this would be a duplicate roundtrip ahead of
       // the playlist/user responses.
@@ -758,6 +827,7 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
   // a terminal-teardown error can't skip it; matches processes by name, so
   // it works no matter who launched Spotify.
   crate::platform::spotify::kill_all_spotify();
+  crate::platform::soloist::kill_spawned();
 
   terminal.show_cursor()?;
 

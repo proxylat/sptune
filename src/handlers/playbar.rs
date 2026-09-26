@@ -2,7 +2,7 @@ use super::{
   super::app::{ActiveBlock, App},
   common_key_events,
 };
-use crate::backend::IoEvent;
+use crate::backend::{original_track_id, IoEvent};
 use crate::event::Key;
 use rspotify::model::{context::CurrentPlaybackContext, PlayableItem};
 
@@ -18,8 +18,10 @@ pub fn handler(key: Key, app: &mut App) {
       {
         match item {
           PlayableItem::Track(track) => {
-            if let Some(track_id) = track.id {
-              app.dispatch(IoEvent::ToggleSaveTrack(track_id.to_string()));
+            // Relinking: save/remove by original id, not the relinked one.
+            let id = original_track_id(&track);
+            if !id.is_empty() {
+              app.dispatch(IoEvent::ToggleSaveTrack(id));
             }
           }
           PlayableItem::Episode(episode) => {

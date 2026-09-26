@@ -1,11 +1,8 @@
 pub mod help;
 pub mod layout;
-use std::collections::{BTreeMap, HashMap};
-use std::time::Instant;
 use super::app::{
   visible_library_options, ActiveBlock, AlbumTableContext, App, ArtistBlock, DialogContext,
-  EpisodeTableContext, RecommendationsContext, RouteId, SearchResultBlock, TrackSortColumn,
-  TrackTableContext,
+  EpisodeTableContext, RouteId, SearchResultBlock, TrackSortColumn, TrackTableContext,
 };
 use crate::user_config::theme_presets;
 use help::get_help_docs;
@@ -13,7 +10,8 @@ use layout::{
   build_playbar_controls, build_playbar_title, create_artist_string, format_playlist_duration,
   get_artist_highlight_state, get_color, get_percentage_width, get_search_results_highlight_state,
   millis_to_minutes, repeat_label, song_table_columns, track_table_with_date, PlaybarButton,
-  PLAYBAR_HEART_WIDTH, PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, PLAYLIST_SEARCH_PLACEHOLDER, REFRESH_GLYPH, VOLUME_BAR_LEN,
+  PLAYBAR_HEART_WIDTH, PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, PLAYLIST_SEARCH_PLACEHOLDER,
+  REFRESH_GLYPH, VOLUME_BAR_LEN,
 };
 use ratatui::{
   layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -25,10 +23,12 @@ use ratatui::{
   Frame,
 };
 use rspotify::model::show::ResumePoint;
-use rspotify::model::PlayableItem;
 use rspotify::model::PlayHistory;
+use rspotify::model::PlayableItem;
 use rspotify::model::RepeatState;
 use rspotify::prelude::Id;
+use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
 pub enum TableId {
@@ -120,7 +120,12 @@ pub fn draw_help_menu(f: &mut Frame, app: &App) {
     // ponytail: cache formatted header, avoids 3 allocs per frame
     static HELP_HEADER: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     let header = HELP_HEADER
-      .get_or_init(|| vec![format!("{:50}{:40}{:20}", "Description", "Event", "Context")])
+      .get_or_init(|| {
+        vec![format!(
+          "{:50}{:40}{:20}",
+          "Description", "Event", "Context"
+        )]
+      })
       .clone();
     let format_row =
       |r: Vec<String>| -> Vec<String> { vec![format!("{:50}{:40}{:20}", r[0], r[1], r[2])] };
@@ -137,12 +142,14 @@ pub fn draw_help_menu(f: &mut Frame, app: &App) {
       .header(Row::new(header).style(help_menu_style))
       .block(
         Block::default()
-          .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+          .borders(Borders::ALL)
+          .border_type(if app.user_config.terminal.unicode_borders {
+            BorderType::Rounded
+          } else {
+            BorderType::Plain
+          })
           .style(help_menu_style)
-          .title(Span::styled(
-            "Shortcuts (Esc to go back)",
-            help_menu_style,
-          ))
+          .title(Span::styled("Shortcuts (Esc to go back)", help_menu_style))
           .border_style(help_menu_style),
       )
       .style(help_menu_style)
@@ -163,11 +170,20 @@ pub fn draw_help_menu(f: &mut Frame, app: &App) {
     let count = all_rows.len();
     let viewport = rect.height.saturating_sub(2) as usize;
     let offset = (app.help_scroll_offset as usize).min(count.saturating_sub(viewport.min(count)));
-    let visible = all_rows.into_iter().skip(offset).take(viewport).collect::<Vec<_>>();
+    let visible = all_rows
+      .into_iter()
+      .skip(offset)
+      .take(viewport)
+      .collect::<Vec<_>>();
     let settings_list = List::new(visible)
       .block(
         Block::default()
-          .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+          .borders(Borders::ALL)
+          .border_type(if app.user_config.terminal.unicode_borders {
+            BorderType::Rounded
+          } else {
+            BorderType::Plain
+          })
           .style(help_menu_style)
           .title(Span::styled(
             "Settings (click row to toggle, Esc close \u{2022} Shortcuts \u{2192} Enter)",
@@ -194,7 +210,10 @@ fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'a>> {
   let mk_header = |s: &str, st: Style| ListItem::new(Span::styled(s.to_string(), st));
   let mk_row = |s: String| ListItem::new(Span::styled(s, *style));
   let mk_clear = |s: String| {
-    ListItem::new(Span::styled(s, Style::default().fg(app.user_config.theme.error_text)))
+    ListItem::new(Span::styled(
+      s,
+      Style::default().fg(app.user_config.theme.error_text),
+    ))
   };
   let theme_name = app.theme_preset_index.map_or_else(
     || "Custom".to_string(),
@@ -260,10 +279,7 @@ fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'a>> {
     "Remove from playlist: {}",
     on_off(app.user_config.behavior.enable_remove_from_playlist)
   )));
-  rows.push(mk_row(format!(
-    "Requests View: {}",
-    on_off(app.dev_view)
-  )));
+  rows.push(mk_row(format!("Requests View: {}", on_off(app.dev_view))));
   rows.push(ListItem::new(Span::raw("".to_string())));
   rows.push(mk_header("─ Playback ─", header_style));
   rows.push(mk_row(format!(
@@ -343,7 +359,7 @@ pub fn draw_input_and_help_box(f: &mut Frame, app: &App, layout_chunk: Rect) {
   );
 
   // App title banner on the left of the header: figlet "sptune" artwork with
-  // a gradient flowing over the whole logo (Spotify green -> teal)
+  // a gradient flowing over the whole logo (green -> teal)
   let art = [
     " ___ _ __ | |_ _   _ _ __   ___",
     "/ __| '_ \\| __| | | | '_ \\ / _ \\",
@@ -409,7 +425,12 @@ pub fn draw_input_and_help_box(f: &mut Frame, app: &App, layout_chunk: Rect) {
   let lines = Text::from(visible);
   let input = Paragraph::new(lines).block(
     Block::default()
-      .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+      .borders(Borders::ALL)
+      .border_type(if app.user_config.terminal.unicode_borders {
+        BorderType::Rounded
+      } else {
+        BorderType::Plain
+      })
       .title(Span::styled(
         "Search",
         get_color(highlight_state, app.user_config.theme),
@@ -576,9 +597,6 @@ pub fn draw_routes(f: &mut Frame, app: &App, layout_chunk: Rect) {
     RouteId::Podcasts => {
       draw_podcast_table(f, app, content);
     }
-    RouteId::Recommendations => {
-      draw_recommendations_table(f, app, content);
-    }
     RouteId::Error => {} // This is handled as a "full screen" route in main.rs
     RouteId::SelectedDevice => {} // This is handled as a "full screen" route in main.rs
     RouteId::MusicView => {} // This is handled as a "full screen" route in main.rs
@@ -609,7 +627,13 @@ pub fn draw_library_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
     // Minimized: single-letter glyphs so each row fits the narrow column.
     let glyphs = visible
       .iter()
-      .map(|name| name.chars().next().map(|c| c.to_string()).unwrap_or_default())
+      .map(|name| {
+        name
+          .chars()
+          .next()
+          .map(|c| c.to_string())
+          .unwrap_or_default()
+      })
       .collect();
     (crate::tui::layout::SIDEBAR_TOGGLE_GLYPH.to_string(), glyphs)
   } else {
@@ -739,7 +763,12 @@ fn draw_sidebar_section<S>(
     if rect.height <= 1 {
       return;
     }
-    let list_rect = Rect::new(rect.x, rect.y + 1, rect.width, rect.height.saturating_sub(1));
+    let list_rect = Rect::new(
+      rect.x,
+      rect.y + 1,
+      rect.width,
+      rect.height.saturating_sub(1),
+    );
     let viewport = list_rect.height as usize;
     let offset = match selected_index {
       Some(s) => s.checked_sub(viewport).unwrap_or(0),
@@ -762,7 +791,11 @@ fn draw_sidebar_section<S>(
         let max_len = app.user_config.behavior.max_display_length as usize;
         let fit = ellipsize(
           item.as_ref(),
-          if max_len > 0 { inner_w.min(max_len) } else { inner_w },
+          if max_len > 0 {
+            inner_w.min(max_len)
+          } else {
+            inner_w
+          },
         );
         let is_hovered = app.user_config.behavior.enable_animations
           && hovered_index == Some(i)
@@ -770,7 +803,9 @@ fn draw_sidebar_section<S>(
         let it = if is_load_more {
           ListItem::new(Span::styled(
             fit.clone(),
-            Style::default().fg(theme.load_more).add_modifier(Modifier::BOLD | Modifier::ITALIC),
+            Style::default()
+              .fg(theme.load_more)
+              .add_modifier(Modifier::BOLD | Modifier::ITALIC),
           ))
         } else if is_hovered {
           let w = UnicodeWidthStr::width(fit.as_str());
@@ -805,7 +840,12 @@ fn draw_sidebar_section<S>(
   if rect.height <= 1 {
     return;
   }
-  let list_rect = Rect::new(rect.x, rect.y + 1, rect.width, rect.height.saturating_sub(1));
+  let list_rect = Rect::new(
+    rect.x,
+    rect.y + 1,
+    rect.width,
+    rect.height.saturating_sub(1),
+  );
   let viewport = list_rect.height as usize;
   let offset = match selected_index {
     Some(s) => s.checked_sub(viewport).unwrap_or(0),
@@ -884,15 +924,24 @@ pub fn draw_user_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
       let outer_hovered = lib_hovered || pl_hovered;
       let outer_style = get_color((outer_active, outer_hovered), app.user_config.theme);
       let outer_block = Block::default()
-        .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+        .borders(Borders::ALL)
+        .border_type(if app.user_config.terminal.unicode_borders {
+          BorderType::Rounded
+        } else {
+          BorderType::Plain
+        })
         .border_style(outer_style);
       f.render_widget(outer_block, layout_chunk);
       let (lib_sec, sep, pl_sec) = layout::sidebar_combined_split(app, layout_chunk);
       // Horizontal line separator
       if sep.height > 0 && sep.width > 0 {
         let line = "─".repeat(sep.width as usize);
-        f.buffer_mut()
-          .set_string(sep.x, sep.y, &line, Style::default().fg(app.user_config.theme.inactive));
+        f.buffer_mut().set_string(
+          sep.x,
+          sep.y,
+          &line,
+          Style::default().fg(app.user_config.theme.inactive),
+        );
       }
       // Library section
       let visible = visible_library_options(&app.hidden_library_sections);
@@ -913,7 +962,12 @@ pub fn draw_user_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
         || app.sidebar_latched_block == Some(ActiveBlock::Library)
         || app.get_current_route().active_block == ActiveBlock::Library
       {
-        Some(lib_items.len().saturating_sub(1).min(app.library.selected_index))
+        Some(
+          lib_items
+            .len()
+            .saturating_sub(1)
+            .min(app.library.selected_index),
+        )
       } else {
         None
       };
@@ -1023,10 +1077,7 @@ fn draw_request_log(f: &mut Frame, app: &App, layout_chunk: Rect) {
     backoff_line,
     load_more_line
   );
-  f.render_widget(
-    Paragraph::new(throttle_text).style(inactive),
-    chunks[0],
-  );
+  f.render_widget(Paragraph::new(throttle_text).style(inactive), chunks[0]);
 
   // Request log list — grouped by HH:MM, deduped globally.
   let mut by_text: HashMap<String, (u32, Instant)> = HashMap::new();
@@ -1044,7 +1095,10 @@ fn draw_request_log(f: &mut Frame, app: &App, layout_chunk: Rect) {
       - chrono::Duration::from_std(latest.elapsed()).unwrap_or(chrono::Duration::zero()))
     .format("%H:%M")
     .to_string();
-    by_hhmm.entry(hhmm.clone()).or_default().push((text.clone(), count));
+    by_hhmm
+      .entry(hhmm.clone())
+      .or_default()
+      .push((text.clone(), count));
     let m = hhmm_max.entry(hhmm.clone()).or_insert(latest);
     if latest > *m {
       *m = latest;
@@ -1169,22 +1223,31 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
   match &expanded {
     SearchResultBlock::Empty => {
       let empty: Vec<String> = vec![];
-      draw_selectable_list(f, app, list_rect, "", &empty, (false, false), None, app.hovered_list_index);
+      draw_selectable_list(
+        f,
+        app,
+        list_rect,
+        "",
+        &empty,
+        (false, false),
+        None,
+        app.hovered_list_index,
+      );
     }
     SearchResultBlock::SongSearch => {
       let b = &app.user_config.behavior;
       let show_in_playlist = b.enable_add_to_playlist;
-  let columns = song_table_columns(
-    layout_chunk.width.saturating_sub(2),
-    false,
-    b.show_album_column,
-    b.show_artist_column,
-    b.show_length_column,
-    b.show_date_added_column,
-    false,
-    show_in_playlist,
-  );
-  let header = TableHeader {
+      let columns = song_table_columns(
+        layout_chunk.width.saturating_sub(2),
+        false,
+        b.show_album_column,
+        b.show_artist_column,
+        b.show_length_column,
+        b.show_date_added_column,
+        false,
+        show_in_playlist,
+      );
+      let header = TableHeader {
         id: TableId::Song,
         items: columns
           .iter()
@@ -1689,91 +1752,6 @@ pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
   };
 }
 
-pub fn draw_recommendations_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
-  let b = &app.user_config.behavior;
-  let columns = song_table_columns(
-    layout_chunk.width.saturating_sub(2),
-    false,
-    b.show_album_column,
-    b.show_artist_column,
-    b.show_length_column,
-    b.show_date_added_column,
-    false,
-    false,
-  );
-  let header = TableHeader {
-    id: TableId::Song,
-    items: columns
-      .iter()
-      .map(|(column, _, width)| TableHeaderItem {
-        id: *column,
-        text: match column {
-          ColumnId::Title => "Title",
-          ColumnId::Artist => "Artist",
-          ColumnId::Album => "Album",
-          ColumnId::Length => "Length",
-          ColumnId::DateAdded => "Date Added",
-          ColumnId::Liked => "#",
-          _ => "",
-        },
-        width: *width,
-      })
-      .collect(),
-  };
-
-  let current_route = app.get_current_route();
-  let highlight_state = (
-    current_route.active_block == ActiveBlock::TrackTable,
-    current_route.hovered_block == ActiveBlock::TrackTable,
-  );
-
-  let items = app
-    .track_table
-    .tracks
-    .iter()
-    .enumerate()
-    .map(|(index, item)| {
-      let track_id = item.id.clone().map(|id| id.to_string());
-      let mut cells = song_row_cells(
-        &item.name,
-        &create_artist_string(&item.artists),
-        &item.album.name,
-        "",
-        item.duration.num_milliseconds() as u128,
-        false,
-        b,
-      );
-      cells[0] = track_index_cell(app, &track_id, index + 1);
-      TableItem {
-        id: item.id.clone().map(|id| id.to_string()).unwrap_or_default(),
-        format: cells,
-      }
-    })
-    .collect::<Vec<TableItem>>();
-  // match RecommendedContext
-  let recommendations_ui = match &app.recommendations_context {
-    Some(RecommendationsContext::Song) => format!(
-      "Recommendations based on Song \'{}\'",
-      &app.recommendations_seed
-    ),
-    Some(RecommendationsContext::Artist) => format!(
-      "Recommendations based on Artist \'{}\'",
-      &app.recommendations_seed
-    ),
-    None => "Recommendations".to_string(),
-  };
-  draw_table(
-    f,
-    app,
-    layout_chunk,
-    (&recommendations_ui[..], &header),
-    &items,
-    app.track_table.selected_index,
-    highlight_state,
-    Some(app.track_table.scroll_offset),
-  )
-}
-
 // Row cells for the song table, in the same order as song_table_columns so a
 // hidden column also drops its cells (ratatui zips cells to widths by
 // position).
@@ -1812,9 +1790,9 @@ fn song_row_cells(
 // every track number aligned on the same column regardless of the heart.
 fn track_index_cell(app: &App, id: &Option<String>, index: usize) -> String {
   let liked = id
-      .as_ref()
-      .map(|i| app.liked_song_ids_set.contains(i))
-      .unwrap_or(false);
+    .as_ref()
+    .map(|i| app.liked_song_ids_set.contains(i))
+    .unwrap_or(false);
   let inner = if liked {
     format!("{}{}", app.user_config.behavior.liked_icon, index)
   } else {
@@ -1851,16 +1829,16 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
       Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
     );
   let show_in_playlist = !show_remove && b.enable_add_to_playlist;
-      let columns = song_table_columns(
-        layout_chunk.width.saturating_sub(2),
-        with_date,
-        b.show_album_column,
-        b.show_artist_column,
-        b.show_length_column,
-        b.show_date_added_column,
-        show_remove,
-        show_in_playlist,
-      );
+  let columns = song_table_columns(
+    layout_chunk.width.saturating_sub(2),
+    with_date,
+    b.show_album_column,
+    b.show_artist_column,
+    b.show_length_column,
+    b.show_date_added_column,
+    show_remove,
+    show_in_playlist,
+  );
 
   let header_texts: Vec<String> = columns
     .iter()
@@ -2001,7 +1979,7 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
     });
   }
 
-   let title = match app.track_table.context {
+  let title = match app.track_table.context {
     Some(TrackTableContext::MyPlaylists) => {
       let playlist = app.playlists.as_ref().and_then(|playlists| {
         playlists
@@ -2044,11 +2022,11 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
       .filter(|(name, _)| !name.is_empty())
       .map(|(name, _)| name.clone())
       .unwrap_or_else(|| "Songs".to_string()),
-   };
+  };
   // In-playlist search box — rendered as a boxed widget on the title row (see
   // draw_playlist_search_box), so it is visibly clickable.
   let title = format!("{}{}", REFRESH_GLYPH, title);
-   draw_table(
+  draw_table(
     f,
     app,
     layout_chunk,
@@ -2084,14 +2062,21 @@ fn draw_playlist_search_box(f: &mut Frame, app: &App, layout_chunk: Rect, title:
     .saturating_add(1)
     .saturating_add(title_chars)
     .saturating_add(2);
-  let avail = layout_chunk.x.saturating_add(layout_chunk.width).saturating_sub(x);
+  let avail = layout_chunk
+    .x
+    .saturating_add(layout_chunk.width)
+    .saturating_sub(x);
   if avail < 4 {
     return;
   }
   // Ideal width hugging content; cap to available so long queries scroll
   // instead of clipping with "..." or disappearing.
   let ideal_content_w: u16 = if focused {
-    if query.is_empty() { 1 } else { query.chars().count() as u16 + 3 }
+    if query.is_empty() {
+      1
+    } else {
+      query.chars().count() as u16 + 3
+    }
   } else if query.is_empty() {
     use unicode_width::UnicodeWidthStr;
     let placeholder: &str = PLAYLIST_SEARCH_PLACEHOLDER;
@@ -2106,7 +2091,9 @@ fn draw_playlist_search_box(f: &mut Frame, app: &App, layout_chunk: Rect, title:
   let viewport_w = inner_w.saturating_sub(reserve);
 
   let cursor_span = Span::styled("│", Style::default().fg(theme.active));
-  let clear_style = Style::default().fg(theme.active).add_modifier(Modifier::BOLD);
+  let clear_style = Style::default()
+    .fg(theme.active)
+    .add_modifier(Modifier::BOLD);
   let spans: Vec<Span> = if focused {
     if query.is_empty() {
       vec![cursor_span]
@@ -2161,7 +2148,6 @@ fn draw_playlist_search_box(f: &mut Frame, app: &App, layout_chunk: Rect, title:
     );
   f.render_widget(box_widget, rect);
 }
-
 
 pub fn draw_music_view(f: &mut Frame, app: &App) {
   let layout = Layout::default()
@@ -2270,7 +2256,12 @@ fn draw_music_lyrics(f: &mut Frame, app: &App, area: Rect) {
   // The block spans the full panel width (its original space); the lyrics
   // text stays vertically centered and left-aligned inside it.
   let block = Block::default()
-    .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+    .borders(Borders::ALL)
+    .border_type(if app.user_config.terminal.unicode_borders {
+      BorderType::Rounded
+    } else {
+      BorderType::Plain
+    })
     .title("Lyrics")
     .style(Style::default().fg(app.user_config.theme.inactive));
 
@@ -2282,7 +2273,12 @@ fn draw_music_lyrics(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_music_visualizer(f: &mut Frame, app: &App, area: Rect) {
   let block = Block::default()
-    .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+    .borders(Borders::ALL)
+    .border_type(if app.user_config.terminal.unicode_borders {
+      BorderType::Rounded
+    } else {
+      BorderType::Plain
+    })
     .title("Visualizer")
     .style(Style::default().fg(app.user_config.theme.inactive));
   f.render_widget(block, area);
@@ -2311,7 +2307,10 @@ fn draw_music_panel(f: &mut Frame, app: &App, area: Rect) {
           Style::default().fg(app.user_config.theme.inactive),
         )));
         lines.push(Line::from(Span::styled(
-          format!("Album: {}", ellipsize(album, area.width.saturating_sub(2) as usize)),
+          format!(
+            "Album: {}",
+            ellipsize(album, area.width.saturating_sub(2) as usize)
+          ),
           Style::default().fg(app.user_config.theme.inactive),
         )));
         lines.push(Line::from(Span::styled(
@@ -2342,7 +2341,10 @@ fn draw_music_panel(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled(
           format!(
             "Device: {}",
-            ellipsize(context.device.name.as_str(), area.width.saturating_sub(2) as usize)
+            ellipsize(
+              context.device.name.as_str(),
+              area.width.saturating_sub(2) as usize
+            )
           ),
           Style::default().fg(app.user_config.theme.inactive),
         )));
@@ -2368,7 +2370,10 @@ fn draw_music_panel(f: &mut Frame, app: &App, area: Rect) {
             )));
           } else {
             let text = format!("In playlists: {}", names.join(", "));
-            lines.push(Line::from(Span::styled(text, Style::default().fg(app.user_config.theme.inactive))));
+            lines.push(Line::from(Span::styled(
+              text,
+              Style::default().fg(app.user_config.theme.inactive),
+            )));
           }
         }
       }
@@ -2393,7 +2398,12 @@ fn draw_music_panel(f: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from("Nothing playing"));
   }
   let block = Block::default()
-    .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+    .borders(Borders::ALL)
+    .border_type(if app.user_config.terminal.unicode_borders {
+      BorderType::Rounded
+    } else {
+      BorderType::Plain
+    })
     .title("Track Details")
     .style(Style::default().fg(app.user_config.theme.inactive));
   f.render_widget(Paragraph::new(lines).block(block), area);
@@ -2410,7 +2420,12 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
     .is_some();
   if !has_track {
     let block = Block::default()
-      .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+      .borders(Borders::ALL)
+      .border_type(if app.user_config.terminal.unicode_borders {
+        BorderType::Rounded
+      } else {
+        BorderType::Plain
+      })
       .border_style(Style::default().fg(app.user_config.theme.playbar_background));
     f.render_widget(block, layout_chunk);
     // Live state not known yet (startup): never offer Resume — the user
@@ -2466,7 +2481,12 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
       );
       let border_style = get_color(highlight_state, theme);
       let title_block = Block::default()
-        .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+        .borders(Borders::ALL)
+        .border_type(if app.user_config.terminal.unicode_borders {
+          BorderType::Rounded
+        } else {
+          BorderType::Plain
+        })
         .border_style(border_style)
         .title(title);
 
@@ -2619,7 +2639,10 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
         .fg(theme.selected)
         .add_modifier(Modifier::BOLD);
       let uri = app.playing_track_uri();
-      let in_playlist = uri.as_deref().map(|u| app.is_in_any_playlist(u)).unwrap_or(false);
+      let in_playlist = uri
+        .as_deref()
+        .map(|u| app.is_in_any_playlist(u))
+        .unwrap_or(false);
       let prefix = if in_playlist {
         app.user_config.behavior.in_playlist_icon.clone() + " "
       } else {
@@ -2627,9 +2650,13 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
       };
       // prefix is 2 cols, heart is PLAYBAR_HEART_WIDTH cols, keep truncation inside song_row
       let prefix_style = if in_playlist {
-        Style::default().fg(theme.active).add_modifier(Modifier::BOLD)
+        Style::default()
+          .fg(theme.active)
+          .add_modifier(Modifier::BOLD)
       } else {
-        Style::default().fg(theme.active).add_modifier(Modifier::BOLD)
+        Style::default()
+          .fg(theme.active)
+          .add_modifier(Modifier::BOLD)
       };
       // Liked heart next to the prefix (blank for episodes): filled when the
       // now-playing track is liked, outline otherwise. Fixed width always.
@@ -2643,13 +2670,12 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
           if liked {
             (
               format!("{} ", app.user_config.behavior.liked_icon),
-              Style::default().fg(theme.active).add_modifier(Modifier::BOLD),
+              Style::default()
+                .fg(theme.active)
+                .add_modifier(Modifier::BOLD),
             )
           } else {
-            (
-              "♡ ".to_string(),
-              Style::default().fg(theme.inactive),
-            )
+            ("♡ ".to_string(), Style::default().fg(theme.inactive))
           }
         }
         _ => ("  ".to_string(), Style::default()),
@@ -2788,7 +2814,12 @@ pub fn draw_error_screen(f: &mut Frame, app: &App) {
     .style(Style::default().fg(app.user_config.theme.text))
     .block(
       Block::default()
-        .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+        .borders(Borders::ALL)
+        .border_type(if app.user_config.terminal.unicode_borders {
+          BorderType::Rounded
+        } else {
+          BorderType::Plain
+        })
         .title(Span::styled(
           "Error",
           Style::default().fg(app.user_config.theme.error_border),
@@ -2882,7 +2913,7 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
               .map(|id| app.playlist_contains(&id.uri(), None))
               .unwrap_or(false);
             if in_pl {
-            cells.push(app.user_config.padded_in_playlist_icon());
+              cells.push(app.user_config.padded_in_playlist_icon());
             } else {
               cells.push(" + ".to_string());
             }
@@ -2985,7 +3016,11 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
             let remaining = artist.singles.total as usize - artist.singles.items.len();
             singles.push(load_more_label("Load more singles...", Some(remaining)));
           }
-          (singles, "Singles".to_string(), Some(artist.selected_singles_index))
+          (
+            singles,
+            "Singles".to_string(),
+            Some(artist.selected_singles_index),
+          )
         }
         ArtistBlock::EPs => {
           let mut eps = artist
@@ -3043,9 +3078,7 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
             Some(artist.selected_appears_on_index),
           )
         }
-        ArtistBlock::Empty | ArtistBlock::TopTracks => {
-          (vec![], String::new(), None)
-        }
+        ArtistBlock::Empty | ArtistBlock::TopTracks => (vec![], String::new(), None),
       };
 
       draw_selectable_list(
@@ -3114,7 +3147,12 @@ pub fn draw_device_list(f: &mut Frame, app: &App) {
           "Devices",
           Style::default().fg(app.user_config.theme.active),
         ))
-        .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+        .borders(Borders::ALL)
+        .border_type(if app.user_config.terminal.unicode_borders {
+          BorderType::Rounded
+        } else {
+          BorderType::Plain
+        })
         .border_style(Style::default().fg(app.user_config.theme.inactive)),
     )
     .style(Style::default().fg(app.user_config.theme.text))
@@ -3545,8 +3583,17 @@ fn draw_selectable_list<S>(
       if title == "Playlists" {
         inner_w = (inner_w / 2).max(10);
       }
-      let fit = ellipsize(item.as_ref(), if max_len > 0 { inner_w.min(max_len) } else { inner_w });
-      let is_hovered = app.user_config.behavior.enable_animations && hovered_index == Some(i) && selected_index != Some(i);
+      let fit = ellipsize(
+        item.as_ref(),
+        if max_len > 0 {
+          inner_w.min(max_len)
+        } else {
+          inner_w
+        },
+      );
+      let is_hovered = app.user_config.behavior.enable_animations
+        && hovered_index == Some(i)
+        && selected_index != Some(i);
       let item = if is_load_more {
         ListItem::new(Span::styled(
           fit.clone(),
@@ -3580,7 +3627,12 @@ fn draw_selectable_list<S>(
           title,
           get_color(highlight_state, app.user_config.theme),
         ))
-        .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+        .borders(Borders::ALL)
+        .border_type(if app.user_config.terminal.unicode_borders {
+          BorderType::Rounded
+        } else {
+          BorderType::Plain
+        })
         .border_style(get_color(highlight_state, app.user_config.theme)),
     )
     .style(Style::default().fg(app.user_config.theme.text))
@@ -3615,7 +3667,12 @@ fn draw_dialog(f: &mut Frame, app: &App) {
           f.render_widget(Clear, rect);
 
           let block = Block::default()
-            .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+            .borders(Borders::ALL)
+            .border_type(if app.user_config.terminal.unicode_borders {
+              BorderType::Rounded
+            } else {
+              BorderType::Plain
+            })
             .border_style(Style::default().fg(app.user_config.theme.inactive));
 
           f.render_widget(block, rect);
@@ -3685,7 +3742,12 @@ fn draw_confirm_remove_dialog(f: &mut Frame, app: &App) {
   let rect = Rect::new(left, top, width, height);
   f.render_widget(Clear, rect);
   let block = Block::default()
-    .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+    .borders(Borders::ALL)
+    .border_type(if app.user_config.terminal.unicode_borders {
+      BorderType::Rounded
+    } else {
+      BorderType::Plain
+    })
     .border_style(Style::default().fg(app.user_config.theme.inactive));
   f.render_widget(block, rect);
   let vchunks = Layout::default()
@@ -3751,7 +3813,12 @@ fn draw_add_to_playlist_dialog(f: &mut Frame, app: &App) {
   f.render_widget(Clear, rect);
 
   let block = Block::default()
-    .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+    .borders(Borders::ALL)
+    .border_type(if app.user_config.terminal.unicode_borders {
+      BorderType::Rounded
+    } else {
+      BorderType::Plain
+    })
     .title(Span::styled(
       " Add to playlist ",
       Style::default().fg(app.user_config.theme.active),
@@ -3851,7 +3918,12 @@ fn draw_seek_dialog(f: &mut Frame, app: &App) {
   f.render_widget(Clear, rect);
 
   let block = Block::default()
-    .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+    .borders(Borders::ALL)
+    .border_type(if app.user_config.terminal.unicode_borders {
+      BorderType::Rounded
+    } else {
+      BorderType::Plain
+    })
     .title(Span::styled(
       " Seek to (m:ss) ",
       Style::default().fg(app.user_config.theme.active),
@@ -3933,145 +4005,164 @@ fn draw_table(
       .min(items.len().saturating_sub(viewport)),
   };
 
-  let rows = items.iter().skip(offset).take(viewport).enumerate().map(|(i, item)| {
-    let mut formatted_row = item.format.clone();
-    let mut style = Style::default().fg(app.user_config.theme.text); // default styling
+  let rows = items
+    .iter()
+    .skip(offset)
+    .take(viewport)
+    .enumerate()
+    .map(|(i, item)| {
+      let mut formatted_row = item.format.clone();
+      let mut style = Style::default().fg(app.user_config.theme.text); // default styling
 
-    // if table displays songs
-    match header.id {
-      TableId::Song | TableId::RecentlyPlayed | TableId::Album => {
-        // First check if the song should be highlighted because it is currently playing
-        if let Some(title_idx) = header.get_index(ColumnId::Title) {
-          if let Some(track_playing_offset_index) =
-            track_playing_index.and_then(|idx| idx.checked_sub(offset))
-          {
-            if i == track_playing_offset_index {
-              formatted_row[title_idx] = format!("▶ {}", &formatted_row[title_idx]);
-              style = Style::default()
-                .fg(app.user_config.theme.active)
-                .add_modifier(Modifier::BOLD);
+      // if table displays songs
+      match header.id {
+        TableId::Song | TableId::RecentlyPlayed | TableId::Album => {
+          // First check if the song should be highlighted because it is currently playing
+          if let Some(title_idx) = header.get_index(ColumnId::Title) {
+            if let Some(track_playing_offset_index) =
+              track_playing_index.and_then(|idx| idx.checked_sub(offset))
+            {
+              if i == track_playing_offset_index {
+                formatted_row[title_idx] = format!("▶ {}", &formatted_row[title_idx]);
+                style = Style::default()
+                  .fg(app.user_config.theme.active)
+                  .add_modifier(Modifier::BOLD);
+              }
             }
           }
         }
-      }
-      TableId::PodcastEpisodes => {
-        if let Some(name_idx) = header.get_index(ColumnId::Title) {
-          if let Some(track_playing_offset_index) =
-            track_playing_index.and_then(|idx| idx.checked_sub(offset))
-          {
-            if i == track_playing_offset_index {
-              formatted_row[name_idx] = format!("▶ {}", &formatted_row[name_idx]);
-              style = Style::default()
-                .fg(app.user_config.theme.active)
-                .add_modifier(Modifier::BOLD);
+        TableId::PodcastEpisodes => {
+          if let Some(name_idx) = header.get_index(ColumnId::Title) {
+            if let Some(track_playing_offset_index) =
+              track_playing_index.and_then(|idx| idx.checked_sub(offset))
+            {
+              if i == track_playing_offset_index {
+                formatted_row[name_idx] = format!("▶ {}", &formatted_row[name_idx]);
+                style = Style::default()
+                  .fg(app.user_config.theme.active)
+                  .add_modifier(Modifier::BOLD);
+              }
             }
           }
         }
+        _ => {}
       }
-      _ => {}
-    }
 
-    // The load-more row (pushed with an empty id as the last item) gets a
-    // distinct accent so it reads as a button rather than a song.
-    if offset + i == items.len().saturating_sub(1) && item.id.is_empty() {
-      style = Style::default()
-        .fg(app.user_config.theme.load_more)
-        .add_modifier(Modifier::BOLD | Modifier::ITALIC);
-    }
+      // The load-more row (pushed with an empty id as the last item) gets a
+      // distinct accent so it reads as a button rather than a song.
+      if offset + i == items.len().saturating_sub(1) && item.id.is_empty() {
+        style = Style::default()
+          .fg(app.user_config.theme.load_more)
+          .add_modifier(Modifier::BOLD | Modifier::ITALIC);
+      }
 
-    let is_hovered = app.user_config.behavior.enable_animations
-      && app.hovered_list_index == Some(offset + i)
-      && !(app.selection_engaged && selected_index == offset + i);
+      let is_hovered = app.user_config.behavior.enable_animations
+        && app.hovered_list_index == Some(offset + i)
+        && !(app.selection_engaged && selected_index == offset + i);
 
-    // Next check if the item is under selection.
-    if app.selection_engaged && Some(i) == selected_index.checked_sub(offset) {
-      style = selected_style;
-    }
+      // Next check if the item is under selection.
+      if app.selection_engaged && Some(i) == selected_index.checked_sub(offset) {
+        style = selected_style;
+      }
 
-    // Return row styled data. Secondary columns are dimmed and every cell is
-    // ellipsized to its column width (keeps head + "...") so long text never
-    // gets cut mid-word by the table's hard edge.
-    let dim = Style::default().fg(app.user_config.theme.inactive);
-    let cells = formatted_row
-      .iter()
-      .enumerate()
-      .map(|(idx, text)| {
-        let col_width = header
-          .items
-          .get(idx)
-          .map(|h| h.width.saturating_sub(1) as usize)
-          .unwrap_or(usize::MAX);
-        let col_id = header.items.get(idx).map(|h| h.id);
-        let max_len = app.user_config.behavior.max_display_length as usize;
-        let effective_width = if max_len > 0 && matches!(col_id, Some(ColumnId::Title | ColumnId::Artist | ColumnId::Album)) {
-          col_width.min(max_len)
-        } else {
-          col_width
-        };
-        let padded = if matches!(col_id, Some(ColumnId::Title)) {
-          format!("{}{}", " ".repeat(crate::tui::layout::NUMBER_TO_TITLE_GAP as usize), text)
-        } else {
-          text.clone()
-        };
-        let fit = if matches!(col_id, Some(ColumnId::Liked | ColumnId::None)) {
-          padded
-        } else {
-          ellipsize(&padded, effective_width)
-        };
-        let is_secondary = matches!(
-          col_id,
-          Some(ColumnId::Artist | ColumnId::Album | ColumnId::DateAdded | ColumnId::Length)
-        );
-        if is_hovered {
-          // trailing add/remove columns (✓/+ and ✕) should not get hover
-          if matches!(col_id, Some(ColumnId::None)) {
-            if is_secondary {
-              ratatui::widgets::Cell::from(fit).style(dim)
+      // Return row styled data. Secondary columns are dimmed and every cell is
+      // ellipsized to its column width (keeps head + "...") so long text never
+      // gets cut mid-word by the table's hard edge.
+      let dim = Style::default().fg(app.user_config.theme.inactive);
+      let cells = formatted_row
+        .iter()
+        .enumerate()
+        .map(|(idx, text)| {
+          let col_width = header
+            .items
+            .get(idx)
+            .map(|h| h.width.saturating_sub(1) as usize)
+            .unwrap_or(usize::MAX);
+          let col_id = header.items.get(idx).map(|h| h.id);
+          let max_len = app.user_config.behavior.max_display_length as usize;
+          let effective_width = if max_len > 0
+            && matches!(
+              col_id,
+              Some(ColumnId::Title | ColumnId::Artist | ColumnId::Album)
+            ) {
+            col_width.min(max_len)
+          } else {
+            col_width
+          };
+          let padded = if matches!(col_id, Some(ColumnId::Title)) {
+            format!(
+              "{}{}",
+              " ".repeat(crate::tui::layout::NUMBER_TO_TITLE_GAP as usize),
+              text
+            )
+          } else {
+            text.clone()
+          };
+          let fit = if matches!(col_id, Some(ColumnId::Liked | ColumnId::None)) {
+            padded
+          } else {
+            ellipsize(&padded, effective_width)
+          };
+          let is_secondary = matches!(
+            col_id,
+            Some(ColumnId::Artist | ColumnId::Album | ColumnId::DateAdded | ColumnId::Length)
+          );
+          if is_hovered {
+            // trailing add/remove columns (✓/+ and ✕) should not get hover
+            if matches!(col_id, Some(ColumnId::None)) {
+              if is_secondary {
+                ratatui::widgets::Cell::from(fit).style(dim)
+              } else {
+                ratatui::widgets::Cell::from(fit)
+              }
             } else {
-              ratatui::widgets::Cell::from(fit)
+              let hover_bg = Style::default().bg(app.user_config.theme.hovered);
+              let full_w = header
+                .items
+                .get(idx)
+                .map(|h| h.width as usize)
+                .unwrap_or(col_width);
+              // # column: don't cover leading spaces before number
+              if matches!(col_id, Some(ColumnId::Liked)) {
+                let trimmed = fit.trim_start();
+                let leading = fit.len().saturating_sub(trimmed.len());
+                let content_w = UnicodeWidthStr::width(trimmed);
+                let pad = full_w.saturating_sub(content_w + leading);
+                let line = Line::from(vec![
+                  Span::raw(" ".repeat(leading)),
+                  Span::styled(format!("{}{}", trimmed, " ".repeat(pad)), hover_bg),
+                ]);
+                ratatui::widgets::Cell::from(line)
+              } else if matches!(col_id, Some(ColumnId::Length)) {
+                ratatui::widgets::Cell::from(Line::from(vec![Span::styled(
+                  fit.clone(),
+                  Style::default()
+                    .fg(app.user_config.theme.inactive)
+                    .bg(app.user_config.theme.hovered),
+                )]))
+              } else if is_secondary {
+                let pad = full_w.saturating_sub(UnicodeWidthStr::width(fit.as_str()));
+                ratatui::widgets::Cell::from(Line::from(vec![Span::styled(
+                  format!("{}{}", fit, " ".repeat(pad)),
+                  dim.patch(hover_bg),
+                )]))
+              } else {
+                let pad = full_w.saturating_sub(UnicodeWidthStr::width(fit.as_str()));
+                ratatui::widgets::Cell::from(Line::from(vec![Span::styled(
+                  format!("{}{}", fit, " ".repeat(pad)),
+                  hover_bg,
+                )]))
+              }
             }
-          } else {
-            let hover_bg = Style::default().bg(app.user_config.theme.hovered);
-            let full_w = header.items.get(idx).map(|h| h.width as usize).unwrap_or(col_width);
-            // # column: don't cover leading spaces before number
-            if matches!(col_id, Some(ColumnId::Liked)) {
-            let trimmed = fit.trim_start();
-            let leading = fit.len().saturating_sub(trimmed.len());
-            let content_w = UnicodeWidthStr::width(trimmed);
-            let pad = full_w.saturating_sub(content_w + leading);
-            let line = Line::from(vec![
-              Span::raw(" ".repeat(leading)),
-              Span::styled(format!("{}{}", trimmed, " ".repeat(pad)), hover_bg),
-            ]);
-            ratatui::widgets::Cell::from(line)
-          } else if matches!(col_id, Some(ColumnId::Length)) {
-            ratatui::widgets::Cell::from(Line::from(vec![Span::styled(
-              fit.clone(),
-              Style::default().fg(app.user_config.theme.inactive).bg(app.user_config.theme.hovered),
-            )]))
           } else if is_secondary {
-            let pad = full_w.saturating_sub(UnicodeWidthStr::width(fit.as_str()));
-            ratatui::widgets::Cell::from(Line::from(vec![Span::styled(
-              format!("{}{}", fit, " ".repeat(pad)),
-              dim.patch(hover_bg),
-            )]))
+            ratatui::widgets::Cell::from(fit).style(dim)
           } else {
-            let pad = full_w.saturating_sub(UnicodeWidthStr::width(fit.as_str()));
-            ratatui::widgets::Cell::from(Line::from(vec![Span::styled(
-              format!("{}{}", fit, " ".repeat(pad)),
-              hover_bg,
-            )]))
+            ratatui::widgets::Cell::from(fit)
           }
-          }
-        } else if is_secondary {
-          ratatui::widgets::Cell::from(fit).style(dim)
-        } else {
-          ratatui::widgets::Cell::from(fit)
-        }
-      })
-      .collect::<Vec<_>>();
-    Row::new(cells).style(style)
-  });
+        })
+        .collect::<Vec<_>>();
+      Row::new(cells).style(style)
+    });
 
   let widths = header
     .items
@@ -4103,7 +4194,12 @@ fn draw_table(
     )
     .block(
       Block::default()
-        .borders(Borders::ALL).border_type(if app.user_config.terminal.unicode_borders { BorderType::Rounded } else { BorderType::Plain })
+        .borders(Borders::ALL)
+        .border_type(if app.user_config.terminal.unicode_borders {
+          BorderType::Rounded
+        } else {
+          BorderType::Plain
+        })
         .style(Style::default().fg(app.user_config.theme.text))
         .title(Span::styled(
           title,
@@ -4172,11 +4268,26 @@ mod tests {
     assert_eq!(
       groups,
       vec![
-        PlayGroup { first_raw: 0, count: 3 },
-        PlayGroup { first_raw: 3, count: 1 },
-        PlayGroup { first_raw: 4, count: 1 },
-        PlayGroup { first_raw: 5, count: 1 },
-        PlayGroup { first_raw: 6, count: 1 },
+        PlayGroup {
+          first_raw: 0,
+          count: 3
+        },
+        PlayGroup {
+          first_raw: 3,
+          count: 1
+        },
+        PlayGroup {
+          first_raw: 4,
+          count: 1
+        },
+        PlayGroup {
+          first_raw: 5,
+          count: 1
+        },
+        PlayGroup {
+          first_raw: 6,
+          count: 1
+        },
       ]
     );
   }
@@ -4367,7 +4478,7 @@ mod tests {
   }
 
   #[test]
-   fn song_row_cells_match_hidden_columns() {
+  fn song_row_cells_match_hidden_columns() {
     // Cell shape must mirror song_table_columns: a hidden column drops its
     // cells too (ratatui zips cells to widths by position).
     let mut b = crate::user_config::UserConfig::new().behavior;
@@ -4657,7 +4768,12 @@ mod tests {
     // 3 days ago → "3d ago"
     assert_eq!(relative_date(now - chrono::Duration::days(3)), "3d ago");
     // 2 months ago → absolute date
-    assert_eq!(relative_date(now - chrono::Duration::days(60)), (now - chrono::Duration::days(60)).format("%Y-%m-%d").to_string());
+    assert_eq!(
+      relative_date(now - chrono::Duration::days(60)),
+      (now - chrono::Duration::days(60))
+        .format("%Y-%m-%d")
+        .to_string()
+    );
   }
 
   #[test]
@@ -4948,13 +5064,31 @@ mod tests {
     assert_eq!(super::track_index_cell(&app, &None, 1000), "1000");
 
     app.liked_song_ids_set.insert("liked".to_string());
-    assert_eq!(super::track_index_cell(&app, &Some("liked".to_string()), 1), "  ♥1");
-    assert_eq!(super::track_index_cell(&app, &Some("liked".to_string()), 10), " ♥10");
-    assert_eq!(super::track_index_cell(&app, &Some("liked".to_string()), 100), "♥100");
-    assert_eq!(super::track_index_cell(&app, &Some("liked".to_string()), 1000), "♥1000");
+    assert_eq!(
+      super::track_index_cell(&app, &Some("liked".to_string()), 1),
+      "  ♥1"
+    );
+    assert_eq!(
+      super::track_index_cell(&app, &Some("liked".to_string()), 10),
+      " ♥10"
+    );
+    assert_eq!(
+      super::track_index_cell(&app, &Some("liked".to_string()), 100),
+      "♥100"
+    );
+    assert_eq!(
+      super::track_index_cell(&app, &Some("liked".to_string()), 1000),
+      "♥1000"
+    );
     // An unliked id never shows the heart.
-    assert_eq!(super::track_index_cell(&app, &Some("other".to_string()), 7), "   7");
-    assert_eq!(super::track_index_cell(&app, &Some("liked".to_string()), 1), "  ♥1");
+    assert_eq!(
+      super::track_index_cell(&app, &Some("other".to_string()), 7),
+      "   7"
+    );
+    assert_eq!(
+      super::track_index_cell(&app, &Some("liked".to_string()), 1),
+      "  ♥1"
+    );
   }
 
   #[test]
@@ -5030,7 +5164,11 @@ mod tests {
     let title_byte = header.find("Title").unwrap();
     let hash_idx = header[..hash_byte].chars().count();
     let title_idx = header[..title_byte].chars().count();
-    assert_eq!(title_idx - hash_idx, 1 + spacing + gap, "header gap:\n{header}");
+    assert_eq!(
+      title_idx - hash_idx,
+      1 + spacing + gap,
+      "header gap:\n{header}"
+    );
     // First data row: the track name "Mock Song 0" starts GAP cols after the
     // "   1" number cell (cell width 4 + spacing 1 + gap).
     let row: String = (0..60)
@@ -5044,7 +5182,8 @@ mod tests {
   }
 
   #[test]
-  fn playlist_picker_selected_row_is_bold() {    // The picker marks its row with color + BOLD (color alone is invisible
+  fn playlist_picker_selected_row_is_bold() {
+    // The picker marks its row with color + BOLD (color alone is invisible
     // on terminals where selected ≈ text).
     let mut app = App::default();
     app.playlists = Some(rspotify::model::Page {
@@ -5082,7 +5221,9 @@ mod tests {
     app.playlist_picker_index = 1;
     let backend = TestBackend::new(200, 50);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|f| draw_add_to_playlist_dialog(f, &app)).unwrap();
+    terminal
+      .draw(|f| draw_add_to_playlist_dialog(f, &app))
+      .unwrap();
     // Dialog geometry for 200x50: width 45 at x=77, top y=12, inner list at
     // x=79 starting y=14 — index 1 sits on y=15.
     let buffer = terminal.backend().buffer();
@@ -5104,20 +5245,35 @@ mod tests {
     let song_row_text = |liked: bool| {
       let mut app = playback_app_with_track("mocktrack1");
       if liked {
-        app.liked_song_ids_set.insert("spotify:track:mocktrack1".to_string());
+        app
+          .liked_song_ids_set
+          .insert("spotify:track:mocktrack1".to_string());
       }
       let backend = TestBackend::new(200, 10);
       let mut terminal = Terminal::new(backend).unwrap();
-      terminal.draw(|f| draw_playbar(f, &app, Rect::new(0, 0, 200, 10))).unwrap();
+      terminal
+        .draw(|f| draw_playbar(f, &app, Rect::new(0, 0, 200, 10)))
+        .unwrap();
       (0..60)
         .map(|x| {
-          terminal.backend().buffer().cell((x, 1)).map(|c| c.symbol()).unwrap_or(" ")
+          terminal
+            .backend()
+            .buffer()
+            .cell((x, 1))
+            .map(|c| c.symbol())
+            .unwrap_or(" ")
         })
         .collect::<String>()
     };
     let liked_row = song_row_text(true);
-    assert!(liked_row.contains("+ ♥ Mock Song"), "liked row:\n{liked_row}");
+    assert!(
+      liked_row.contains("+ ♥ Mock Song"),
+      "liked row:\n{liked_row}"
+    );
     let unliked_row = song_row_text(false);
-    assert!(unliked_row.contains("+ ♡ Mock Song"), "unliked row:\n{unliked_row}");
+    assert!(
+      unliked_row.contains("+ ♡ Mock Song"),
+      "unliked row:\n{unliked_row}"
+    );
   }
 }

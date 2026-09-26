@@ -1,7 +1,7 @@
 use super::common_key_events;
 use crate::{
-  app::{AlbumTableContext, App, RecommendationsContext},
-  backend::IoEvent,
+  app::{AlbumTableContext, App},
+  backend::{original_simplified_track_id, IoEvent},
   event::Key,
 };
 use rspotify::model::Id;
@@ -117,10 +117,6 @@ pub fn handler(key: Key, app: &mut App) {
         };
       }
     },
-    //recommended playlist based on selected track
-    Key::Char('r') => {
-      handle_recommended_tracks(app);
-    }
     _ if key == app.user_config.keys.add_item_to_queue => match app.album_table_context {
       AlbumTableContext::Full => {
         if let Some(selected_album) = app.selected_album_full.clone() {
@@ -207,44 +203,6 @@ fn handle_low_event(app: &mut App) {
   }
 }
 
-fn handle_recommended_tracks(app: &mut App) {
-  match app.album_table_context {
-    AlbumTableContext::Full => {
-      if let Some(albums) = &app.library.clone().saved_albums.get_results(None) {
-        if let Some(selected_album) = albums.items.get(app.album_list_index) {
-          if let Some(track) = &selected_album
-            .album
-            .tracks
-            .items
-            .get(app.saved_album_tracks_index)
-          {
-            if let Some(id) = &track.id {
-              app.recommendations_context = Some(RecommendationsContext::Song);
-              app.recommendations_seed = track.name.clone();
-              app.get_recommendations_for_track_id(id.to_string());
-            }
-          }
-        }
-      }
-    }
-    AlbumTableContext::Simplified => {
-      if let Some(selected_album_simplified) = &app.selected_album_simplified.clone() {
-        if let Some(track) = &selected_album_simplified
-          .tracks
-          .items
-          .get(selected_album_simplified.selected_index)
-        {
-          if let Some(id) = &track.id {
-            app.recommendations_context = Some(RecommendationsContext::Song);
-            app.recommendations_seed = track.name.clone();
-            app.get_recommendations_for_track_id(id.to_string());
-          }
-        }
-      };
-    }
-  }
-}
-
 fn handle_save_event(app: &mut App) {
   match app.album_table_context {
     AlbumTableContext::Full => {
@@ -255,8 +213,10 @@ fn handle_save_event(app: &mut App) {
           .items
           .get(app.saved_album_tracks_index)
         {
-          if let Some(track_id) = &selected_track.id {
-            app.dispatch(IoEvent::ToggleSaveTrack(track_id.to_string()));
+          // Relinking: save/remove by original id, not the relinked one.
+          let id = original_simplified_track_id(selected_track);
+          if !id.is_empty() {
+            app.dispatch(IoEvent::ToggleSaveTrack(id));
           };
         };
       };
@@ -268,8 +228,9 @@ fn handle_save_event(app: &mut App) {
           .items
           .get(selected_album_simplified.selected_index)
         {
-          if let Some(track_id) = &selected_track.id {
-            app.dispatch(IoEvent::ToggleSaveTrack(track_id.to_string()));
+          let id = original_simplified_track_id(selected_track);
+          if !id.is_empty() {
+            app.dispatch(IoEvent::ToggleSaveTrack(id));
           };
         };
       };

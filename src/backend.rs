@@ -13,12 +13,11 @@ use ratatui::style::Color;
 use rspotify::{
   clients::{BaseClient, OAuthClient},
   model::{
-    AdditionalType, AlbumId, AlbumType, ArtistId, Country,
-    EpisodeId, FullArtist, FullTrack, Id,
-    LibraryId, Market, Offset, Page, PlayContextId, PlayableId, PlayableItem,
-    PlaylistId, PlaylistItem, PrivateUser, Recommendations, RecommendationsAttribute, RepeatState,
-    SavedAlbum, SavedTrack, SearchResult, SearchType, Show, ShowId, SimplifiedAlbum,
-    SimplifiedPlaylist, SimplifiedShow, Token, TrackId, UserId,
+    AdditionalType, AlbumId, AlbumType, ArtistId, EpisodeId, FullArtist, FullTrack, Id, LibraryId,
+    Market, Offset, Page, PlayContextId, PlayableId, PlayableItem, PlaylistId, PlaylistItem,
+    PrivateUser, RepeatState, RestrictionReason, SavedAlbum, SavedTrack, SearchResult, SearchType,
+    Show, ShowId, SimplifiedAlbum, SimplifiedPlaylist, SimplifiedShow, SimplifiedTrack, Token,
+    TrackId, UserId,
   },
   AuthCodePkceSpotify, Config, Credentials, OAuth,
 };
@@ -177,13 +176,43 @@ fn playable_from_uri<'a>(uri: &'a str) -> Option<PlayableId<'a>> {
     None
   }
 }
-
 /// Whether a playlist page holds `uri` (tracks and episodes alike).
 fn playlist_page_contains(page: &Page<PlaylistItem>, uri: &str) -> bool {
   page
     .items
     .iter()
     .any(|item| playlist_item_uri(item).as_deref() == Some(uri))
+}
+
+/// Track relinking: with `Market::FromToken` Spotify returns the playable
+/// relinked `id`, but saves/removes must use the original id (`linked_from`).
+/// `linked_from` is deprecated upstream (Spotify removed the field); the
+/// fallback to `id` then applies, which is already the relinked id.
+#[allow(deprecated)]
+pub(crate) fn original_track_id(t: &FullTrack) -> String {
+  t.linked_from
+    .as_ref()
+    .and_then(|l| l.id.as_ref())
+    .map(|i| i.to_string())
+    .unwrap_or_else(|| t.id.as_ref().map(|i| i.to_string()).unwrap_or_default())
+}
+
+#[allow(deprecated)]
+pub(crate) fn original_simplified_track_id(t: &SimplifiedTrack) -> String {
+  t.linked_from
+    .as_ref()
+    .and_then(|l| l.id.as_ref())
+    .map(|i| i.to_string())
+    .unwrap_or_else(|| t.id.as_ref().map(|i| i.to_string()).unwrap_or_default())
+}
+
+/// Unplayable in the user's market — skip before uris-playback/queue.
+pub(crate) fn is_unplayable(t: &FullTrack) -> bool {
+  t.is_playable == Some(false)
+    || t
+      .restrictions
+      .as_ref()
+      .is_some_and(|r| r.reason == RestrictionReason::Market)
 }
 
 /// (items_len, total, offset, limit) of a page, for paging decisions.
@@ -231,7 +260,7 @@ pub enum IoEvent {
   RefreshAuthentication,
   GetPlaylists,
   GetDevices,
-  GetSearchResults(String, Option<Country>),
+  GetSearchResults(String),
   GetMoreSearchResults(SearchResultBlock),
   SetTracksToTable(Vec<FullTrack>),
   GetMadeForYouPlaylistItems(String, u32),
@@ -249,15 +278,9 @@ pub enum IoEvent {
   Repeat(RepeatState),
   PausePlayback,
   ChangeVolume(u8),
-  GetArtist(String, String, Option<Country>),
+  GetArtist(String, String),
   GetAlbumTracks(Box<SimplifiedAlbum>),
   GetAlbumTracksMore(String, u32),
-  GetRecommendationsForSeed(
-    Option<Vec<String>>,
-    Option<Vec<String>>,
-    Box<Option<FullTrack>>,
-    Option<Country>,
-  ),
   GetCurrentUserSavedAlbums(Option<u32>),
   CurrentUserSavedAlbumsContains(Vec<String>),
   CurrentUserSavedAlbumDelete(String),
@@ -278,7 +301,6 @@ pub enum IoEvent {
   GetUser,
   RefreshUser,
   ToggleSaveTrack(String),
-  GetRecommendationsForTrackId(String, Option<Country>),
   GetRecentlyPlayed,
   GetMoreRecentlyPlayed(Option<String>),
   GetFollowedArtists(Option<String>),
@@ -286,6 +308,11 @@ pub enum IoEvent {
   UserArtistFollowCheck(Vec<String>),
   GetAlbum(String),
   TransferPlaybackToDevice(String),
+  TransferPlaybackToDeviceName(String),
+  SoloistWsWatch {
+    data_dir: PathBuf,
+    device_name: String,
+  },
   GetAlbumForTrack(String),
   CurrentUserSavedTracksContains(Vec<String>),
   GetCurrentUserSavedShows(Option<u32>),
@@ -321,12 +348,21 @@ pub fn get_spotify(
     .unwrap_or_else(SystemTime::now);
 
   let creds = Credentials::new_pkce(&client_config.client_id);
-  let spotify = AuthCodePkceSpotify::from_token_with_config(
-    token,
-    creds,
-    OAuth::default(),
-    Config::default(),
-  );
+  // ponytail: Config::default would re-enable token_refreshing (library
+  // auto_reauth drops the PKCE refresh_token) and point at a relative
+  // ".spotify_token_cache.json". sptune owns refresh, so disable the
+  // library's and keep the real cache path so write-back persists.
+  let cache_path = client_config
+    .get_or_build_paths()
+    .map(|p| p.token_cache_path)
+    .unwrap_or_else(|_| PathBuf::from(rspotify::DEFAULT_CACHE_PATH));
+  let config = Config {
+    cache_path,
+    token_cached: true,
+    token_refreshing: false,
+    ..Default::default()
+  };
+  let spotify = AuthCodePkceSpotify::from_token_with_config(token, creds, OAuth::default(), config);
   (spotify, token_expiry)
 }
 
@@ -345,6 +381,9 @@ pub struct Network<'a> {
   // Bare id of the now-playing track the last heart check ran for; the 5s
   // playback poll only re-checks when the song actually changed.
   last_heart_check: Option<String>,
+  // Playlists probed by the once-per-launch background version check
+  // (reconcile). In-memory only, so every sptune start re-checks.
+  probed_playlists: HashSet<String>,
 }
 
 /// Last session's volume + track, persisted so a restart picks up where the
@@ -423,9 +462,7 @@ pub struct SavedState {
 
 impl SavedState {
   fn file_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| {
-      home.join(".config").join("sptune").join("state.json")
-    })
+    dirs::home_dir().map(|home| home.join(".config").join("sptune").join("state.json"))
   }
 
   /// Full snapshot for the single exit-time save: playback state (volume,
@@ -722,6 +759,7 @@ impl<'a> Network<'a> {
       last_refill: Instant::now(),
       api_backoff_until: None,
       last_heart_check: None,
+      probed_playlists: HashSet::new(),
     }
   }
 
@@ -858,8 +896,8 @@ impl<'a> Network<'a> {
           .set_tracks_to_table(full_tracks, vec![None; count], (0..count).collect(), false)
           .await;
       }
-      IoEvent::GetSearchResults(search_term, country) => {
-        self.get_search_results(search_term, country).await;
+      IoEvent::GetSearchResults(search_term) => {
+        self.get_search_results(search_term).await;
       }
       IoEvent::GetMoreSearchResults(block) => {
         self.get_more_search_results(block).await;
@@ -957,19 +995,14 @@ impl<'a> Network<'a> {
       IoEvent::ChangeVolume(volume) => {
         self.change_volume(volume).await;
       }
-      IoEvent::GetArtist(artist_id, input_artist_name, country) => {
-        self.get_artist(artist_id, input_artist_name, country).await;
+      IoEvent::GetArtist(artist_id, input_artist_name) => {
+        self.get_artist(artist_id, input_artist_name).await;
       }
       IoEvent::GetAlbumTracks(album) => {
         self.get_album_tracks(album).await;
       }
       IoEvent::GetAlbumTracksMore(album_id, offset) => {
         self.get_album_tracks_more(album_id, offset).await;
-      }
-      IoEvent::GetRecommendationsForSeed(seed_artists, seed_tracks, first_track, country) => {
-        self
-          .get_recommendations_for_seed(seed_artists, seed_tracks, first_track, country)
-          .await;
       }
       IoEvent::GetCurrentUserSavedAlbums(offset) => {
         self.get_current_user_saved_albums(offset).await;
@@ -1043,11 +1076,6 @@ impl<'a> Network<'a> {
       IoEvent::ToggleSaveTrack(track_id) => {
         self.toggle_save_track(track_id).await;
       }
-      IoEvent::GetRecommendationsForTrackId(track_id, country) => {
-        self
-          .get_recommendations_for_track_id(track_id, country)
-          .await;
-      }
       IoEvent::GetRecentlyPlayed => {
         self.get_recently_played().await;
       }
@@ -1068,6 +1096,18 @@ impl<'a> Network<'a> {
       }
       IoEvent::TransferPlaybackToDevice(device_id) => {
         self.transfert_playback_to_device(device_id).await;
+      }
+      IoEvent::TransferPlaybackToDeviceName(name) => {
+        self.transfer_playback_to_device_name(name).await;
+      }
+      IoEvent::SoloistWsWatch {
+        data_dir,
+        device_name,
+      } => {
+        let app = std::sync::Arc::clone(self.app);
+        tokio::spawn(async move {
+          crate::soloist_ws::watch(app, data_dir, device_name).await;
+        });
       }
       IoEvent::GetAlbumForTrack(track_id) => {
         self.get_album_for_track(track_id).await;
@@ -1138,16 +1178,15 @@ impl<'a> Network<'a> {
     app.is_loading = false;
   }
 
-
-fn parse_retry_after(msg: &str) -> Option<u64> {
-  // ponytail: minimal Retry-After parsing from rspotify error string; full header parsing would need ClientError access
-  msg.find("Retry-After").and_then(|i| {
-    msg[i..]
-      .split(|c: char| !c.is_ascii_digit())
-      .find(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
-      .and_then(|s| s.parse().ok())
-  })
-}
+  fn parse_retry_after(msg: &str) -> Option<u64> {
+    // ponytail: minimal Retry-After parsing from rspotify error string; full header parsing would need ClientError access
+    msg.find("Retry-After").and_then(|i| {
+      msg[i..]
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+        .and_then(|s| s.parse().ok())
+    })
+  }
 
   async fn handle_error(&mut self, e: anyhow::Error) {
     let message = e.to_string();
@@ -1155,7 +1194,9 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     if message.contains("401") || message.contains("Unauthorized") {
       // ponytail: immediate refresh on 401, don't wait for SystemTime tick
       let mut app = self.app.lock().await;
-      app.dispatch(crate::backend::IoEvent::RefreshAuthentication);
+      if !app.auth_reauth_required {
+        app.dispatch(crate::backend::IoEvent::RefreshAuthentication);
+      }
       app.handle_error(e);
       return;
     }
@@ -1223,13 +1264,12 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         app.playback_known = true;
         // Sync the real Smart Shuffle flag (undocumented API field); the
         // merge keeps a locally-enabled Smart while shuffle stays on.
-        app.smart_shuffle = merge_smart_shuffle(c.smart_shuffle, app.smart_shuffle, c.shuffle_state);
+        app.smart_shuffle =
+          merge_smart_shuffle(c.smart_shuffle, app.smart_shuffle, c.shuffle_state);
         app.instant_since_last_current_playback_poll = Instant::now();
         // Prime the playbar heart when the song changed (TTL-cached, silent).
         let now_playing = c.item.as_ref().and_then(|item| match item {
-          rspotify::model::PlayableItem::Track(t) => {
-            t.id.as_ref().map(|id| id.to_string())
-          }
+          rspotify::model::PlayableItem::Track(t) => t.id.as_ref().map(|id| id.to_string()),
           _ => None,
         });
         if now_playing.as_deref() != self.last_heart_check.as_deref() {
@@ -1336,7 +1376,10 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     self.refetch_playlists().await;
     // refetch writes file; serve must read it and force in-memory + UI cache refresh
     self.library_cache.ensure_loaded();
-    if let Some((items, total)) = self.library_cache.get_typed::<SimplifiedPlaylist>("playlists") {
+    if let Some((items, total)) = self
+      .library_cache
+      .get_typed::<SimplifiedPlaylist>("playlists")
+    {
       let page = Page::<SimplifiedPlaylist> {
         href: String::new(),
         limit: 0,
@@ -1364,13 +1407,19 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       None => {
         let public = self
           .spotify
-          .playlist(PlaylistId::from_id_or_uri(playlist_id).unwrap(), None, None)
+          .playlist(
+            PlaylistId::from_id_or_uri(playlist_id).unwrap(),
+            None,
+            Some(Market::FromToken),
+          )
           .await
           .map(|playlist| playlist.name)
           .unwrap_or_default();
         if public.is_empty() {
           // ponytail: partner API removed — fallback to oEmbed (no auth) for name, else id
-          Self::oembed_playlist_name(playlist_id).await.unwrap_or_default()
+          Self::oembed_playlist_name(playlist_id)
+            .await
+            .unwrap_or_default()
         } else {
           public
         }
@@ -1392,9 +1441,9 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       if self.playlist_cache.lookup(&playlist_id).is_some()
         && self.serve_playlist_cache(&playlist_id).await
       {
-        // The cache is served as-is, so a stale entry (songs removed elsewhere
-        // since it was written) makes every playback offset lie. Probe the live
-        // total in the background and refetch the entry when it changed.
+        // The cache is served as-is. A once-per-launch background version
+        // check appends newly added songs; anything else waits for the
+        // manual refresh button.
         self
           .app
           .lock()
@@ -1426,7 +1475,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       .playlist_items_manual(
         PlaylistId::from_id_or_uri(&playlist_id).unwrap(),
         None,
-        None,
+        Some(Market::FromToken),
         Some(API_MAX_LIMIT),
         Some(playlist_offset),
       )
@@ -1438,6 +1487,23 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
           .await;
         if playlist_offset == 0 {
           self.consume_pending_for_you_add(&playlist_id, None).await;
+          // First fetch caches only page 1: without a background fill the
+          // entry stays partial forever and every later open re-fires the
+          // full LoadAll burst. Fill it now so the next open serves whole.
+          let partial = {
+            let app = self.app.lock().await;
+            app
+              .playlist_tracks
+              .as_ref()
+              .is_some_and(|p| (p.items.len() as u32) < p.total)
+          };
+          if partial {
+            self
+              .app
+              .lock()
+              .await
+              .dispatch(IoEvent::LoadAllPlaylistItems(playlist_id.clone()));
+          }
         }
       }
       Err(e) => {
@@ -1467,27 +1533,60 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     playlist_tracks: Page<PlaylistItem>,
     playlist_offset: u32,
   ) {
-    self
-      .set_playlist_tracks_to_table(&playlist_tracks, playlist_offset > 0)
-      .await;
+    // View guard: a page belongs on screen only while its playlist owns the
+    // table (or is the pending pasted playlist, which has no list context).
+    // A stale in-flight page still updates the keyed cache, never the UI.
+    // The background fill may also paint: it runs only for fill_target.
+    let paint = {
+      let app = self.app.lock().await;
+      match app.track_table_playlist_uri() {
+        Some(viewed) => viewed == playlist_id,
+        None => app.pending_for_you_add.as_deref() == Some(playlist_id),
+      }
+    };
+    let filling = {
+      let app = self.app.lock().await;
+      app.fill_target.as_deref() == Some(playlist_id)
+    };
+    if paint || (playlist_offset > 0 && filling) {
+      self
+        .set_playlist_tracks_to_table(&playlist_tracks, playlist_offset > 0)
+        .await;
+    }
     let mut app = self.app.lock().await;
     self.playlist_cache.update(
       playlist_id,
       playlist_tracks.items.clone(),
       playlist_tracks.total,
+      playlist_offset,
       playlist_offset > 0,
     );
     self.sync_playlist_uris(&mut app);
+    let touch = paint || filling;
     if playlist_offset > 0 {
-      if let Some(existing) = app.playlist_tracks.as_mut() {
-        existing.items.extend(playlist_tracks.items.clone());
-        existing.total = playlist_tracks.total;
+      if touch {
+        if let Some(existing) = app.playlist_tracks.as_mut() {
+          // Positional convergence: a retried or double-dispatched page lands
+          // on its own offset instead of appending a second copy.
+          existing.items.truncate(playlist_offset as usize);
+          existing.items.extend(playlist_tracks.items.clone());
+          existing.total = playlist_tracks.total;
+        }
       }
-    } else {
+    } else if paint {
       app.playlist_tracks = Some(playlist_tracks);
+      // A fresh first page (re)arms the background fill while partial; a
+      // whole one, or a stale page for a playlist left behind, disarms it.
+      let partial = app
+        .playlist_tracks
+        .as_ref()
+        .is_some_and(|p| (p.items.len() as u32) < p.total);
+      app.fill_target = partial.then(|| playlist_id.to_string());
     }
     app.is_fetching_next_page = false;
-    app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+    if paint {
+      app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+    }
   }
 
   async fn oembed_playlist_name(playlist_id: &str) -> anyhow::Result<String> {
@@ -1495,24 +1594,42 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       "https://open.spotify.com/oembed?url=https://open.spotify.com/playlist/{}",
       playlist_id
     );
-    let resp: serde_json::Value = reqwest::Client::new().get(&url).send().await?.json().await?;
+    let resp: serde_json::Value = reqwest::Client::new()
+      .get(&url)
+      .send()
+      .await?
+      .json()
+      .await?;
     resp["title"]
       .as_str()
       .map(|s| s.to_string())
       .ok_or_else(|| anyhow!("no title in oembed"))
   }
 
-  /// Load every remaining page of a playlist so a column sort spans the
-  /// whole real list, not just the loaded (possibly cached) slice. Pages are
-  /// fetched sequentially from the current cumulative length until the total
-  /// is reached (or the 200-page safety cap); each page is paced through
-  /// the global token bucket (2 req/sec).
+  /// Complete the open playlist in the background (first-ever open only;
+  /// cached opens serve as-is, zero requests). Stops early when another
+  /// playlist takes over the table, so switching lists never queues behind
+  /// a 500-track fill.
   async fn load_all_playlist_items(&mut self, playlist_id: String) {
     const MAX_PAGES: u32 = 200; // safety cap: 200 pages × 50 = 10,000 tracks
     let mut pages = 0u32;
     loop {
       if pages >= MAX_PAGES {
         break;
+      }
+      // Early exit: another playlist armed its own fill, or a different
+      // playlist owns the table now. The cache keeps what arrived; scroll
+      // or the next open completes the rest.
+      let keep = {
+        let app = self.app.lock().await;
+        app.fill_target.as_deref() == Some(playlist_id.as_str())
+          && match app.track_table_playlist_uri() {
+            Some(viewed) => viewed == playlist_id,
+            None => true,
+          }
+      };
+      if !keep {
+        return;
       }
       let (offset, total) = {
         let app = self.app.lock().await;
@@ -1530,25 +1647,54 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         .playlist_items_manual(
           PlaylistId::from_id_or_uri(&playlist_id).unwrap(),
           None,
-          None,
+          Some(Market::FromToken),
           Some(API_MAX_LIMIT),
           Some(offset),
         )
         .await
       {
         Ok(page) => {
-          self.set_playlist_tracks_to_table(&page, true).await;
+          // Same ownership rule as apply: a no-owner table (pasted playlist)
+          // belongs to this fill; another playlist's table is never touched.
+          let (paint_table, mirror_mfy) = {
+            let app = self.app.lock().await;
+            let paint = match app.track_table_playlist_uri() {
+              Some(viewed) => viewed == playlist_id,
+              // No owner: the pasted-playlist fill paints (scroll can't page
+              // it in). But a MadeForYou table showing another list is owned.
+              None => {
+                app.track_table.context != Some(TrackTableContext::MadeForYou)
+                  || app
+                    .made_for_you_playlist_id(app.made_for_you_index)
+                    .as_deref()
+                    == Some(playlist_id.as_str())
+              }
+            };
+            let mirror = app.track_table.context == Some(TrackTableContext::MadeForYou)
+              && app
+                .made_for_you_playlist_id(app.made_for_you_index)
+                .as_deref()
+                == Some(playlist_id.as_str());
+            (paint, mirror)
+          };
+          if paint_table {
+            self.set_playlist_tracks_to_table(&page, true).await;
+          }
           let mut app = self.app.lock().await;
           self
             .playlist_cache
-            .update(&playlist_id, page.items.clone(), page.total, true);
+            .update(&playlist_id, page.items.clone(), page.total, offset, true);
           self.sync_playlist_uris(&mut app);
-          if let Some(existing) = app.playlist_tracks.as_mut() {
-            existing.items.extend(page.items.clone());
-            existing.total = page.total;
+          if paint_table {
+            if let Some(existing) = app.playlist_tracks.as_mut() {
+              existing.items.truncate(offset as usize);
+              existing.items.extend(page.items.clone());
+              existing.total = page.total;
+            }
           }
-          if app.track_table.context == Some(TrackTableContext::MadeForYou) {
+          if mirror_mfy {
             if let Some(existing) = app.made_for_you_tracks.as_mut() {
+              existing.items.truncate(offset as usize);
               existing.items.extend(page.items);
               existing.total = page.total;
             }
@@ -1564,7 +1710,10 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
   }
 
-  /// Serve the cached track list of a playlist (cache never expires).
+  /// Serve the cached track list of a playlist, whole or partial, with zero
+  /// requests. Legacy doubled entries are served as-is; one manual refresh
+  /// rewrites them clean. Nothing here ever refetches — full refetch is the
+  /// refresh button's job alone.
   async fn serve_playlist_cache(&mut self, playlist_id: &str) -> bool {
     self.playlist_cache.ensure_loaded();
     let Some(entry) = self.playlist_cache.lookup(playlist_id) else {
@@ -1573,15 +1722,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     if entry.items.is_empty() {
       return false;
     }
-    // A polluted entry (duplicate items from older sessions' offset-snapshot
-    // bug) breaks the raw_index mapping (displayed row -> real playlist
-    // position), so serving it makes clicks play the wrong song. Drop it and
-    // refetch from scratch.
-    if self.playlist_cache.is_polluted(playlist_id) {
-      self.playlist_cache.remove(playlist_id);
-      return false;
-    }
-    let partial = entry.items.len() < entry.total as usize;
     let page = Page::<PlaylistItem> {
       href: String::new(),
       items: entry.items.clone(),
@@ -1595,32 +1735,22 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     let mut app = self.app.lock().await;
     app.playlist_tracks = Some(page);
     app.is_fetching_next_page = false;
+    // Serving a cached list disarms any in-flight fill for a previous one.
+    app.fill_target = None;
     app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
-    // A partial cache entry (older sessions captured only a slice) leaves a
-    // perpetual "Load more" row; kick off a background completion so the
-    // playlist fills to its real total and the row disappears.
-    if partial {
-      app.dispatch(IoEvent::LoadAllPlaylistItems(playlist_id.to_string()));
-    }
     true
   }
 
-  /// Delta probe on playlist open: fetch the tail past the cached items and
-  /// merge only the new ones. Skipped until the list is fully loaded;
-  /// skipped silently when the probe fails (cache already shown). A
-  /// shrunken total means items were removed elsewhere -> full refetch.
-  /// Probe the live playlist against the cached entry. Returns whether the
-  /// cache changed (songs removed elsewhere → full refetch; songs added →
-  /// append the tail pages). The probe compares the first page's item URIs
-  /// against the cached ones — totals alone miss playlists whose first items
-  /// changed (e.g. songs removed from the top and the same count added at
-  /// the bottom, which keeps the total identical).
-  /// Probe the live playlist against the cached entry. Returns whether the
-  /// cache changed (then the caller re-serves it). Spotify changes a
-  /// playlist's snapshot id on ANY edit, so one cheap request tells whether
-  /// the cached items/order are stale — mid-list removals/additions that
-  /// keep the total identical were invisible to the old first-page compare.
+  /// Once-per-launch background version check for a cached playlist. Runs at
+  /// most once per id per sptune start (the set is in-memory only). Returns
+  /// whether the cache changed (caller re-serves it). Spotify changes a
+  /// playlist's snapshot id on ANY edit, so one cheap request detects
+  /// staleness; purely appended songs are merged as tail pages, anything
+  /// else (removals, reorders) is left for the manual refresh button.
   async fn reconcile_playlist_tracks(&mut self, playlist_id: &str) -> bool {
+    if !self.probed_playlists.insert(playlist_id.to_string()) {
+      return false;
+    }
     let Some(entry) = self.playlist_cache.lookup(playlist_id) else {
       return false;
     };
@@ -1630,7 +1760,11 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
     let live_snapshot = match self
       .spotify
-      .playlist(PlaylistId::from_id_or_uri(playlist_id).unwrap(), None, None)
+      .playlist(
+        PlaylistId::from_id_or_uri(playlist_id).unwrap(),
+        None,
+        Some(Market::FromToken),
+      )
       .await
     {
       Ok(p) => p.snapshot_id,
@@ -1644,23 +1778,20 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
     if entry.snapshot.is_empty() {
       // Written by the normal fetch path, which never records snapshots; the
-      // entry is fresh by definition, so just record it instead of refetching
-      // the whole playlist on the first open after a cache write.
+      // entry is fresh by definition, so just record it instead of merging.
       self.playlist_cache.set_snapshot(playlist_id, live_snapshot);
       return false;
     }
     // Snapshot changed. Fetch the first page and compare its item URIs to
     // the cached head: an identical head + larger total means songs were
-    // only appended at the end -> append just the missing tail. Any other
-    // change (removals, reorders) shifts positions -> full refetch.
-    let cached_head: Vec<Option<String>> =
-      entry.items.iter().map(playlist_item_uri).collect();
+    // only appended at the end -> append just the missing tail.
+    let cached_head: Vec<Option<String>> = entry.items.iter().map(playlist_item_uri).collect();
     let first_page = match self
       .spotify
       .playlist_items_manual(
         PlaylistId::from_id_or_uri(playlist_id).unwrap(),
         None,
-        None,
+        Some(Market::FromToken),
         Some(API_MAX_LIMIT),
         Some(0),
       )
@@ -1694,52 +1825,19 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         };
         self
           .playlist_cache
-          .update(playlist_id, page.items.clone(), page.total, true);
+          .update(playlist_id, page.items.clone(), page.total, offset, true);
         offset += page.items.len() as u32;
         if offset >= page.total || page.items.is_empty() {
           break;
         }
         self.pace().await;
       }
-    } else {
-      self.refetch_playlist_tracks(playlist_id).await;
     }
+    // Non-additive changes keep the served cache; the refresh button does
+    // the full refetch. Record the snapshot either way so the same tail
+    // isn't re-merged on a later probe.
     self.playlist_cache.set_snapshot(playlist_id, live_snapshot);
-    true
-  }
-
-  /// Full sequential refetch of a playlist's tracks (items removed
-  /// elsewhere), replacing the cached list.
-  async fn refetch_playlist_tracks(&mut self, playlist_id: &str) {
-    let mut all: Vec<PlaylistItem> = Vec::new();
-    loop {
-      self.pace().await;
-      let page = match self
-        .spotify
-        .playlist_items_manual(
-          PlaylistId::from_id_or_uri(playlist_id).unwrap(),
-          None,
-          None,
-          Some(API_MAX_LIMIT),
-          Some(all.len() as u32),
-        )
-        .await
-      {
-        Ok(p) => p,
-        Err(_) => break,
-      };
-      all.extend(page.items);
-      if all.len() as u32 >= page.total {
-        break;
-      }
-    }
-    if !all.is_empty() {
-      self
-        .playlist_cache
-        .update(playlist_id, all, 0, false); // total will be set by caller from cache
-      let mut app = self.app.lock().await;
-      self.sync_playlist_uris(&mut app);
-    }
+    head_matches && first_page.total > cached_len
   }
 
   /// Whether a playlist item occupies a slot in the player's context. Spotify's
@@ -1934,16 +2032,43 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       .playlist_items_manual(
         PlaylistId::from_id_or_uri(&playlist_id).unwrap(),
         None,
-        None,
+        Some(Market::FromToken),
         Some(API_MAX_LIMIT),
         Some(made_for_you_offset),
       )
       .await
     {
       Ok(made_for_you_tracks) => {
-        self
-          .set_playlist_tracks_to_table(&made_for_you_tracks, made_for_you_offset > 0)
-          .await;
+        // View guard + covered check (the shared-playlist path has both;
+        // this one never did): a stale or already-covered page updates the
+        // keyed cache only, never another list's table.
+        let paint = {
+          let app = self.app.lock().await;
+          app.track_table.context == Some(TrackTableContext::MadeForYou)
+            && app
+              .made_for_you_playlist_id(app.made_for_you_index)
+              .as_deref()
+              == Some(playlist_id.as_str())
+        };
+        if made_for_you_offset > 0 {
+          let covered = {
+            let app = self.app.lock().await;
+            app
+              .made_for_you_tracks
+              .as_ref()
+              .map(|existing| made_for_you_offset < existing.items.len() as u32)
+              .unwrap_or(false)
+          };
+          if covered || !paint {
+            self.app.lock().await.is_fetching_next_page = false;
+            return;
+          }
+        }
+        if paint {
+          self
+            .set_playlist_tracks_to_table(&made_for_you_tracks, made_for_you_offset > 0)
+            .await;
+        }
 
         let cache_items = made_for_you_tracks.items.clone();
         let cache_total = made_for_you_tracks.total;
@@ -1951,20 +2076,36 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         if made_for_you_offset == 0 {
           let name = self
             .spotify
-            .playlist(PlaylistId::from_id_or_uri(&playlist_id).unwrap(), None, None)
+            .playlist(
+              PlaylistId::from_id_or_uri(&playlist_id).unwrap(),
+              None,
+              Some(Market::FromToken),
+            )
             .await
             .map(|playlist| playlist.name)
             .unwrap_or_default();
-          app.playlist_view = Some((name, playlist_id.clone()));
-          app.made_for_you_tracks = Some(made_for_you_tracks);
-        } else if let Some(existing) = app.made_for_you_tracks.as_mut() {
-          existing.items.extend(made_for_you_tracks.items);
-          existing.total = made_for_you_tracks.total;
+          if paint {
+            app.playlist_view = Some((name, playlist_id.clone()));
+            // Opening any list disarms another list's background fill; Made
+            // For You pages in via scroll, so nothing is armed here.
+            app.fill_target = None;
+            app.made_for_you_tracks = Some(made_for_you_tracks);
+          }
+        } else if paint {
+          if let Some(existing) = app.made_for_you_tracks.as_mut() {
+            existing.items.truncate(made_for_you_offset as usize);
+            existing.items.extend(made_for_you_tracks.items);
+            existing.total = made_for_you_tracks.total;
+          }
         }
         drop(app);
-        self
-          .playlist_cache
-          .update(&playlist_id, cache_items, cache_total, made_for_you_offset > 0);
+        self.playlist_cache.update(
+          &playlist_id,
+          cache_items,
+          cache_total,
+          made_for_you_offset,
+          made_for_you_offset > 0,
+        );
         let mut app = self.app.lock().await;
         app.is_fetching_next_page = false;
         if app.get_current_route().id != RouteId::TrackTable {
@@ -2209,7 +2350,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
   }
 
-  async fn get_search_results(&mut self, search_term: String, _country: Option<Country>) {
+  async fn get_search_results(&mut self, search_term: String) {
     // Lazy: only record the term. Each tab fetches its own first page on
     // demand (GetMoreSearchResults), so searching is instant.
     let mut app = self.app.lock().await;
@@ -2232,7 +2373,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       }
     };
 
-    let (offset, total_override, query, country) = {
+    let (offset, total_override, query) = {
       let app = self.app.lock().await;
       let meta = match block {
         SearchResultBlock::SongSearch => page_meta(app.search_results.tracks.as_ref()),
@@ -2253,16 +2394,10 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
             page_offset + SEARCH_MAX_LIMIT,
             Some(total),
             app.search_results.query.clone(),
-            app.get_user_country(),
           )
         }
         // First load for this tab: no page yet, start from the top.
-        None => (
-          0,
-          None,
-          app.search_results.query.clone(),
-          app.get_user_country(),
-        ),
+        None => (0, None, app.search_results.query.clone()),
         _ => {
           drop(app);
           self.app.lock().await.is_fetching_next_page = false;
@@ -2276,7 +2411,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       .search(
         &query,
         search_type,
-        country.map(Market::Country),
+        Some(Market::FromToken),
         None,
         Some(SEARCH_MAX_LIMIT),
         Some(offset),
@@ -2449,7 +2584,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
     match self
       .spotify
-      .current_user_saved_tracks_manual(None, Some(API_MAX_LIMIT), offset)
+      .current_user_saved_tracks_manual(Some(Market::FromToken), Some(API_MAX_LIMIT), offset)
       .await
     {
       Ok(saved_tracks) => {
@@ -2564,7 +2699,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
     let page = match self
       .spotify
-      .current_user_saved_tracks_manual(None, Some(API_MAX_LIMIT), None)
+      .current_user_saved_tracks_manual(Some(Market::FromToken), Some(API_MAX_LIMIT), None)
       .await
     {
       Ok(p) => p,
@@ -2610,7 +2745,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       let page = match self
         .spotify
         .current_user_saved_tracks_manual(
-          None,
+          Some(Market::FromToken),
           Some(API_MAX_LIMIT),
           Some(all.len() as u32),
         )
@@ -2813,11 +2948,11 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
 
   async fn next_track(&mut self) {
     let device_id = self.client_config.device_id.clone().or_else(|| {
-      self
-        .app
-        .try_lock()
-        .ok()
-        .and_then(|a| a.current_playback_context.as_ref().and_then(|c| c.device.id.clone()))
+      self.app.try_lock().ok().and_then(|a| {
+        a.current_playback_context
+          .as_ref()
+          .and_then(|c| c.device.id.clone())
+      })
     });
     match self.spotify.next_track(device_id.as_deref()).await {
       Ok(()) => {
@@ -2831,11 +2966,11 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
 
   async fn previous_track(&mut self) {
     let device_id = self.client_config.device_id.clone().or_else(|| {
-      self
-        .app
-        .try_lock()
-        .ok()
-        .and_then(|a| a.current_playback_context.as_ref().and_then(|c| c.device.id.clone()))
+      self.app.try_lock().ok().and_then(|a| {
+        a.current_playback_context
+          .as_ref()
+          .and_then(|c| c.device.id.clone())
+      })
     });
     match self.spotify.previous_track(device_id.as_deref()).await {
       Ok(()) => {
@@ -2849,13 +2984,17 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
 
   async fn shuffle(&mut self, shuffle_state: bool) {
     let device_id = self.client_config.device_id.clone().or_else(|| {
-      self
-        .app
-        .try_lock()
-        .ok()
-        .and_then(|a| a.current_playback_context.as_ref().and_then(|c| c.device.id.clone()))
+      self.app.try_lock().ok().and_then(|a| {
+        a.current_playback_context
+          .as_ref()
+          .and_then(|c| c.device.id.clone())
+      })
     });
-    match self.spotify.shuffle(!shuffle_state, device_id.as_deref()).await {
+    match self
+      .spotify
+      .shuffle(!shuffle_state, device_id.as_deref())
+      .await
+    {
       Ok(()) => {
         // Update the UI eagerly (otherwise the UI will wait until the next 5 second interval
         // due to polling playback context)
@@ -2996,7 +3135,9 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
           .await;
       }
     }
-    self.start_playback(None, Some(vec![track_uri]), Some(0)).await;
+    self
+      .start_playback(None, Some(vec![track_uri]), Some(0))
+      .await;
   }
 
   async fn change_volume(&mut self, volume_percent: u8) {
@@ -3031,12 +3172,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
   }
 
-  async fn get_artist(
-    &mut self,
-    artist_id: String,
-    input_artist_name: String,
-    country: Option<Country>,
-  ) {
+  async fn get_artist(&mut self, artist_id: String, input_artist_name: String) {
     let cloneable_artist_id = ArtistId::from_id_or_uri(&artist_id).unwrap();
     let artist_id = cloneable_artist_id.to_string();
     // Spotify removed artist_top_tracks and artist_related_artists in Feb
@@ -3060,7 +3196,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       .search(
         &query,
         SearchType::Track,
-        country.map(Market::Country),
+        Some(Market::FromToken),
         None,
         Some(10),
         Some(0),
@@ -3154,27 +3290,33 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
 
   async fn get_artist_appears_on_more(&mut self, artist_id: String, offset: u32) {
     self
-      .get_artist_albums_by_type(
-        artist_id,
-        vec![AlbumType::AppearsOn],
-        offset,
-        |a, p| {
-          a.appears_on.items.append(&mut p.items);
-          a.appears_on.offset = p.offset;
-          a.appears_on.total = p.total;
-        },
-      )
+      .get_artist_albums_by_type(artist_id, vec![AlbumType::AppearsOn], offset, |a, p| {
+        a.appears_on.items.append(&mut p.items);
+        a.appears_on.offset = p.offset;
+        a.appears_on.total = p.total;
+      })
       .await;
   }
 
-  async fn get_artist_albums_by_type<F>(&mut self, artist_id: String, types: Vec<AlbumType>, offset: u32, apply: F)
-  where
+  async fn get_artist_albums_by_type<F>(
+    &mut self,
+    artist_id: String,
+    types: Vec<AlbumType>,
+    offset: u32,
+    apply: F,
+  ) where
     F: FnOnce(&mut Artist, &mut Page<SimplifiedAlbum>),
   {
     let cloneable_artist_id = ArtistId::from_id_or_uri(&artist_id).unwrap();
     match self
       .spotify
-      .artist_albums_manual(cloneable_artist_id, types, None, Some(10), Some(offset))
+      .artist_albums_manual(
+        cloneable_artist_id,
+        types,
+        Some(Market::FromToken),
+        Some(10),
+        Some(offset),
+      )
       .await
     {
       Ok(mut page) => {
@@ -3196,10 +3338,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     offset: u32,
   ) {
     let query = format!("artist:\"{}\"", artist_name);
-    let country = {
-      let app = self.app.lock().await;
-      app.get_user_country()
-    };
     // Limit 10: Spotify capped the search limit at 10 in Feb 2026, larger
     // values 400. The artist search only surfaces a handful of relevant
     // tracks, so load-more pages exhaust quickly — that is the API ceiling.
@@ -3208,7 +3346,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       .search(
         &query,
         SearchType::Track,
-        country.map(Market::Country),
+        Some(Market::FromToken),
         None,
         Some(10),
         Some(offset),
@@ -3272,7 +3410,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         .spotify
         .album_track_manual(
           AlbumId::from_id_or_uri(&album_id_str).unwrap(),
-          None,
+          Some(Market::FromToken),
           Some(API_MAX_LIMIT),
           Some(0),
         )
@@ -3309,7 +3447,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       .spotify
       .album_track_manual(
         AlbumId::from_id_or_uri(&album_id).unwrap(),
-        None,
+        Some(Market::FromToken),
         Some(API_MAX_LIMIT),
         Some(offset),
       )
@@ -3334,101 +3472,6 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
       }
-    }
-  }
-
-  async fn get_recommendations_for_seed(
-    &mut self,
-    seed_artists: Option<Vec<String>>,
-    seed_tracks: Option<Vec<String>>,
-    first_track: Box<Option<FullTrack>>,
-    country: Option<Country>,
-  ) {
-    match self
-      .spotify
-      .recommendations(
-        std::iter::empty::<RecommendationsAttribute>(),
-        seed_artists.as_ref().map(|v| {
-          v.iter()
-            .filter_map(|s| ArtistId::from_id_or_uri(s.as_str()).ok())
-        }),
-        None::<Vec<&str>>,
-        seed_tracks.as_ref().map(|v| {
-          v.iter()
-            .filter_map(|s| TrackId::from_id_or_uri(s.as_str()).ok())
-        }),
-        country.map(Market::Country),
-        Some(API_MAX_LIMIT),
-      )
-      .await
-    {
-      Ok(result) => {
-        if let Some(mut recommended_tracks) = self.extract_recommended_tracks(&result).await {
-          //custom first track
-          if let Some(track) = *first_track {
-            recommended_tracks.insert(0, track);
-          }
-
-          let track_ids = recommended_tracks
-            .iter()
-            .map(|x| x.id.as_ref().map(|id| id.to_string()).unwrap_or_default())
-            .collect::<Vec<String>>();
-
-          let count = recommended_tracks.len();
-          self
-            .set_tracks_to_table(
-              recommended_tracks.clone(),
-              vec![None; count],
-              (0..count).collect(),
-              false,
-            )
-            .await;
-
-          let mut app = self.app.lock().await;
-          app.recommended_tracks = recommended_tracks;
-          app.track_table.context = Some(TrackTableContext::RecommendedTracks);
-
-          if app.get_current_route().id != RouteId::Recommendations {
-            app.push_navigation_stack(RouteId::Recommendations, ActiveBlock::TrackTable);
-          };
-
-          app.dispatch(IoEvent::StartPlayback(None, Some(track_ids), Some(0)));
-        }
-      }
-      Err(e) => {
-        self.handle_error(anyhow!(e)).await;
-      }
-    }
-  }
-
-  #[allow(deprecated)]
-  async fn extract_recommended_tracks(
-    &mut self,
-    recommendations: &Recommendations,
-  ) -> Option<Vec<FullTrack>> {
-    let tracks = recommendations
-      .clone()
-      .tracks
-      .into_iter()
-      .filter_map(|item| item.id)
-      .collect::<Vec<TrackId>>();
-    if let Ok(result) = self.spotify.tracks(tracks, None).await {
-      return Some(result);
-    }
-
-    None
-  }
-
-  async fn get_recommendations_for_track_id(&mut self, id: String, country: Option<Country>) {
-    if let Ok(track) = self
-      .spotify
-      .track(TrackId::from_id_or_uri(&id).unwrap(), None)
-      .await
-    {
-      let track_id_list = track.id.as_ref().map(|id| vec![id.to_string()]);
-      self
-        .get_recommendations_for_seed(None, track_id_list, Box::new(Some(track)), country)
-        .await;
     }
   }
 
@@ -3527,7 +3570,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
     match self
       .spotify
-      .current_user_saved_albums_manual(None, Some(API_MAX_LIMIT), offset)
+      .current_user_saved_albums_manual(Some(Market::FromToken), Some(API_MAX_LIMIT), offset)
       .await
     {
       Ok(saved_albums) => {
@@ -3600,7 +3643,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
     let page = match self
       .spotify
-      .current_user_saved_albums_manual(None, Some(API_MAX_LIMIT), None)
+      .current_user_saved_albums_manual(Some(Market::FromToken), Some(API_MAX_LIMIT), None)
       .await
     {
       Ok(p) => p,
@@ -3636,7 +3679,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
       let page = match self
         .spotify
         .current_user_saved_albums_manual(
-          None,
+          Some(Market::FromToken),
           Some(API_MAX_LIMIT),
           Some(all.len() as u32),
         )
@@ -4173,7 +4216,10 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
   async fn get_album(&mut self, album_id: String) {
     match self
       .spotify
-      .album(AlbumId::from_id_or_uri(&album_id).unwrap(), None)
+      .album(
+        AlbumId::from_id_or_uri(&album_id).unwrap(),
+        Some(Market::FromToken),
+      )
       .await
     {
       Ok(album) => {
@@ -4198,7 +4244,10 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
   async fn get_album_for_track(&mut self, track_id: String) {
     match self
       .spotify
-      .track(TrackId::from_id_or_uri(&track_id).unwrap(), None)
+      .track(
+        TrackId::from_id_or_uri(&track_id).unwrap(),
+        Some(Market::FromToken),
+      )
       .await
     {
       Ok(track) => {
@@ -4209,7 +4258,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
           None => return,
         };
 
-        if let Ok(album) = self.spotify.album(album_id, None).await {
+        if let Ok(album) = self.spotify.album(album_id, Some(Market::FromToken)).await {
           // The way we map to the UI is zero-indexed, but Spotify is 1-indexed.
           let zero_indexed_track_number = track.track_number - 1;
           let selected_album = SelectedFullAlbum {
@@ -4257,11 +4306,53 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     };
   }
 
+  // Used for the soloist device sptune launches: it takes a few seconds to
+  // register as a Connect device, so poll the list instead of one fixed sleep.
+  async fn transfer_playback_to_device_name(&mut self, name: String) {
+    for _ in 0..10 {
+      if let Ok(devices) = self.spotify.device().await {
+        if let Some(d) = devices.iter().find(|d| d.name.eq_ignore_ascii_case(&name)) {
+          let Some(id) = d.id.clone() else {
+            return;
+          };
+          match self.spotify.transfer_playback(&id, Some(true)).await {
+            Ok(()) => {
+              self.get_current_playback().await;
+            }
+            Err(e) => {
+              self.handle_error(anyhow!(e)).await;
+            }
+          }
+          return;
+        }
+      }
+      tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+    self
+      .handle_error(anyhow!(
+        "device '{}' not found — on first soloist run, pair it once from the Spotify app (after that it persists)",
+        name
+      ))
+      .await;
+  }
+
   async fn refresh_authentication(&mut self) {
     match self.spotify.refetch_token().await {
-      Ok(Some(new_token_info)) => {
+      Ok(Some(mut new_token_info)) => {
+        // Spotify's refresh response often omits `refresh_token`: without
+        // this carry-over the rebuilt client could never refresh again and
+        // every later attempt would land in the Ok(None) arm below.
+        if new_token_info.refresh_token.is_none() {
+          if let Some(old) = self.spotify.get_token().lock().await.unwrap().as_ref() {
+            new_token_info.refresh_token = old.refresh_token.clone();
+          }
+        }
         let (new_spotify, new_token_expiry) = get_spotify(new_token_info, &self.client_config);
         self.spotify = new_spotify;
+        // ponytail: the rebuilt client never auto-persists (library refresh
+        // is disabled), so write the carried-over token explicitly — without
+        // this the next launch re-reads the stale pre-refresh file.
+        let _ = self.spotify.write_token_cache().await;
         #[cfg(unix)]
         {
           use std::os::unix::fs::PermissionsExt;
@@ -4273,7 +4364,18 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         let mut app = self.app.lock().await;
         app.spotify_token_expiry = new_token_expiry;
       }
-      Ok(None) => println!("\nFailed to refresh authentication token"),
+      Ok(None) => {
+        // No refresh token in memory. With the carry-over above this is
+        // unreachable in a healthy session, so the session is dead: stop
+        // the refresh loop (same flag the grant-death arm sets) and tell
+        // the user to restart. No cache wipe — the file may still hold a
+        // good token that a restart re-reads.
+        let mut app = self.app.lock().await;
+        app.auth_reauth_required = true;
+        app.handle_error(anyhow!(
+          "Spotify session can't be refreshed — restart sptune to log in again in the browser."
+        ));
+      }
       Err(e) => {
         let msg = e.to_string();
         if msg.contains("invalid_grant") || msg.contains("invalid_client") {
@@ -4281,11 +4383,18 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
           // secret flow and can never refresh without it. Wipe the cache so
           // the next launch re-authenticates through the browser via PKCE.
           let _ = std::fs::remove_file(self.spotify.get_config().cache_path.clone());
-          println!(
-            "\nStored Spotify grant is from the old secret flow and cannot refresh. Token cache deleted — restart sptune to re-authenticate in the browser."
-          );
+          // println! is invisible behind the TUI: raise the visible error
+          // route instead, and set the flag that stops the 401 path and the
+          // expiry tick from re-dispatching a refresh that cannot succeed.
+          let mut app = self.app.lock().await;
+          app.auth_reauth_required = true;
+          app.handle_error(anyhow!(
+            "Spotify login expired (old pre-PKCE grant). Token cache deleted — restart sptune to log in again in the browser."
+          ));
         } else {
-          println!("\nFailed to refresh authentication token");
+          // Transient (network blip, 5xx): stay silent, the 60s expiry tick
+          // and the 401 path retry automatically. Printing here only
+          // produced scary scrollback for self-healing blips.
         }
       }
     }
@@ -4357,9 +4466,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
           app.playlist_offset = 0;
           app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
         }
-        self
-          .add_track_to_playlist(uri, new_id.clone())
-          .await;
+        self.add_track_to_playlist(uri, new_id.clone()).await;
         // Paint the panel (cache when the verify confirmed, live refetch
         // when it didn't — self-heals instead of showing a lagged list).
         self.get_playlist_tracks(new_id, 0).await;
@@ -4368,7 +4475,8 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
     }
   }
 
-  async fn add_track_to_playlist(&mut self, uri: String, playlist_id: String) {    let Some(item) = playable_from_uri(&uri) else {
+  async fn add_track_to_playlist(&mut self, uri: String, playlist_id: String) {
+    let Some(item) = playable_from_uri(&uri) else {
       return;
     };
     let Ok(playlist_id) = PlaylistId::from_id_or_uri(&playlist_id) else {
@@ -4427,7 +4535,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
           if let Some(page) = page {
             self
               .playlist_cache
-              .update(&playlist_id_str, page.items.clone(), page.total, false);
+              .update(&playlist_id_str, page.items.clone(), page.total, 0, false);
             self.playlist_cache.set_snapshot(&playlist_id_str, snapshot);
             let mut app = self.app.lock().await;
             self.sync_playlist_uris(&mut app);
@@ -4462,7 +4570,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
         .playlist_items_manual(
           PlaylistId::from_id_or_uri(playlist_id_str).unwrap(),
           None,
-          None,
+          Some(Market::FromToken),
           Some(API_MAX_LIMIT),
           Some(0),
         )
@@ -4480,7 +4588,7 @@ fn parse_retry_after(msg: &str) -> Option<u64> {
             .playlist_items_manual(
               PlaylistId::from_id_or_uri(playlist_id_str).unwrap(),
               None,
-              None,
+              Some(Market::FromToken),
               Some(1),
               Some(page.total.saturating_sub(1)),
             )
@@ -4710,10 +4818,7 @@ mod tests {
       .map(|i| {
         let track: FullTrack = serde_json::from_value(mock_track_json(i as usize + 130)).unwrap();
         SavedTrack {
-          added_at: Utc
-            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
-            .single()
-            .unwrap(),
+          added_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).single().unwrap(),
           track,
         }
       })
@@ -4722,9 +4827,17 @@ mod tests {
       href: String::new(),
       items,
       limit: 20,
-      next: if end < total { Some(format!("?offset={}", end)) } else { None },
+      next: if end < total {
+        Some(format!("?offset={}", end))
+      } else {
+        None
+      },
       offset,
-      previous: if offset > 0 { Some(format!("?offset=0")) } else { None },
+      previous: if offset > 0 {
+        Some(format!("?offset=0"))
+      } else {
+        None
+      },
       total,
     }
   }
@@ -4838,7 +4951,7 @@ mod tests {
     .unwrap();
     network
       .playlist_cache
-      .update("spotify:playlist:test", vec![item], 1, false);
+      .update("spotify:playlist:test", vec![item], 1, 0, false);
 
     let (tx, rx) = std::sync::mpsc::channel();
     app.try_lock().unwrap().io_tx = Some(tx);
@@ -4857,6 +4970,222 @@ mod tests {
       ),
       "opening a cached playlist must dispatch a background reconcile"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// One sidebar playlist for view-guard tests (bare id; uri() -> full URI).
+  fn mock_sidebar_playlist(id: &str) -> rspotify::model::SimplifiedPlaylist {
+    serde_json::from_value(json!({
+      "collaborative": false,
+      "external_urls": {},
+      "href": format!("spotify:playlist:{id}"),
+      "id": id,
+      "images": [],
+      "name": format!("Mock {id}"),
+      "owner": {
+        "display_name": "Mock User",
+        "external_urls": {},
+        "followers": null,
+        "href": "spotify:user:mockuser",
+        "id": "mockuser",
+        "images": [],
+      },
+      "public": null,
+      "snapshot_id": "snap",
+      "tracks": { "href": "", "total": 1 },
+      "type": "playlist",
+    }))
+    .unwrap()
+  }
+
+  fn mock_playlist_items(range: std::ops::Range<usize>) -> Vec<PlaylistItem> {
+    range
+      .map(|i| {
+        serde_json::from_value(json!({
+          "added_at": null,
+          "added_by": null,
+          "is_local": false,
+          "track": mock_track_json(i),
+        }))
+        .unwrap()
+      })
+      .collect()
+  }
+
+  fn mock_items_page(items: Vec<PlaylistItem>, total: u32) -> Page<PlaylistItem> {
+    Page {
+      href: String::new(),
+      items,
+      limit: 50,
+      next: None,
+      offset: 0,
+      previous: None,
+      total,
+    }
+  }
+
+  #[test]
+  fn stale_first_page_updates_cache_only() {
+    // Open A, then B: A's late first page must not clobber B's table.
+    let app = Arc::new(Mutex::new(App::default()));
+    let mut network = test_network(&app);
+    let dir = std::env::temp_dir().join(format!("sptune_bk_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    network
+      .playlist_cache
+      .set_path(dir.join("playlist_cache.json"));
+    {
+      let mut guard = app.try_lock().unwrap();
+      guard.track_table.context = Some(TrackTableContext::MyPlaylists);
+      guard.playlists = Some(Page {
+        href: String::new(),
+        items: vec![mock_sidebar_playlist("B")],
+        limit: 50,
+        next: None,
+        offset: 0,
+        previous: None,
+        total: 1,
+      });
+      guard.active_playlist_index = Some(0);
+      guard.playlist_tracks = Some(mock_items_page(mock_playlist_items(0..3), 3));
+    }
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+      network
+        .apply_playlist_tracks(
+          "spotify:playlist:A",
+          mock_items_page(mock_playlist_items(100..103), 3),
+          0,
+        )
+        .await;
+    });
+    let guard = app.try_lock().unwrap();
+    // UI still shows B (first item is track 0, not track 100)...
+    let shown = guard.playlist_tracks.as_ref().unwrap();
+    assert_eq!(shown.items.len(), 3);
+    assert_eq!(
+      playlist_item_uri(&shown.items[0]).as_deref(),
+      Some("spotify:track:mocktrack0")
+    );
+    // ...A's page landed in the keyed cache, and no fill was armed for it.
+    assert_eq!(
+      network
+        .playlist_cache
+        .lookup("spotify:playlist:A")
+        .unwrap()
+        .items
+        .len(),
+      3
+    );
+    assert!(guard.fill_target.is_none());
+    drop(guard);
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn overlapping_pages_converge_without_dupes() {
+    // The same offset-50 page applied twice (double dispatch) lands on its
+    // own offset instead of appending a second copy.
+    let app = Arc::new(Mutex::new(App::default()));
+    let mut network = test_network(&app);
+    let dir = std::env::temp_dir().join(format!("sptune_bk_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    network
+      .playlist_cache
+      .set_path(dir.join("playlist_cache.json"));
+    {
+      let mut guard = app.try_lock().unwrap();
+      guard.track_table.context = Some(TrackTableContext::MyPlaylists);
+      guard.playlists = Some(Page {
+        href: String::new(),
+        items: vec![mock_sidebar_playlist("A")],
+        limit: 50,
+        next: None,
+        offset: 0,
+        previous: None,
+        total: 1,
+      });
+      guard.active_playlist_index = Some(0);
+    }
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+      network
+        .apply_playlist_tracks(
+          "spotify:playlist:A",
+          mock_items_page(mock_playlist_items(0..50), 120),
+          0,
+        )
+        .await;
+      let page50 = mock_items_page(mock_playlist_items(50..100), 120);
+      network
+        .apply_playlist_tracks("spotify:playlist:A", page50.clone(), 50)
+        .await;
+      network
+        .apply_playlist_tracks("spotify:playlist:A", page50, 50)
+        .await;
+    });
+    let guard = app.try_lock().unwrap();
+    assert_eq!(guard.playlist_tracks.as_ref().unwrap().items.len(), 100);
+    assert_eq!(
+      network
+        .playlist_cache
+        .lookup("spotify:playlist:A")
+        .unwrap()
+        .items
+        .len(),
+      100
+    );
+    drop(guard);
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn reconcile_probes_each_playlist_once_per_launch() {
+    let app = Arc::new(Mutex::new(App::default()));
+    let mut network = test_network(&app);
+    let dir = std::env::temp_dir().join(format!("sptune_bk_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    network
+      .playlist_cache
+      .set_path(dir.join("playlist_cache.json"));
+    network.playlist_cache.update(
+      "spotify:playlist:test",
+      mock_playlist_items(0..1),
+      1,
+      0,
+      false,
+    );
+    network
+      .playlist_cache
+      .set_snapshot("spotify:playlist:test", "snap-old".to_string());
+    // Already probed this launch: no second probe, even with a stale
+    // snapshot and no network assertion possible here.
+    network
+      .probed_playlists
+      .insert("spotify:playlist:test".to_string());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let changed = rt.block_on(async {
+      network
+        .reconcile_playlist_tracks("spotify:playlist:test")
+        .await
+    });
+    assert!(!changed);
+    // A fresh network records the probe even for a missing entry, so the
+    // next open in the same launch skips it.
+    let mut fresh = test_network(&app);
+    let missing = rt.block_on(async {
+      fresh
+        .reconcile_playlist_tracks("spotify:playlist:nope")
+        .await
+    });
+    assert!(!missing);
+    assert!(fresh.probed_playlists.contains("spotify:playlist:nope"));
     let _ = std::fs::remove_dir_all(&dir);
   }
 
