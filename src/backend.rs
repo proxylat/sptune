@@ -1098,7 +1098,35 @@ impl<'a> Network<'a> {
         self.transfert_playback_to_device(device_id).await;
       }
       IoEvent::TransferPlaybackToDeviceName(name) => {
-        self.transfer_playback_to_device_name(name).await;
+        // Background, never inline: the network loop is sequential and this
+        // polls up to 10x3s — inline it stalls every queued event, so a
+        // playlist opened at startup sits behind it as a black panel.
+        // Found id re-enters the loop as TransferPlaybackToDevice (quick).
+        let spotify = self.spotify.clone();
+        let app = std::sync::Arc::clone(self.app);
+        tokio::spawn(async move {
+          for _ in 0..10 {
+            if let Ok(devices) = spotify.device().await {
+              if let Some(d) = devices.iter().find(|d| d.name.eq_ignore_ascii_case(&name)) {
+                match d.id.clone() {
+                  Some(id) => {
+                    app
+                      .lock()
+                      .await
+                      .dispatch(IoEvent::TransferPlaybackToDevice(id));
+                  }
+                  None => { /* nameless device: nothing to transfer to */ }
+                }
+                return;
+              }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+          }
+          app.lock().await.handle_error(anyhow!(
+            "device '{}' not found — on first soloist run, pair it once from the Spotify desktop or mobile app (after that it persists)",
+            name
+          ));
+        });
       }
       IoEvent::SoloistWsWatch {
         data_dir,
@@ -4304,36 +4332,6 @@ impl<'a> Network<'a> {
         self.handle_error(e).await;
       }
     };
-  }
-
-  // Used for the soloist device sptune launches: it takes a few seconds to
-  // register as a Connect device, so poll the list instead of one fixed sleep.
-  async fn transfer_playback_to_device_name(&mut self, name: String) {
-    for _ in 0..10 {
-      if let Ok(devices) = self.spotify.device().await {
-        if let Some(d) = devices.iter().find(|d| d.name.eq_ignore_ascii_case(&name)) {
-          let Some(id) = d.id.clone() else {
-            return;
-          };
-          match self.spotify.transfer_playback(&id, Some(true)).await {
-            Ok(()) => {
-              self.get_current_playback().await;
-            }
-            Err(e) => {
-              self.handle_error(anyhow!(e)).await;
-            }
-          }
-          return;
-        }
-      }
-      tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    }
-    self
-      .handle_error(anyhow!(
-        "device '{}' not found — on first soloist run, pair it once from the Spotify app (after that it persists)",
-        name
-      ))
-      .await;
   }
 
   async fn refresh_authentication(&mut self) {

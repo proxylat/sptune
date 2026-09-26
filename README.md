@@ -46,7 +46,7 @@ soloist:
   binary_path: ""        # optional; otherwise `soloist` is looked up on PATH
 ```
 
-Key resolution: `SOLOIST_API_KEY` env var, else `soloist_api_key:` in `~/.config/sptune/client.yml`. Pair the device once from the official Spotify app (same network); after that it persists — transfer only works after pairing. Enabled but no key, or binary missing, prints a hint and continues without soloist.
+Key resolution: `SOLOIST_API_KEY` env var, else `soloist_api_key:` in `~/.config/sptune/client.yml`. First run only: open the official Spotify **desktop or mobile app** on the same local network, open Devices, and select `sptune` once — after that it stays paired and playback transfer works automatically. The web player cannot pair it (browsers can't discover devices on your LAN). Enabled but no key, or binary missing, prints a hint and continues without soloist.
 
 First run on Linux walks you through setup (API key, device name, binary download) automatically; existing installs can re-run it anytime with `sptune --setup-soloist`.
 

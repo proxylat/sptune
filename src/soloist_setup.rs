@@ -127,7 +127,9 @@ pub async fn run_setup(
     API_KEY_DASHBOARD_URL
   );
   let key = loop {
-    let k = prompt_line("Enter your Soloist API key: ")?;
+    let k = prompt_line(
+      "Enter your Soloist API key (from dashboard/soloist — not your app Client ID): ",
+    )?;
     if !k.is_empty() {
       break k;
     }
@@ -171,8 +173,11 @@ pub async fn run_setup(
   client_config.save_soloist_api_key(&key)?;
   user_config.save_soloist_config(true, &device_name, &binary_path)?;
 
+  // Length only — never echo the key itself.
+  println!("\nSaved Soloist API key ({} chars).", key.len());
+
   println!(
-    "\nSetup saved. Pair once: open the official Spotify app on the same network, find \"{}\" under Devices, and connect — after that it persists.",
+    "\nSetup saved. Pair once: open the official Spotify desktop or mobile app on the same network (the web player can't do this — browsers can't see LAN devices), find \"{}\" under Devices, and connect — after that it stays paired.",
     device_name
   );
   Ok(())

@@ -384,6 +384,20 @@ pub fn kill_process(pid: u32) {
   }
 }
 
+/// True when the pid names a live process: OpenProcess probe, handle closed
+/// immediately. Used for the soloist shutdown prompt.
+#[cfg(windows)]
+pub fn process_alive(pid: u32) -> bool {
+  unsafe {
+    let handle = ffi::OpenProcess(ffi::PROCESS_QUERY_INFORMATION, 0, pid);
+    if handle.is_null() {
+      return false;
+    }
+    ffi::CloseHandle(handle);
+    true
+  }
+}
+
 // Terminate every Spotify.exe in the snapshot — matches by exe name, so no
 // parent-link can be missed and suspended processes die all the same.
 #[cfg(windows)]

@@ -8,6 +8,7 @@
 
 use crate::app::App;
 use crate::backend::IoEvent;
+use anyhow::anyhow;
 use futures::{Sink, SinkExt, StreamExt};
 use rspotify::model::{
   Actions, AlbumId, ArtistId, Context, CurrentPlaybackContext, CurrentlyPlayingType, Device,
@@ -169,6 +170,10 @@ async fn run_connection(
   send_get_state(&mut sink).await;
   let mut live = false;
   let mut last_heart: Option<String> = None;
+  // One-shot: a fresh soloist sits logged out until the user claims it
+  // once from the official Spotify app, so nudge for that instead of
+  // polling for a device that can't appear yet. Resets once logged in.
+  let mut login_warned = false;
   while let Some(msg) = stream.next().await {
     let msg = match msg {
       Ok(msg) => msg,
@@ -207,6 +212,16 @@ async fn run_connection(
         };
         if !auth.logged_in {
           set_live(app, &mut live, false).await;
+          if !login_warned {
+            login_warned = true;
+            app.lock().await.handle_error(anyhow!(
+              "soloist '{}' is waiting to be paired — open the official Spotify app on the same machine and select the '{}' device once; it stays paired after that. If it never appears there, the Soloist API key may be wrong or expired — re-enter it with `sptune --setup-soloist` (get the key at https://developer.spotify.com/dashboard/soloist)",
+              device_name,
+              device_name
+            ));
+          }
+        } else {
+          login_warned = false;
         }
       }
       // Nothing to merge: queue/command acks/errors carry no playback state.

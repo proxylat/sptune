@@ -32,6 +32,32 @@ pub fn take_runtime() -> Option<(PathBuf, String)> {
   RUNTIME.lock().unwrap().take()
 }
 
+/// Liveness probe for our own child pid (never matched by name): prompt and
+/// kill paths both use it so a stale pid is never signalled after PID reuse.
+fn child_alive(pid: u32) -> bool {
+  #[cfg(target_os = "linux")]
+  {
+    // ponytail: /proc presence instead of a signal crate for one check.
+    Path::new(&format!("/proc/{pid}")).exists()
+  }
+  #[cfg(windows)]
+  {
+    crate::platform::windows::process_alive(pid)
+  }
+  #[cfg(not(any(target_os = "linux", windows)))]
+  {
+    let _ = pid;
+    true
+  }
+}
+
+/// True when sptune spawned soloist and the child still looks alive. Used for
+/// the shutdown prompt — kill_spawned stays the unconditional path otherwise.
+pub fn is_spawned() -> bool {
+  let pid = CHILD_PID.load(Ordering::SeqCst);
+  pid != 0 && child_alive(pid)
+}
+
 fn resolve_binary(cfg: &SoloistConfig) -> Option<PathBuf> {
   if !cfg.binary_path.trim().is_empty() {
     let p = PathBuf::from(cfg.binary_path.trim());
@@ -97,10 +123,10 @@ pub fn launch(cfg: &SoloistConfig, api_key: &str, data_dir: &Path) -> anyhow::Re
 }
 
 /// Kill the soloist child sptune spawned (panic hook + clean exit). No-op when
-/// sptune never launched soloist.
+/// sptune never launched soloist or the child is already gone.
 pub fn kill_spawned() {
   let pid = CHILD_PID.swap(0, Ordering::SeqCst);
-  if pid == 0 {
+  if pid == 0 || !child_alive(pid) {
     return;
   }
   #[cfg(target_os = "linux")]

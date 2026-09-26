@@ -169,6 +169,17 @@ fn close_application(alt_screen: bool, enable_mouse: bool) -> Result<()> {
   Ok(())
 }
 
+/// Shutdown question for the soloist child. True = keep it running as an
+/// independent speaker; anything but y/yes (Enter, EOF, Ctrl-C) = kill.
+fn prompt_keep_soloist() -> bool {
+  use std::io::Write as _;
+  print!("Soloist is still playing. Keep it running after sptune exits? [y/N] ");
+  let _ = std::io::stdout().flush();
+  let mut line = String::new();
+  std::io::stdin().read_line(&mut line).is_ok()
+    && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
 fn panic_hook(info: &PanicHookInfo<'_>) {
   let location = info.location().map(|l| l.to_string()).unwrap_or_default();
 
@@ -198,7 +209,7 @@ async fn main() -> Result<()> {
     .author(env!("CARGO_PKG_AUTHORS"))
     .about(env!("CARGO_PKG_DESCRIPTION"))
     .after_help(
-      "Your Spotify Client ID is stored in $HOME/.config/sptune/client.yml\nPowered by Spotify — music data from the Spotify Web API. Spotify is a trademark of Spotify AB.\nHeadless playback (Linux): enable [soloist] in your config and set SOLOIST_API_KEY — get your own key at https://developer.spotify.com/dashboard/soloist (Premium required).",
+      "Your Spotify Client ID is stored in $HOME/.config/sptune/client.yml\nPowered by Spotify — music data from the Spotify Web API. Spotify is a trademark of Spotify AB.\nHeadless playback (Linux): enable [soloist] in your config and set SOLOIST_API_KEY — get your own key at https://developer.spotify.com/dashboard/soloist (Premium required). First run needs a one-time pair: select the sptune device in the official Spotify desktop or mobile app (web player can't).",
     )
     .arg(
       Arg::new("tick-rate")
@@ -844,7 +855,21 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
   // a terminal-teardown error can't skip it; matches processes by name, so
   // it works no matter who launched Spotify.
   crate::platform::spotify::kill_all_spotify();
-  crate::platform::soloist::kill_spawned();
+  // Soloist is our own child, so ask first: restore the terminal so the
+  // question is visible (close_application is idempotent — the final
+  // teardown below repeats it harmlessly). Anything but y/yes kills it,
+  // preserving the old die-with-parent default on Enter/EOF.
+  if crate::platform::soloist::is_spawned() {
+    close_application(
+      user_config.terminal.alt_screen,
+      user_config.terminal.enable_mouse,
+    )?;
+    if !prompt_keep_soloist() {
+      crate::platform::soloist::kill_spawned();
+    }
+  } else {
+    crate::platform::soloist::kill_spawned();
+  }
 
   terminal.show_cursor()?;
 
