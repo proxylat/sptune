@@ -1,0 +1,59 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: rustfmt --check benches/*.rs src/lib.rs
+      # Benches only: the bin target carries pre-existing warnings (tech debt,
+      # out of scope). New bench code must stay -D warnings clean.
+      - run: cargo clippy --benches -- -D warnings
+      - run: cargo test --locked
+      - run: cargo bench --no-run --locked
+
+  iai-gate:
+    # PLAN.md rule: PR must not regress iai instruction count (Ir) > 2%.
+    # Ir is deterministic, so base-vs-PR on the same runner is a fair fight.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind
+      - run: cargo install iai-callgrind-runner --version 0.16.1 --locked
+      - name: baseline base ref
+        run: |
+          git checkout -q "${{ github.base_ref || 'HEAD' }}"
+          cargo bench --bench iai -- --save-baseline=ci-base
+      - name: compare PR ref
+        run: |
+          git checkout -q "${{ github.sha || github.ref_name }}"
+          cargo bench --bench iai -- --baseline=ci-base
+
+  profile:
+    # Wall-clock profiles for human speedscope viewing. No gate: sampling
+    # failures SKIP inside the script (exit 0), artifacts upload regardless.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq linux-tools-common linux-tools-generic
+      - run: scripts/profile.sh bench playlist_remove_item
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: speedscope-profiles
+          path: profiles/*.perf.txt
+          if-no-files-found: warn
