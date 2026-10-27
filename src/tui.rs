@@ -10,8 +10,8 @@ use layout::{
   build_playbar_controls, build_playbar_title, create_artist_string, format_playlist_duration,
   get_artist_highlight_state, get_color, get_percentage_width, get_search_results_highlight_state,
   millis_to_minutes, repeat_label, song_table_columns, track_table_with_date, PlaybarButton,
-  PLAYBAR_HEART_WIDTH, PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, PLAYLIST_SEARCH_PLACEHOLDER,
-  REFRESH_GLYPH, VOLUME_BAR_LEN,
+  SongColumnFlags, PLAYBAR_HEART_WIDTH, PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN,
+  PLAYLIST_SEARCH_PLACEHOLDER, REFRESH_GLYPH, VOLUME_BAR_LEN,
 };
 use ratatui::{
   layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -42,7 +42,23 @@ pub enum TableId {
 }
 
 #[derive(PartialEq, Clone, Copy)]
+/// Selected + hovered row of a list view. Bundles two `Option<usize>`
+/// params so list-drawing helpers stay under clippy's argument limit.
+pub struct ListSelection {
+  pub selected: Option<usize>,
+  pub hovered: Option<usize>,
+}
+
+/// Selected row, highlight state and scroll offset of a table view.
+pub struct TableSelection {
+  pub selected: usize,
+  pub highlight: (bool, bool),
+  pub offset: Option<usize>,
+}
+
+#[derive(Default, PartialEq, Clone, Copy)]
 pub enum ColumnId {
+  #[default]
   None,
   Title,
   Liked,
@@ -50,12 +66,6 @@ pub enum ColumnId {
   Artist,
   Length,
   DateAdded,
-}
-
-impl Default for ColumnId {
-  fn default() -> Self {
-    ColumnId::None
-  }
 }
 
 pub struct TableHeader<'a> {
@@ -153,7 +163,7 @@ pub fn draw_help_menu(f: &mut Frame, app: &App) {
           .border_style(help_menu_style),
       )
       .style(help_menu_style)
-      .widths(&[Constraint::Percentage(100)]);
+      .widths([Constraint::Percentage(100)]);
     f.render_widget(help_menu, rect);
     let viewport = rect.height.saturating_sub(3) as usize;
     draw_scrollbar(
@@ -489,7 +499,7 @@ pub fn draw_main_layout(f: &mut Frame, app: &App) {
     .direction(Direction::Vertical)
     .constraints(
       [
-        Constraint::Length(layout::header_height(app)),
+        Constraint::Length(layout::HEADER_HEIGHT),
         Constraint::Min(1),
         Constraint::Length(PLAYBAR_HEIGHT),
       ]
@@ -649,13 +659,15 @@ pub fn draw_library_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
     &title,
     &items,
     highlight_state,
-    Some(
-      app
-        .library
-        .selected_index
-        .min(items.len().saturating_sub(1)),
-    ),
-    app.hovered_library_index,
+    ListSelection {
+      selected: Some(
+        app
+          .library
+          .selected_index
+          .min(items.len().saturating_sub(1)),
+      ),
+      hovered: app.hovered_library_index,
+    },
   );
 }
 
@@ -665,7 +677,7 @@ pub fn draw_library_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
 // sidebar collapsed state flips, so key on all three and rebuild only then.
 thread_local! {
   static PLAYLIST_ITEMS: std::cell::RefCell<(usize, usize, bool, Vec<String>)> =
-    std::cell::RefCell::new((0, 0, false, Vec::new())); // (page_ptr, len, minimized, items)
+    const { std::cell::RefCell::new((0, 0, false, Vec::new())) }; // (page_ptr, len, minimized, items)
 }
 
 pub fn bust_playlist_items_cache() {
@@ -722,8 +734,10 @@ pub fn draw_playlist_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
       &title,
       items,
       highlight_state,
-      app.selected_playlist_index,
-      app.hovered_playlist_index,
+      ListSelection {
+        selected: app.selected_playlist_index,
+        hovered: app.hovered_playlist_index,
+      },
     );
   });
 }
@@ -734,8 +748,7 @@ fn draw_sidebar_section<S>(
   title: &str,
   items: &[S],
   highlight_state: (bool, bool),
-  selected_index: Option<usize>,
-  hovered_index: Option<usize>,
+  selection: ListSelection,
   rect: Rect,
 ) where
   S: AsRef<str>,
@@ -770,12 +783,12 @@ fn draw_sidebar_section<S>(
       rect.height.saturating_sub(1),
     );
     let viewport = list_rect.height as usize;
-    let offset = match selected_index {
-      Some(s) => s.checked_sub(viewport).unwrap_or(0),
+    let offset = match selection.selected {
+      Some(s) => s.saturating_sub(viewport),
       None => 0,
     };
     let mut state = ListState::default();
-    state.select(selected_index.map(|s| s.saturating_sub(offset)));
+    state.select(selection.selected.map(|s| s.saturating_sub(offset)));
     let lst_items: Vec<ListItem> = items
       .iter()
       .enumerate()
@@ -798,8 +811,8 @@ fn draw_sidebar_section<S>(
           },
         );
         let is_hovered = app.user_config.behavior.enable_animations
-          && hovered_index == Some(i)
-          && selected_index != Some(i);
+          && selection.hovered == Some(i)
+          && selection.selected != Some(i);
         let it = if is_load_more {
           ListItem::new(Span::styled(
             fit.clone(),
@@ -847,12 +860,12 @@ fn draw_sidebar_section<S>(
     rect.height.saturating_sub(1),
   );
   let viewport = list_rect.height as usize;
-  let offset = match selected_index {
-    Some(s) => s.checked_sub(viewport).unwrap_or(0),
+  let offset = match selection.selected {
+    Some(s) => s.saturating_sub(viewport),
     None => 0,
   };
   let mut state = ListState::default();
-  state.select(selected_index.map(|s| s.saturating_sub(offset)));
+  state.select(selection.selected.map(|s| s.saturating_sub(offset)));
   let lst_items: Vec<ListItem> = items
     .iter()
     .enumerate()
@@ -875,8 +888,8 @@ fn draw_sidebar_section<S>(
         },
       );
       let is_hovered = app.user_config.behavior.enable_animations
-        && hovered_index == Some(i)
-        && selected_index != Some(i);
+        && selection.hovered == Some(i)
+        && selection.selected != Some(i);
       let it = if is_load_more {
         ListItem::new(Span::styled(
           fit.clone(),
@@ -908,6 +921,9 @@ fn draw_sidebar_section<S>(
   f.render_stateful_widget(list, list_rect, &mut state);
   draw_scrollbar(f, app, list_rect, items.len(), viewport, offset);
 }
+
+/// (artist, album) groups with their track rows and newest-track timestamp.
+type TimestampGroups = Vec<(String, Vec<(String, u32)>, Instant)>;
 
 pub fn draw_user_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
   match (app.show_library, app.show_playlists) {
@@ -977,8 +993,10 @@ pub fn draw_user_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
         &lib_title,
         &lib_items,
         lib_hl,
-        lib_selected,
-        app.hovered_library_index,
+        ListSelection {
+          selected: lib_selected,
+          hovered: app.hovered_library_index,
+        },
         lib_sec,
       );
       // Playlist section
@@ -1023,8 +1041,10 @@ pub fn draw_user_block(f: &mut Frame, app: &App, layout_chunk: Rect) {
           &pl_title,
           items,
           pl_hl,
-          app.selected_playlist_index,
-          app.hovered_playlist_index,
+          ListSelection {
+            selected: app.selected_playlist_index,
+            hovered: app.hovered_playlist_index,
+          },
           pl_sec,
         );
       });
@@ -1104,7 +1124,7 @@ fn draw_request_log(f: &mut Frame, app: &App, layout_chunk: Rect) {
       *m = latest;
     }
   }
-  let mut groups: Vec<(String, Vec<(String, u32)>, Instant)> = by_hhmm
+  let mut groups: TimestampGroups = by_hhmm
     .into_iter()
     .map(|(hhmm, mut v)| {
       v.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1112,7 +1132,7 @@ fn draw_request_log(f: &mut Frame, app: &App, layout_chunk: Rect) {
       (hhmm, v, max_i)
     })
     .collect();
-  groups.sort_by(|a, b| b.2.cmp(&a.2));
+  groups.sort_by_key(|song| std::cmp::Reverse(song.2));
 
   let timestamp_style = Style::default()
     .fg(theme.inactive)
@@ -1230,8 +1250,10 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
         "",
         &empty,
         (false, false),
-        None,
-        app.hovered_list_index,
+        ListSelection {
+          selected: None,
+          hovered: app.hovered_list_index,
+        },
       );
     }
     SearchResultBlock::SongSearch => {
@@ -1239,13 +1261,7 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
       let show_in_playlist = b.enable_add_to_playlist;
       let columns = song_table_columns(
         layout_chunk.width.saturating_sub(2),
-        false,
-        b.show_album_column,
-        b.show_artist_column,
-        b.show_length_column,
-        b.show_date_added_column,
-        false,
-        show_in_playlist,
+        SongColumnFlags::for_view(b, false, false, show_in_playlist),
       );
       let header = TableHeader {
         id: TableId::Song,
@@ -1305,12 +1321,9 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
         None => vec![],
       };
       if has_more {
-        let remaining = app
-          .search_results
-          .tracks
-          .as_ref()
-          .map(|t| (t.total as usize > t.items.len()).then(|| t.total as usize - t.items.len()))
-          .flatten();
+        let remaining = app.search_results.tracks.as_ref().and_then(|t| {
+          (t.total as usize > t.items.len()).then(|| t.total as usize - t.items.len())
+        });
         let mut load_more_format = vec!["".to_string(), load_more_label(" Load more ", remaining)];
         if b.show_artist_column {
           load_more_format.push(String::new());
@@ -1332,9 +1345,11 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
         list_rect,
         ("Songs", &header),
         &items,
-        app.search_results.selected_tracks_index.unwrap_or(0),
-        get_search_results_highlight_state(app, expanded.clone()),
-        None,
+        TableSelection {
+          selected: app.search_results.selected_tracks_index.unwrap_or(0),
+          highlight: get_search_results_highlight_state(app, expanded.clone()),
+          offset: None,
+        },
       );
       let selected = app.search_results.selected_tracks_index.unwrap_or(0);
       let count = items.len();
@@ -1361,8 +1376,10 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
         title,
         &items,
         get_search_results_highlight_state(app, expanded.clone()),
-        selected,
-        app.hovered_list_index,
+        ListSelection {
+          selected,
+          hovered: app.hovered_list_index,
+        },
       );
     }
   }
@@ -1522,9 +1539,11 @@ pub fn draw_artist_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
     layout_chunk,
     ("Artists", &header),
     &items,
-    app.artists_list_index,
-    highlight_state,
-    None,
+    TableSelection {
+      selected: app.artists_list_index,
+      highlight: highlight_state,
+      offset: None,
+    },
   )
 }
 
@@ -1568,9 +1587,11 @@ pub fn draw_podcast_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
       layout_chunk,
       (&format!("{}{}", REFRESH_GLYPH, "Podcasts"), &header),
       &items,
-      app.shows_list_index,
-      highlight_state,
-      None,
+      TableSelection {
+        selected: app.shows_list_index,
+        highlight: highlight_state,
+        offset: None,
+      },
     )
   };
 }
@@ -1580,13 +1601,7 @@ pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
   let show_in_playlist = b.enable_add_to_playlist;
   let columns = song_table_columns(
     layout_chunk.width.saturating_sub(2),
-    false,
-    b.show_album_column,
-    b.show_artist_column,
-    b.show_length_column,
-    b.show_date_added_column,
-    false,
-    show_in_playlist,
+    SongColumnFlags::for_view(b, false, false, show_in_playlist),
   );
   let header = TableHeader {
     id: TableId::Album,
@@ -1745,9 +1760,11 @@ pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
       layout_chunk,
       (&album_ui.title, &header),
       &album_ui.items,
-      album_ui.selected_index,
-      highlight_state,
-      None,
+      TableSelection {
+        selected: album_ui.selected_index,
+        highlight: highlight_state,
+        offset: None,
+      },
     );
   };
 }
@@ -1831,13 +1848,7 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
   let show_in_playlist = !show_remove && b.enable_add_to_playlist;
   let columns = song_table_columns(
     layout_chunk.width.saturating_sub(2),
-    with_date,
-    b.show_album_column,
-    b.show_artist_column,
-    b.show_length_column,
-    b.show_date_added_column,
-    show_remove,
-    show_in_playlist,
+    SongColumnFlags::for_view(b, with_date, show_remove, show_in_playlist),
   );
 
   let header_texts: Vec<String> = columns
@@ -1855,14 +1866,14 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
       .to_string();
       if let Some((sort_column, desc)) = app.track_table_sort {
         let arrow = if desc { " ▼" } else { " ▲" };
-        let matches = match (column, sort_column) {
+        let matches = matches!(
+          (column, sort_column),
           (ColumnId::Title, TrackSortColumn::Title)
-          | (ColumnId::Artist, TrackSortColumn::Artist)
-          | (ColumnId::Album, TrackSortColumn::Album)
-          | (ColumnId::Length, TrackSortColumn::Length)
-          | (ColumnId::DateAdded, TrackSortColumn::DateAdded) => true,
-          _ => false,
-        };
+            | (ColumnId::Artist, TrackSortColumn::Artist)
+            | (ColumnId::Album, TrackSortColumn::Album)
+            | (ColumnId::Length, TrackSortColumn::Length)
+            | (ColumnId::DateAdded, TrackSortColumn::DateAdded)
+        );
         if matches {
           text.push_str(arrow);
         }
@@ -2032,9 +2043,11 @@ pub fn draw_song_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
     layout_chunk,
     (title.as_str(), &header),
     &items,
-    app.track_table.selected_index,
-    highlight_state,
-    Some(app.track_table.scroll_offset),
+    TableSelection {
+      selected: app.track_table.selected_index,
+      highlight: highlight_state,
+      offset: Some(app.track_table.scroll_offset),
+    },
   );
   draw_playlist_search_box(f, app, layout_chunk, &title);
 }
@@ -2649,15 +2662,9 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
         "+ ".to_string()
       };
       // prefix is 2 cols, heart is PLAYBAR_HEART_WIDTH cols, keep truncation inside song_row
-      let prefix_style = if in_playlist {
-        Style::default()
-          .fg(theme.active)
-          .add_modifier(Modifier::BOLD)
-      } else {
-        Style::default()
-          .fg(theme.active)
-          .add_modifier(Modifier::BOLD)
-      };
+      let prefix_style = Style::default()
+        .fg(theme.active)
+        .add_modifier(Modifier::BOLD);
       // Liked heart next to the prefix (blank for episodes): filled when the
       // now-playing track is liked, outline otherwise. Fixed width always.
       let (heart_text, heart_style) = match track_item {
@@ -2863,13 +2870,7 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
       let show_in_playlist = b.enable_add_to_playlist;
       let columns = song_table_columns(
         layout_chunk.width.saturating_sub(2),
-        false,
-        b.show_album_column,
-        b.show_artist_column,
-        b.show_length_column,
-        b.show_date_added_column,
-        false,
-        show_in_playlist,
+        SongColumnFlags::for_view(b, false, false, show_in_playlist),
       );
       let header = TableHeader {
         id: TableId::Song,
@@ -2953,9 +2954,11 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
         list_rect,
         (title.as_str(), &header),
         &items,
-        artist.selected_top_track_index,
-        get_artist_highlight_state(app, shown),
-        None,
+        TableSelection {
+          selected: artist.selected_top_track_index,
+          highlight: get_artist_highlight_state(app, shown),
+          offset: None,
+        },
       );
     }
     _ => {
@@ -3088,8 +3091,10 @@ fn draw_artist_page(f: &mut Frame, app: &App, layout_chunk: Rect) {
         &title,
         &items,
         get_artist_highlight_state(app, shown),
-        selected,
-        app.hovered_list_index,
+        ListSelection {
+          selected,
+          hovered: app.hovered_list_index,
+        },
       );
     }
   }
@@ -3219,9 +3224,11 @@ pub fn draw_album_list(f: &mut Frame, app: &App, layout_chunk: Rect) {
       layout_chunk,
       (&format!("{}{}", REFRESH_GLYPH, "Saved Albums"), &header),
       &items,
-      selected_song_index,
-      highlight_state,
-      None,
+      TableSelection {
+        selected: selected_song_index,
+        highlight: highlight_state,
+        offset: None,
+      },
     )
   };
 }
@@ -3301,15 +3308,11 @@ pub fn draw_show_episodes(f: &mut Frame, app: &App, layout_chunk: Rect) {
 
     let title = match &app.episode_table_context {
       EpisodeTableContext::Simplified => match &app.selected_show_simplified {
-        Some(selected_show) => {
-          format!("{}", selected_show.show.name.to_owned())
-        }
+        Some(selected_show) => selected_show.show.name.to_owned().to_string(),
         None => "Episodes".to_owned(),
       },
       EpisodeTableContext::Full => match &app.selected_show_full {
-        Some(selected_show) => {
-          format!("{}", selected_show.show.name.to_owned())
-        }
+        Some(selected_show) => selected_show.show.name.to_owned().to_string(),
         None => "Episodes".to_owned(),
       },
     };
@@ -3320,9 +3323,11 @@ pub fn draw_show_episodes(f: &mut Frame, app: &App, layout_chunk: Rect) {
       layout_chunk,
       (&title, &header),
       &items,
-      app.episode_list_index,
-      highlight_state,
-      None,
+      TableSelection {
+        selected: app.episode_list_index,
+        highlight: highlight_state,
+        offset: None,
+      },
     );
   };
 }
@@ -3352,12 +3357,14 @@ pub fn draw_made_for_you(f: &mut Frame, app: &App, layout_chunk: Rect) {
     "For you",
     &names,
     highlight_state,
-    if app.selection_engaged {
-      Some(app.made_for_you_index)
-    } else {
-      None
+    ListSelection {
+      selected: if app.selection_engaged {
+        Some(app.made_for_you_index)
+      } else {
+        None
+      },
+      hovered: app.hovered_list_index,
     },
-    app.hovered_list_index,
   );
 }
 
@@ -3405,13 +3412,7 @@ pub fn draw_recently_played_table(f: &mut Frame, app: &App, layout_chunk: Rect) 
   let b = &app.user_config.behavior;
   let columns = song_table_columns(
     layout_chunk.width.saturating_sub(2),
-    false,
-    b.show_album_column,
-    b.show_artist_column,
-    b.show_length_column,
-    b.show_date_added_column,
-    false,
-    false,
+    SongColumnFlags::for_view(b, false, false, false),
   );
   let header = TableHeader {
     id: TableId::RecentlyPlayed,
@@ -3500,9 +3501,11 @@ pub fn draw_recently_played_table(f: &mut Frame, app: &App, layout_chunk: Rect) 
       layout_chunk,
       ("Recently Played Tracks", &header),
       &items,
-      selected_song_index,
-      highlight_state,
-      None,
+      TableSelection {
+        selected: selected_song_index,
+        highlight: highlight_state,
+        offset: None,
+      },
     )
   };
 }
@@ -3551,19 +3554,18 @@ fn draw_selectable_list<S>(
   title: &str,
   items: &[S],
   highlight_state: (bool, bool),
-  selected_index: Option<usize>,
-  hovered_index: Option<usize>,
+  selection: ListSelection,
 ) where
   S: std::convert::AsRef<str>,
 {
   // Keep the selection visible: render a window that ends at the selection.
   let viewport = layout_chunk.height.saturating_sub(2) as usize;
-  let offset = match selected_index {
-    Some(selected) => selected.checked_sub(viewport).unwrap_or(0),
+  let offset = match selection.selected {
+    Some(selected) => selected.saturating_sub(viewport),
     None => 0,
   };
   let mut state = ListState::default();
-  state.select(selected_index.map(|selected| selected - offset));
+  state.select(selection.selected.map(|selected| selected - offset));
 
   // Only build the visible window of rows (selection-anchored via `offset`),
   // not the whole list every frame — playlist/song lists can be very long and
@@ -3592,8 +3594,8 @@ fn draw_selectable_list<S>(
         },
       );
       let is_hovered = app.user_config.behavior.enable_animations
-        && hovered_index == Some(i)
-        && selected_index != Some(i);
+        && selection.hovered == Some(i)
+        && selection.selected != Some(i);
       let item = if is_load_more {
         ListItem::new(Span::styled(
           fit.clone(),
@@ -3960,12 +3962,10 @@ fn draw_table(
   layout_chunk: Rect,
   table_layout: (&str, &TableHeader), // (title, header colums)
   items: &[TableItem], // The nested vector must have the same length as the `header_columns`
-  selected_index: usize,
-  highlight_state: (bool, bool),
-  view_offset: Option<usize>,
+  selection: TableSelection,
 ) {
   let selected_style =
-    get_color(highlight_state, app.user_config.theme).add_modifier(Modifier::BOLD);
+    get_color(selection.highlight, app.user_config.theme).add_modifier(Modifier::BOLD);
 
   let track_playing_index = app.current_playback_context.to_owned().and_then(|ctx| {
     ctx.item.and_then(|item| match item {
@@ -3993,12 +3993,13 @@ fn draw_table(
   // (capped at the list end) so the wheel can always scroll back up. Keeping
   // the selection visible is the job of the keyboard handlers, which nudge
   // scroll_offset when the selection crosses the viewport edge.
-  let offset = match view_offset {
+  let offset = match selection.offset {
     Some(scrolled) => scrolled.min(items.len().saturating_sub(viewport)),
     // Keep the selection (and a load-more row pushed as the last item) visible
     // at the bottom row; the window is items[selected - viewport + 1 ..= selected].
     // table_row_index in mouse.rs maps clicks back through the same +1.
-    None => selected_index
+    None => selection
+      .selected
       .checked_sub(viewport)
       .map(|o| o + 1)
       .unwrap_or(0)
@@ -4023,7 +4024,7 @@ fn draw_table(
               track_playing_index.and_then(|idx| idx.checked_sub(offset))
             {
               if i == track_playing_offset_index {
-                formatted_row[title_idx] = format!("▶ {}", &formatted_row[title_idx]);
+                formatted_row[title_idx] = format!("▶ {}", formatted_row[title_idx]);
                 style = Style::default()
                   .fg(app.user_config.theme.active)
                   .add_modifier(Modifier::BOLD);
@@ -4037,7 +4038,7 @@ fn draw_table(
               track_playing_index.and_then(|idx| idx.checked_sub(offset))
             {
               if i == track_playing_offset_index {
-                formatted_row[name_idx] = format!("▶ {}", &formatted_row[name_idx]);
+                formatted_row[name_idx] = format!("▶ {}", formatted_row[name_idx]);
                 style = Style::default()
                   .fg(app.user_config.theme.active)
                   .add_modifier(Modifier::BOLD);
@@ -4058,10 +4059,10 @@ fn draw_table(
 
       let is_hovered = app.user_config.behavior.enable_animations
         && app.hovered_list_index == Some(offset + i)
-        && !(app.selection_engaged && selected_index == offset + i);
+        && !(app.selection_engaged && selection.selected == offset + i);
 
       // Next check if the item is under selection.
-      if app.selection_engaged && Some(i) == selected_index.checked_sub(offset) {
+      if app.selection_engaged && Some(i) == selection.selected.checked_sub(offset) {
         style = selected_style;
       }
 
@@ -4203,9 +4204,9 @@ fn draw_table(
         .style(Style::default().fg(app.user_config.theme.text))
         .title(Span::styled(
           title,
-          get_color(highlight_state, app.user_config.theme),
+          get_color(selection.highlight, app.user_config.theme),
         ))
-        .border_style(get_color(highlight_state, app.user_config.theme)),
+        .border_style(get_color(selection.highlight, app.user_config.theme)),
     )
     .style(Style::default().fg(app.user_config.theme.text));
   f.render_widget(table, layout_chunk);
@@ -4327,9 +4328,11 @@ mod tests {
           Rect::new(0, 0, w, h),
           ("Test", &header),
           &items,
-          selected,
-          (true, false),
-          view_offset,
+          TableSelection {
+            selected,
+            highlight: (true, false),
+            offset: view_offset,
+          },
         );
       })
       .unwrap();

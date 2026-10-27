@@ -30,11 +30,5 @@ client.yml
 # Codemap generated outputs (state modules.json/config.json IS tracked)
 .codemap/codemap.html
 .codemap/codemap.md
-# Editor / temp junk
-*.swp
-*.swo
-tags
-.idea
-.vscode
 # Vendored crate build output (regenerable, never commit)
 /vendor/rspotify-model/target/

@@ -29,6 +29,7 @@ use std::{
   fs,
   path::PathBuf,
   sync::Arc,
+  sync::OnceLock,
   time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::Mutex;
@@ -184,26 +185,16 @@ fn playlist_page_contains(page: &Page<PlaylistItem>, uri: &str) -> bool {
     .any(|item| playlist_item_uri(item).as_deref() == Some(uri))
 }
 
-/// Track relinking: with `Market::FromToken` Spotify returns the playable
-/// relinked `id`, but saves/removes must use the original id (`linked_from`).
-/// `linked_from` is deprecated upstream (Spotify removed the field); the
-/// fallback to `id` then applies, which is already the relinked id.
-#[allow(deprecated)]
+/// Canonical track id. `linked_from` was removed upstream (always `None`),
+/// so the relink fallback below is the plain id.
+// Intentionally kept: the only callers are the unwired `handlers/*` WIP paths.
+// Do not delete as dead code; wire or remove with that work.
 pub(crate) fn original_track_id(t: &FullTrack) -> String {
-  t.linked_from
-    .as_ref()
-    .and_then(|l| l.id.as_ref())
-    .map(|i| i.to_string())
-    .unwrap_or_else(|| t.id.as_ref().map(|i| i.to_string()).unwrap_or_default())
+  t.id.as_ref().map(|i| i.to_string()).unwrap_or_default()
 }
 
-#[allow(deprecated)]
 pub(crate) fn original_simplified_track_id(t: &SimplifiedTrack) -> String {
-  t.linked_from
-    .as_ref()
-    .and_then(|l| l.id.as_ref())
-    .map(|i| i.to_string())
-    .unwrap_or_else(|| t.id.as_ref().map(|i| i.to_string()).unwrap_or_default())
+  t.id.as_ref().map(|i| i.to_string()).unwrap_or_default()
 }
 
 /// Unplayable in the user's market — skip before uris-playback/queue.
@@ -236,7 +227,7 @@ fn merge_page<T: serde::de::DeserializeOwned + Clone>(
   let mut items = old.map(|p| p.items.clone()).unwrap_or_default();
   let mut seen = items
     .iter()
-    .map(|item| key(item))
+    .map(&key)
     .collect::<std::collections::HashSet<_>>();
   for item in new.items {
     if seen.insert(key(&item)) {
@@ -380,6 +371,9 @@ pub struct Network<'a> {
   api_backoff_until: Option<Instant>,
   // Bare id of the now-playing track the last heart check ran for; the 5s
   // playback poll only re-checks when the song actually changed.
+  // When the last control reconcile ran. Rapid next/prev spam skips the
+  // confirm GET if one ran <500ms ago; the periodic poll is the backstop.
+  last_reconcile: Instant,
   last_heart_check: Option<String>,
   // Playlists probed by the once-per-launch background version check
   // (reconcile). In-memory only, so every sptune start re-checks.
@@ -499,7 +493,7 @@ impl SavedState {
       {
         if let (Some(playlists), Some(index)) = (&app.playlists, app.selected_playlist_index) {
           if let Some(playlist) = playlists.items.get(index) {
-            page = Some(format!("playlist:{}", playlist.id.to_string()));
+            page = Some(format!("playlist:{}", playlist.id));
           }
         }
       }
@@ -706,6 +700,22 @@ pub const API_BURST: f64 = 10.0;
 const SAVED_CHECK_TTL: Duration = Duration::from_secs(300);
 // Max page size Spotify allows on paged endpoints (playlist items, saved
 // tracks/albums/shows, etc.). One request should always ask for it.
+//
+// Shared HTTP client: one connection pool for all ad-hoc Web API calls
+// (oEmbed, lyrics, credits) so repeat requests skip TCP+TLS handshakes.
+static SHARED_HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+
+pub(crate) fn shared_http_client() -> reqwest::Client {
+  SHARED_HTTP
+    .get_or_init(|| {
+      reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("reqwest client with timeout builds")
+    })
+    .clone()
+}
+
 pub const API_MAX_LIMIT: u32 = 50;
 // Search is the exception: Spotify cut its limit cap to 10 (Feb 2026).
 const SEARCH_MAX_LIMIT: u32 = 10;
@@ -725,15 +735,11 @@ fn apply_saved_flags(set: &mut HashSet<String>, ids: &[String], is_saved: &[bool
   for (i, id) in ids.iter().enumerate() {
     match is_saved.get(i) {
       Some(true) => {
-        if set.insert(id.clone()) {
-          changed = true;
-        }
+        changed |= set.insert(id.clone());
       }
       // The song is not liked, so check if it should be removed.
       Some(false) => {
-        if set.remove(id) {
-          changed = true;
-        }
+        changed |= set.remove(id);
       }
       None => {}
     }
@@ -758,6 +764,7 @@ impl<'a> Network<'a> {
       tokens: API_BURST,
       last_refill: Instant::now(),
       api_backoff_until: None,
+      last_reconcile: Instant::now(),
       last_heart_check: None,
       probed_playlists: HashSet::new(),
     }
@@ -787,7 +794,6 @@ impl<'a> Network<'a> {
     }
   }
 
-  #[allow(clippy::cognitive_complexity)]
   pub async fn handle_network_event(&mut self, io_event: IoEvent) {
     let debug = format!("{:?}", io_event);
     let text = match debug.find('(') {
@@ -1250,7 +1256,9 @@ impl<'a> Network<'a> {
     }
     match self.spotify.current_user().await {
       Ok(user) => {
-        self.library_cache.put("profile", &[user.clone()], 1);
+        self
+          .library_cache
+          .put("profile", std::slice::from_ref(&user), 1);
         let mut app = self.app.lock().await;
         app.user = Some(user);
       }
@@ -1339,23 +1347,20 @@ impl<'a> Network<'a> {
     let library_ids = fresh
       .iter()
       .map(|id| LibraryId::Track(TrackId::from_id_or_uri(id).unwrap()));
-    match self.spotify.library_contains(library_ids).await {
-      Ok(is_saved_vec) => {
-        let mut app = self.app.lock().await;
-        // Repaint when the heart set actually changes: the main loop skips
-        // redraws while idle, so without this the late heart data sits in
-        // memory invisible until the next interaction.
-        if apply_saved_flags(&mut app.liked_song_ids_set, &fresh, &is_saved_vec) {
-          app.ui_dirty = true;
-        }
-        for id in &fresh {
-          self.saved_checked.insert(id.clone(), now);
-        }
+    // Best-effort: the heart is cosmetic, and Spotify throttles this
+    // endpoint hard (503s under load). Leave the TTL untouched so the
+    // next playlist open retries instead of showing a dead error screen.
+    if let Ok(is_saved_vec) = self.spotify.library_contains(library_ids).await {
+      let mut app = self.app.lock().await;
+      // Repaint when the heart set actually changes: the main loop skips
+      // redraws while idle, so without this the late heart data sits in
+      // memory invisible until the next interaction.
+      if apply_saved_flags(&mut app.liked_song_ids_set, &fresh, &is_saved_vec) {
+        app.ui_dirty = true;
       }
-      // Best-effort: the heart is cosmetic, and Spotify throttles this
-      // endpoint hard (503s under load). Leave the TTL untouched so the
-      // next playlist open retries instead of showing a dead error screen.
-      Err(_) => {}
+      for id in &fresh {
+        self.saved_checked.insert(id.clone(), now);
+      }
     }
   }
 
@@ -1622,7 +1627,7 @@ impl<'a> Network<'a> {
       "https://open.spotify.com/oembed?url=https://open.spotify.com/playlist/{}",
       playlist_id
     );
-    let resp: serde_json::Value = reqwest::Client::new()
+    let resp: serde_json::Value = shared_http_client()
       .get(&url)
       .send()
       .await?
@@ -2944,6 +2949,31 @@ impl<'a> Network<'a> {
     }
   }
 
+  /// Poll-until-matches: light progress checks so a fast server seek apply
+  /// reconciles in ~250ms instead of a fixed 1000ms floor. Worst case
+  /// (3 misses) the caller still lands its full update at ~750ms.
+  async fn wait_until_position_ms(&self, position_ms: u32) {
+    let target_ms = i64::from(position_ms);
+    for _ in 0..3 {
+      tokio::time::sleep(Duration::from_millis(250)).await;
+      if let Ok(Some(ctx)) = self
+        .spotify
+        .current_playback(
+          None,
+          Some([AdditionalType::Episode, AdditionalType::Track].iter()),
+        )
+        .await
+      {
+        if ctx
+          .progress
+          .is_some_and(|p| (p.num_milliseconds() - target_ms).abs() < 3000)
+        {
+          break;
+        }
+      }
+    }
+  }
+
   async fn seek(&mut self, position_ms: u32) {
     let Some(device_id) = self.effective_device_id().await else {
       self
@@ -2963,15 +2993,28 @@ impl<'a> Network<'a> {
       .await
     {
       Ok(()) => {
-        // Wait between seek and status query.
-        // Without it, the Spotify API may return the old progress.
-        tokio::time::sleep(Duration::from_millis(1000)).await;
+        self.wait_until_position_ms(position_ms).await;
         self.get_current_playback().await;
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
+        // Reconcile: the optimistic seek failed, so refetch server truth.
+        // seek_ms is left intact — a newer queued seek keeps it and runs next.
+        self.get_current_playback().await;
       }
     };
+  }
+
+  /// Trailing-edge reconcile: skips the confirm GET when one ran <500ms
+  /// ago. Rapid next/prev spam converges on the last state anyway; the
+  /// periodic poll is the backstop.
+  async fn reconcile(&mut self) {
+    let now = Instant::now();
+    if now.duration_since(self.last_reconcile) < Duration::from_millis(500) {
+      return;
+    }
+    self.last_reconcile = now;
+    self.get_current_playback().await;
   }
 
   async fn next_track(&mut self) {
@@ -2984,7 +3027,7 @@ impl<'a> Network<'a> {
     });
     match self.spotify.next_track(device_id.as_deref()).await {
       Ok(()) => {
-        self.get_current_playback().await;
+        self.reconcile().await;
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -3002,7 +3045,7 @@ impl<'a> Network<'a> {
     });
     match self.spotify.previous_track(device_id.as_deref()).await {
       Ok(()) => {
-        self.get_current_playback().await;
+        self.reconcile().await;
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -3071,10 +3114,13 @@ impl<'a> Network<'a> {
       .await
     {
       Ok(()) => {
-        self.get_current_playback().await;
+        // Trust-Ok: the optimistic flip stands; the periodic poll reconciles.
+        // Saves one GET per pause.
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
+        // Reconcile: the optimistic flip failed, so refetch server truth.
+        self.get_current_playback().await;
       }
     };
   }
@@ -3179,9 +3225,21 @@ impl<'a> Network<'a> {
         if let Some(current_playback_context) = &mut app.current_playback_context {
           current_playback_context.device.volume_percent = Some(volume_percent as u32);
         };
+        // Clear a matching optimistic preview; a newer one (rapid presses) is kept.
+        if app.volume_preview == Some(volume_percent) {
+          app.volume_preview.take();
+        }
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
+        // Reconcile back to server truth: drop a matching optimistic preview so the
+        // bar falls back to the context volume, then refetch. A newer preview is kept.
+        let mut app = self.app.lock().await;
+        if app.volume_preview == Some(volume_percent) {
+          app.volume_preview.take();
+        }
+        drop(app);
+        self.get_current_playback().await;
       }
     };
   }
@@ -3299,15 +3357,7 @@ impl<'a> Network<'a> {
         let eps_new = p
           .items
           .iter()
-          .filter(|al| {
-            #[allow(deprecated)]
-            let is_ep = al
-              .album_group
-              .as_deref()
-              .map(|g| g.eq_ignore_ascii_case("ep"))
-              .unwrap_or(false);
-            al.name.to_lowercase().contains("ep") || is_ep
-          })
+          .filter(|al| al.name.to_lowercase().contains("ep"))
           .cloned()
           .collect::<Vec<_>>();
         a.eps.items.extend(eps_new);
@@ -3398,7 +3448,7 @@ impl<'a> Network<'a> {
             if track
               .id
               .as_ref()
-              .map_or(true, |id| seen.insert(id.to_string()))
+              .is_none_or(|id| seen.insert(id.to_string()))
             {
               artist.top_tracks.push(track);
             }
@@ -3910,13 +3960,9 @@ impl<'a> Network<'a> {
     }
   }
 
-  #[allow(deprecated)]
   async fn bearer_token(&self) -> Option<String> {
     match self.spotify.token.lock().await {
-      Ok(guard) => match &*guard {
-        Some(t) => Some(t.access_token.clone()),
-        None => None,
-      },
+      Ok(guard) => (*guard).as_ref().map(|t| t.access_token.clone()),
       Err(_) => None,
     }
   }
@@ -3984,7 +4030,7 @@ impl<'a> Network<'a> {
         .query_pairs_mut()
         .append_pair("duration", &format!("{}", ms / 1000));
     }
-    let res = reqwest::Client::new().get(url).send().await?;
+    let res = shared_http_client().get(url).send().await?;
     if res.status() == reqwest::StatusCode::NOT_FOUND {
       return Ok(None);
     }
@@ -4027,7 +4073,7 @@ impl<'a> Network<'a> {
       return;
     };
     let url = format!("https://spclient.wg.spotify.com/track-credits/v1/track/{track_id}");
-    let response = reqwest::Client::new()
+    let response = shared_http_client()
       .get(&url)
       .header("Authorization", format!("Bearer {token}"))
       .send()
@@ -4146,22 +4192,37 @@ impl<'a> Network<'a> {
 
   /// Full sequential refetch of the playlists list; see `refetch_saved_tracks`.
   async fn refetch_playlists(&mut self) {
-    let mut all: Vec<SimplifiedPlaylist> = Vec::new();
-    loop {
-      let page = match self
-        .spotify
-        .current_user_playlists_manual(Some(API_MAX_LIMIT), Some(all.len() as u32))
-        .await
-      {
-        Ok(p) => p,
-        Err(_) => return,
-      };
-      all.extend(page.items);
-      if all.len() as u32 >= page.total {
-        self.library_cache.put("playlists", &all, page.total);
-        return;
+    // First page gives the total; remaining offsets are known upfront,
+    // so fetch them concurrently instead of one RTT per page.
+    let first = match self
+      .spotify
+      .current_user_playlists_manual(Some(API_MAX_LIMIT), Some(0))
+      .await
+    {
+      Ok(p) => p,
+      Err(_) => return,
+    };
+    let total = first.total;
+    let mut all = first.items;
+    if (all.len() as u32) < total {
+      let rest = futures::future::join_all(
+        (all.len() as u32..total)
+          .step_by(API_MAX_LIMIT as usize)
+          .map(|offset| {
+            self
+              .spotify
+              .current_user_playlists_manual(Some(API_MAX_LIMIT), Some(offset))
+          }),
+      )
+      .await;
+      for page in rest {
+        match page {
+          Ok(p) => all.extend(p.items),
+          Err(_) => return,
+        }
       }
     }
+    self.library_cache.put("playlists", &all, total);
   }
 
   async fn get_recently_played(&mut self) {
@@ -4224,7 +4285,7 @@ impl<'a> Network<'a> {
               .track
               .id
               .as_ref()
-              .map_or(false, |id| !seen.insert(id.to_string()));
+              .is_some_and(|id| !seen.insert(id.to_string()));
             if !dup {
               existing.items.push(item);
             }
@@ -4491,11 +4552,7 @@ impl<'a> Network<'a> {
         let mut app = self.app.lock().await;
         // Keep the sidebar count in sync without refetching the whole library.
         if let Some(page) = app.playlists.as_mut() {
-          if let Some(pl) = page
-            .items
-            .iter_mut()
-            .find(|p| p.id.id().to_string() == playlist_id_str)
-          {
+          if let Some(pl) = page.items.iter_mut().find(|p| p.id.id() == playlist_id_str) {
             pl.items.total = pl.items.total.saturating_add(1);
           }
         }
@@ -4625,11 +4682,7 @@ impl<'a> Network<'a> {
           .playlist_cache
           .remove_item(&playlist_id_str, &uri, result.snapshot_id);
         if let Some(page) = app.playlists.as_mut() {
-          if let Some(pl) = page
-            .items
-            .iter_mut()
-            .find(|p| p.id.id().to_string() == playlist_id_str)
-          {
+          if let Some(pl) = page.items.iter_mut().find(|p| p.id.id() == playlist_id_str) {
             pl.items.total = pl.items.total.saturating_sub(1);
           }
         }
@@ -4705,8 +4758,7 @@ fn parse_lrc(lrc: &str) -> Vec<(u128, String)> {
   for line in lrc.lines() {
     let mut rest = line;
     let mut first_time: Option<u128> = None;
-    loop {
-      let Some(open) = rest.find('[') else { break };
+    while let Some(open) = rest.find('[') {
       let Some(close) = rest[open + 1..].find(']') else {
         break;
       };
@@ -4832,7 +4884,7 @@ mod tests {
       },
       offset,
       previous: if offset > 0 {
-        Some(format!("?offset=0"))
+        Some("?offset=0".to_string())
       } else {
         None
       },

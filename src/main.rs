@@ -571,6 +571,14 @@ of the app. Beware that this comes at a CPU cost!",
     // GetCurrentPlayback goes first so AutoRestore (and the first paint)
     // can read the live state instead of paying a second fetch.
     let _ = sync_io_tx.send(IoEvent::GetCurrentPlayback);
+    // Pre-warm the shared ad-hoc HTTP pool (devices/lyrics/credits) so the
+    // first real use skips TCP+TLS. Fire-and-forget; the 401 warms the pipe.
+    tokio::spawn(async {
+      let _ = crate::backend::shared_http_client()
+        .get("https://api.spotify.com/v1/")
+        .send()
+        .await;
+    });
     if let Some(saved) = SavedState::load() {
       if user_config.behavior.restore_settings {
         if saved.volume.is_some()
@@ -805,7 +813,7 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
       margin,
       margin,
       app.size.width.saturating_sub(margin * 2),
-      tui::layout::header_height(&app),
+      tui::layout::HEADER_HEIGHT,
     );
     let search_box = tui::layout::search_box_rect(&app, input_box);
     let w = terminal.backend_mut();

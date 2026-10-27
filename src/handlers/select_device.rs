@@ -90,6 +90,11 @@ pub fn handler(key: Key, app: &mut App) {
             // the transfer-success pop).
             app.pop_navigation_stack();
           } else {
+            // Optimistic: show the target device now; the trailing fetch
+            // after transfer reconciles if the transfer fails.
+            if let Some(ctx) = app.current_playback_context.as_mut() {
+              ctx.device = device.clone();
+            }
             app.dispatch(IoEvent::TransferPlaybackToDevice(
               device.id.clone().unwrap_or_default(),
             ));
@@ -179,6 +184,14 @@ mod tests {
     assert_eq!(
       dispatched,
       vec![IoEvent::TransferPlaybackToDevice("d-other".to_string())]
+    );
+    // Optimistic: the context already shows the target device.
+    assert_eq!(
+      app
+        .current_playback_context
+        .as_ref()
+        .and_then(|c| c.device.id.clone()),
+      Some("d-other".to_string())
     );
   }
 

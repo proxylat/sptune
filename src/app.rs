@@ -102,7 +102,7 @@ pub fn sidebar_max_content_len(app: &App) -> usize {
 // pointer) or grown (new length), so key on both and recompute only then.
 thread_local! {
   static PLAYLIST_MAX_WIDTH: std::cell::RefCell<(usize, usize, usize)> =
-    std::cell::RefCell::new((0, 0, 0)); // (page_ptr, len, cached_width)
+    const { std::cell::RefCell::new((0, 0, 0)) }; // (page_ptr, len, cached_width)
 }
 
 fn cached_playlist_max_width(app: &App) -> usize {
@@ -171,6 +171,12 @@ impl<T> ScrollableResultPages<T> {
     self.pages.push(new_pages);
     // Whenever a new page is added, set the active index to the end of the vector
     self.index = self.pages.len() - 1;
+  }
+}
+
+impl<T> Default for ScrollableResultPages<T> {
+  fn default() -> Self {
+    Self::new()
   }
 }
 
@@ -990,7 +996,7 @@ impl App {
           .as_millis()
       } else {
         0u128
-      } + u128::from(progress_ms);
+      } + progress_ms;
 
       let duration_ms: u128 = match item {
         PlayableItem::Track(track) => track.duration.num_milliseconds() as u128,
@@ -1001,7 +1007,7 @@ impl App {
       let new_progress = if elapsed < duration_ms {
         elapsed
       } else {
-        duration_ms.into()
+        duration_ms
       };
       let prev = self.song_progress_ms;
       self.song_progress_ms = new_progress;
@@ -1029,7 +1035,7 @@ impl App {
       };
 
       let new_progress = min(
-        old_progress as u128 + self.user_config.behavior.seek_milliseconds as u128,
+        old_progress + self.user_config.behavior.seek_milliseconds as u128,
         duration_ms,
       );
 
@@ -1042,23 +1048,26 @@ impl App {
       Some(seek_ms) => seek_ms,
       None => self.song_progress_ms,
     };
-    let new_progress = if old_progress as u32 > self.user_config.behavior.seek_milliseconds {
-      old_progress as u32 - self.user_config.behavior.seek_milliseconds
-    } else {
-      0u32
-    };
-    self.seek_to(new_progress as u32);
+    let new_progress =
+      (old_progress as u32).saturating_sub(self.user_config.behavior.seek_milliseconds);
+    self.seek_to(new_progress);
   }
 
   pub fn increase_volume(&mut self) {
     if let Some(context) = self.current_playback_context.clone() {
-      let current_volume = context.device.volume_percent.unwrap_or(0) as u8;
+      // Chain on the optimistic preview so rapid presses step from the
+      // pending value instead of collapsing onto the stale server snapshot.
+      let current_volume = self
+        .volume_preview
+        .unwrap_or(context.device.volume_percent.unwrap_or(0) as u8);
       let next_volume = min(
         current_volume + self.user_config.behavior.volume_increment,
         100,
       );
 
       if next_volume != current_volume {
+        // Optimistic preview so the bar moves immediately; cleared on API response.
+        self.volume_preview = Some(next_volume);
         self.dispatch(IoEvent::ChangeVolume(next_volume));
       }
     }
@@ -1066,13 +1075,20 @@ impl App {
 
   pub fn decrease_volume(&mut self) {
     if let Some(context) = self.current_playback_context.clone() {
-      let current_volume = context.device.volume_percent.unwrap_or(0) as i8;
+      // Chain on the optimistic preview so rapid presses step from the
+      // pending value instead of collapsing onto the stale server snapshot.
+      let current_volume = self
+        .volume_preview
+        .map(|v| v as i8)
+        .unwrap_or(context.device.volume_percent.unwrap_or(0) as i8);
       let next_volume = max(
         current_volume - self.user_config.behavior.volume_increment as i8,
         0,
       );
 
       if next_volume != current_volume {
+        // Optimistic preview so the bar moves immediately; cleared on API response.
+        self.volume_preview = Some(next_volume as u8);
         self.dispatch(IoEvent::ChangeVolume(next_volume as u8));
       }
     }
@@ -1084,10 +1100,19 @@ impl App {
   }
 
   pub fn toggle_playback(&mut self) {
-    if let Some(CurrentPlaybackContext {
-      is_playing: true, ..
-    }) = &self.current_playback_context
-    {
+    let is_playing = matches!(
+      self.current_playback_context,
+      Some(CurrentPlaybackContext {
+        is_playing: true,
+        ..
+      })
+    );
+    // Optimistic update: flip the playback state immediately so the UI reacts
+    // without waiting for the API round-trip. The playback response reconciles.
+    if let Some(context) = self.current_playback_context.as_mut() {
+      context.is_playing = !is_playing;
+    }
+    if is_playing {
       self.dispatch(IoEvent::PausePlayback);
     } else {
       // When no offset or uris are passed, spotify will resume current playback
@@ -2061,21 +2086,13 @@ impl App {
   fn derive_eps_from_singles(&mut self) {
     if let Some(artist) = &mut self.artist {
       // SimplifiedAlbum no longer has total_tracks in rspotify 0.16 (removed Feb 2026);
-      // heuristic: name contains EP or album_group single (deprecated) — fallback clone all singles
-      // and filter by name hint. Tracks count unavailable without FullAlbum fetch.
+      // heuristic: name contains EP — fallback clone all singles and filter by name hint.
+      // Tracks count unavailable without FullAlbum fetch.
       let eps_items = artist
         .singles
         .items
         .iter()
-        .filter(|a| {
-          #[allow(deprecated)]
-          let is_ep_group = a
-            .album_group
-            .as_deref()
-            .map(|g| g.eq_ignore_ascii_case("ep"))
-            .unwrap_or(false);
-          a.name.to_lowercase().contains("ep") || is_ep_group
-        })
+        .filter(|a| a.name.to_lowercase().contains("ep"))
         .cloned()
         .collect::<Vec<_>>();
       // If no EP-named items, leave EPs empty (not faking singles as EPs)
@@ -2180,7 +2197,7 @@ impl App {
       .recently_played
       .result
       .as_ref()
-      .map_or(false, |p| p.limit > 0 && p.items.len() >= p.limit as usize)
+      .is_some_and(|p| p.limit > 0 && p.items.len() >= p.limit as usize)
   }
 
   /// Whether the current track-table context has more pages to load
@@ -2260,42 +2277,41 @@ impl App {
         .search_results
         .albums
         .as_ref()
-        .map_or(false, page_has_more),
+        .is_some_and(page_has_more),
       SearchResultBlock::SongSearch => self
         .search_results
         .tracks
         .as_ref()
-        .map_or(false, page_has_more),
+        .is_some_and(page_has_more),
       SearchResultBlock::ArtistSearch => self
         .search_results
         .artists
         .as_ref()
-        .map_or(false, page_has_more),
+        .is_some_and(page_has_more),
       SearchResultBlock::PlaylistSearch => self
         .search_results
         .playlists
         .as_ref()
-        .map_or(false, page_has_more),
+        .is_some_and(page_has_more),
       SearchResultBlock::ShowSearch => self
         .search_results
         .shows
         .as_ref()
-        .map_or(false, page_has_more),
+        .is_some_and(page_has_more),
       SearchResultBlock::Empty => false,
     }
   }
 
   /// Whether the given search block has a page loaded already.
   pub fn search_block_loaded(&self, block: &SearchResultBlock) -> bool {
-    let page = match block {
+    match block {
       SearchResultBlock::AlbumSearch => self.search_results.albums.is_some(),
       SearchResultBlock::SongSearch => self.search_results.tracks.is_some(),
       SearchResultBlock::ArtistSearch => self.search_results.artists.is_some(),
       SearchResultBlock::PlaylistSearch => self.search_results.playlists.is_some(),
       SearchResultBlock::ShowSearch => self.search_results.shows.is_some(),
       SearchResultBlock::Empty => false,
-    };
-    page
+    }
   }
 
   /// Expand the given search tab: mark it selected and fetch its first page
@@ -2634,9 +2650,11 @@ mod tests {
     use std::time::Duration;
 
     // While paused a poll within the slow interval is skipped.
-    let mut app = App::default();
-    app.current_playback_context = Some(paused_playback());
-    app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_millis(6_000);
+    let mut app = App {
+      current_playback_context: Some(paused_playback()),
+      instant_since_last_current_playback_poll: Instant::now() - Duration::from_millis(6_000),
+      ..Default::default()
+    };
     app.update_on_tick();
     assert!(!app.is_fetching_current_playback);
 
@@ -2680,22 +2698,28 @@ mod tests {
 
     // 5s left of 180s, last poll 1.5s ago: base 5s interval would wait,
     // the adaptive 1s interval fires so the next song appears promptly.
-    let mut app = App::default();
-    app.current_playback_context = Some(playing_playback_with_progress(175_000));
-    app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_millis(1_500);
+    let mut app = App {
+      current_playback_context: Some(playing_playback_with_progress(175_000)),
+      instant_since_last_current_playback_poll: Instant::now() - Duration::from_millis(1_500),
+      ..Default::default()
+    };
     app.update_on_tick();
     assert!(app.is_fetching_current_playback);
 
     // Same age poll mid-track: still quiet until the 5s base interval.
-    let mut app = App::default();
-    app.current_playback_context = Some(playing_playback_with_progress(10_000));
-    app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_millis(1_500);
+    let mut app = App {
+      current_playback_context: Some(playing_playback_with_progress(10_000)),
+      instant_since_last_current_playback_poll: Instant::now() - Duration::from_millis(1_500),
+      ..Default::default()
+    };
     app.update_on_tick();
     assert!(!app.is_fetching_current_playback);
 
     // No item (e.g. paused mock): remaining unknown, no adaptive poll.
-    let mut app = App::default();
-    app.current_playback_context = Some(paused_playback());
+    let app = App {
+      current_playback_context: Some(paused_playback()),
+      ..Default::default()
+    };
     assert_eq!(app.playback_remaining_ms(), None);
   }
 
@@ -2706,12 +2730,14 @@ mod tests {
 
     // A click already dispatched the Seek via seek_to; the poll tick must
     // only fetch (the response clears seek_ms), never re-apply the seek.
-    let mut app = App::default();
-    app.current_playback_context = Some(playing_playback_with_progress(10_000));
     let (tx, rx) = std::sync::mpsc::channel();
-    app.io_tx = Some(tx);
-    app.seek_ms = Some(90_000);
-    app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_millis(6_000);
+    let mut app = App {
+      current_playback_context: Some(playing_playback_with_progress(10_000)),
+      io_tx: Some(tx),
+      seek_ms: Some(90_000),
+      instant_since_last_current_playback_poll: Instant::now() - Duration::from_millis(6_000),
+      ..Default::default()
+    };
     app.update_on_tick();
     let dispatched: Vec<IoEvent> = rx.try_iter().collect();
     assert_eq!(dispatched, vec![IoEvent::GetCurrentPlayback]);
@@ -2721,10 +2747,12 @@ mod tests {
   fn repeat_flips_state_optimistically() {
     use crate::backend::IoEvent;
     use rspotify::model::RepeatState;
-    let mut app = App::default();
-    app.current_playback_context = Some(paused_playback());
     let (tx, rx) = std::sync::mpsc::channel();
-    app.io_tx = Some(tx);
+    let mut app = App {
+      current_playback_context: Some(paused_playback()),
+      io_tx: Some(tx),
+      ..Default::default()
+    };
 
     app.repeat();
 
@@ -2739,10 +2767,12 @@ mod tests {
   #[test]
   fn shuffle_toggles_without_smart_step() {
     use crate::backend::IoEvent;
-    let mut app = App::default();
-    app.current_playback_context = Some(paused_playback());
     let (tx, rx) = std::sync::mpsc::channel();
-    app.io_tx = Some(tx);
+    let mut app = App {
+      current_playback_context: Some(paused_playback()),
+      io_tx: Some(tx),
+      ..Default::default()
+    };
 
     // First press: off -> on, plain Shuffle event.
     app.shuffle();
@@ -3144,19 +3174,21 @@ mod tests {
 
   #[test]
   fn viewed_playlist_id_prefers_active_falls_back_to_selected() {
-    let mut app = App::default();
-    app.playlists = Some(rspotify::model::Page {
-      href: String::new(),
-      items: vec![mock_playlist(0), mock_playlist(1)],
-      limit: 2,
-      next: None,
-      offset: 0,
-      previous: None,
-      total: 2,
-    });
+    let mut app = App {
+      playlists: Some(rspotify::model::Page {
+        href: String::new(),
+        items: vec![mock_playlist(0), mock_playlist(1)],
+        limit: 2,
+        next: None,
+        offset: 0,
+        previous: None,
+        total: 2,
+      }),
+      selected_playlist_index: Some(1),
+      ..Default::default()
+    };
     app.track_table.context = Some(TrackTableContext::MyPlaylists);
     // Nothing open yet: selected alone identifies the panel.
-    app.selected_playlist_index = Some(1);
     assert_eq!(app.viewed_playlist_id(), Some("mockplaylist1".to_string()));
     // Active wins once the playlist is opened.
     app.active_playlist_index = Some(0);
@@ -3164,5 +3196,63 @@ mod tests {
     // Other contexts never match.
     app.track_table.context = Some(TrackTableContext::SavedTracks);
     assert_eq!(app.viewed_playlist_id(), None);
+  }
+  #[test]
+  fn toggle_playback_flips_state_optimistically() {
+    let (io_tx, io_rx) = std::sync::mpsc::channel();
+    let mut app = App {
+      current_playback_context: Some(playing_playback_with_progress(0)),
+      io_tx: Some(io_tx),
+      ..Default::default()
+    };
+
+    app.toggle_playback();
+    assert!(matches!(
+      app.current_playback_context,
+      Some(CurrentPlaybackContext {
+        is_playing: false,
+        ..
+      })
+    ));
+    assert!(matches!(io_rx.try_recv(), Ok(IoEvent::PausePlayback)));
+
+    app.toggle_playback();
+    assert!(matches!(
+      app.current_playback_context,
+      Some(CurrentPlaybackContext {
+        is_playing: true,
+        ..
+      })
+    ));
+    assert!(matches!(
+      io_rx.try_recv(),
+      Ok(IoEvent::StartPlayback(None, None, None))
+    ));
+  }
+
+  #[test]
+  fn volume_keys_preview_optimistically_and_chain() {
+    let (io_tx, io_rx) = std::sync::mpsc::channel();
+    let mut app = App {
+      current_playback_context: Some(playing_playback_with_progress(0)),
+      io_tx: Some(io_tx),
+      ..Default::default()
+    };
+    let step = app.user_config.behavior.volume_increment;
+
+    app.increase_volume();
+    assert_eq!(app.volume_preview, Some(50 + step));
+    assert!(matches!(
+      io_rx.try_recv(),
+      Ok(IoEvent::ChangeVolume(v)) if v == 50 + step
+    ));
+
+    // A second press steps from the pending preview, not the stale snapshot.
+    app.increase_volume();
+    assert_eq!(app.volume_preview, Some(50 + step + step));
+    assert!(matches!(
+      io_rx.try_recv(),
+      Ok(IoEvent::ChangeVolume(v)) if v == 50 + step + step
+    ));
   }
 }

@@ -8,10 +8,11 @@ use crate::event::Key;
 use crate::tui::layout;
 use crate::tui::layout::{
   build_playbar_controls, build_playbar_title, gear_click_rect, get_main_layout_margin,
-  header_height, playbar_artist_row, playbar_controls_x, playbar_progress_rect, playbar_song_row,
+  playbar_artist_row, playbar_controls_x, playbar_progress_rect, playbar_song_row,
   playbar_text_click_range, playbar_volume_rect, search_box_rect, song_table_columns,
-  song_table_viewport, sort_column_for, track_table_with_date, PlaybarButton, PLAYBAR_HEART_WIDTH,
-  PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, VOLUME_BAR_LEN, VOLUME_LABEL_LEN,
+  song_table_viewport, sort_column_for, track_table_with_date, PlaybarButton, SongColumnFlags,
+  HEADER_HEIGHT, PLAYBAR_HEART_WIDTH, PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, VOLUME_BAR_LEN,
+  VOLUME_LABEL_LEN,
 };
 use crate::tui::ColumnId;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -787,7 +788,7 @@ fn main_layout(app: &App) -> Option<(Rect, Rect, Option<Rect>)> {
     .direction(Direction::Vertical)
     .constraints(
       [
-        Constraint::Length(header_height(app)),
+        Constraint::Length(HEADER_HEIGHT),
         Constraint::Min(1),
         Constraint::Length(PLAYBAR_HEIGHT),
       ]
@@ -1532,6 +1533,13 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
   }
 }
 
+fn select_library_index(app: &mut App, index: usize) -> bool {
+  app.library.selected_index = index;
+  app.sidebar_latched_block = Some(ActiveBlock::Library);
+  app.set_current_route_state(Some(ActiveBlock::Library), None);
+  true
+}
+
 fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
   // The search header is global now, so the sidebar only holds library/playlists
   match (app.show_library, app.show_playlists) {
@@ -1560,10 +1568,7 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           visible_library_options(&app.hidden_library_sections).len(),
           app.library.selected_index,
         ) {
-          app.library.selected_index = index;
-          app.sidebar_latched_block = Some(ActiveBlock::Library);
-          app.set_current_route_state(Some(ActiveBlock::Library), None);
-          return true;
+          return select_library_index(app, index);
         }
       } else if y == playlists.y {
         if x < playlists.x + 3 {
@@ -1604,10 +1609,7 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       }
       if y >= chunk.y + 1 && y < chunk.y + chunk.height {
         if let Some(index) = list_row_index(y, chunk, count, app.library.selected_index) {
-          app.library.selected_index = index;
-          app.sidebar_latched_block = Some(ActiveBlock::Library);
-          app.set_current_route_state(Some(ActiveBlock::Library), None);
-          return true;
+          return select_library_index(app, index);
         }
       }
     }
@@ -1782,13 +1784,7 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
             );
           let columns = song_table_columns(
             chunk.width.saturating_sub(2),
-            with_date,
-            b.show_album_column,
-            b.show_artist_column,
-            b.show_length_column,
-            b.show_date_added_column,
-            show_remove,
-            false,
+            SongColumnFlags::for_view(b, with_date, show_remove, false),
           );
           if let Some(x_in) = x.checked_sub(chunk.x + 1) {
             if let Some((column, _, _)) = columns
@@ -2220,13 +2216,7 @@ fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       let b = &app.user_config.behavior;
       let columns = song_table_columns(
         list_rect.width.saturating_sub(2),
-        true,
-        b.show_album_column,
-        b.show_artist_column,
-        b.show_length_column,
-        b.show_date_added_column,
-        false,
-        true,
+        SongColumnFlags::for_view(b, true, false, true),
       );
       let (col_x, col_w) = columns
         .iter()
@@ -2362,13 +2352,7 @@ fn handle_table_header_click(x: u16, chunk: Rect, app: &mut App) {
     );
   let columns = song_table_columns(
     chunk.width.saturating_sub(2),
-    with_date,
-    b.show_album_column,
-    b.show_artist_column,
-    b.show_length_column,
-    b.show_date_added_column,
-    show_remove,
-    false,
+    SongColumnFlags::for_view(b, with_date, show_remove, false),
   );
   let Some(x_in) = x.checked_sub(chunk.x + 1) else {
     return;

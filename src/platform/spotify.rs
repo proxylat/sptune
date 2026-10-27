@@ -100,8 +100,8 @@ fn handled_registry() -> &'static std::sync::Mutex<std::collections::HashSet<u32
 /// 2. every other child is suspended (and trimmed when enabled) — EXCEPT the
 ///    NetworkService utility process, which is never suspended and never
 ///    trimmed.
-/// Safe to call repeatedly — late-spawning children get caught on a later
-/// pass, already-handled ones are skipped. Returns how many pids were touched.
+///    Safe to call repeatedly — late-spawning children get caught on a later
+///    pass, already-handled ones are skipped. Returns how many pids were touched.
 pub fn sweep_processes(root: u32, do_suspend: bool, do_trim: bool) -> usize {
   let is_network = crate::platform::chromium_flags::is_network_service;
   let mut registry = handled_registry().lock().unwrap();
@@ -155,7 +155,7 @@ fn kill_process(pid: u32) {
 fn descendants(root: u32) -> Vec<(u32, String)> {
   #[cfg(target_os = "linux")]
   {
-    return crate::platform::linux::descendants_of(root);
+    crate::platform::linux::descendants_of(root)
   }
   #[cfg(windows)]
   {
@@ -173,7 +173,7 @@ fn descendants(root: u32) -> Vec<(u32, String)> {
 pub fn find_root_pid() -> Option<u32> {
   #[cfg(target_os = "linux")]
   {
-    return crate::platform::linux::find_root_pid();
+    crate::platform::linux::find_root_pid()
   }
   #[cfg(windows)]
   {
@@ -214,7 +214,6 @@ pub fn kill_all_spotify() {
   #[cfg(target_os = "linux")]
   {
     crate::platform::linux::kill_all();
-    return;
   }
   #[cfg(windows)]
   {

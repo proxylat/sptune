@@ -3,7 +3,7 @@ use super::super::app::{
 };
 use crate::app::{TrackSortColumn, TrackTableContext};
 use crate::tui::ColumnId;
-use crate::user_config::Theme;
+use crate::user_config::{BehaviorConfig, Theme};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use rspotify::model::artist::SimplifiedArtist;
@@ -120,40 +120,6 @@ pub fn playbar_progress_rect(playbar: Rect) -> Option<Rect> {
   Some(Rect::new(bar_x, row.y, bar_len, 1))
 }
 
-// Geometry of the clickable settings section at the top of the '?' menu,
-// shared between the drawer and the mouse hit-test.
-#[allow(dead_code)]
-pub fn settings_section_rect(area: Rect) -> Rect {
-  Layout::default()
-    .direction(Direction::Vertical)
-    .constraints(
-      [
-        Constraint::Length(SETTINGS_ROW_COUNT + 2),
-        Constraint::Min(1),
-      ]
-      .as_ref(),
-    )
-    .margin(2)
-    .split(area)[0]
-}
-
-// Geometry of the shortcuts table below the settings rows, shared between
-// the drawer, the mouse hit-test and the scrollbar.
-#[allow(dead_code)]
-pub fn shortcuts_table_rect(area: Rect) -> Rect {
-  Layout::default()
-    .direction(Direction::Vertical)
-    .constraints(
-      [
-        Constraint::Length(SETTINGS_ROW_COUNT + 2),
-        Constraint::Min(1),
-      ]
-      .as_ref(),
-    )
-    .margin(2)
-    .split(area)[1]
-}
-
 // Visible slice of the header search input that keeps the cursor in view.
 // Returns (visible_text, cursor_offset_in_visible).
 pub fn search_input_visible(input: &str, cursor: usize, viewport: usize) -> (String, usize) {
@@ -195,9 +161,7 @@ pub fn search_input_visible(input: &str, cursor: usize, viewport: usize) -> (Str
 }
 
 // Header height: tall enough for the 5-line figlet banner in every mode.
-pub fn header_height(_app: &App) -> u16 {
-  5
-}
+pub const HEADER_HEIGHT: u16 = 5;
 
 // Height of the song-table viewport (rows visible between header and playbar,
 // minus the table padding the drawer subtracts). Shared by the drawer, the
@@ -211,7 +175,7 @@ pub fn song_table_viewport(app: &App) -> usize {
   app
     .size
     .height
-    .saturating_sub(header_height(app))
+    .saturating_sub(HEADER_HEIGHT)
     .saturating_sub(PLAYBAR_HEIGHT)
     .saturating_sub(2 * margin)
     .saturating_sub(3) as usize
@@ -381,13 +345,13 @@ pub fn artist_layout(chunk: Rect, expanded: ArtistBlock) -> (Rect, Vec<(ArtistBl
     (ArtistBlock::AppearsOn, "Featuring"),
   ];
   let n = tabs.len() as u16;
-  let cell_w = if n > 0 { chunk.width / n } else { chunk.width };
+  let cell_w = chunk.width.checked_div(n).unwrap_or(chunk.width);
   let tab_cells = tabs
     .iter()
     .enumerate()
     .map(|(i, (block, _))| {
       (
-        block.clone(),
+        *block,
         Rect {
           x: chunk.x + (i as u16) * cell_w,
           y: chunk.y,
@@ -632,58 +596,74 @@ impl ListScroll {
   }
 }
 
+/// Count/viewport/offset triple shared by every scrollable list. The
+/// viewport is the visible height minus the list's own chrome (borders,
+/// tabs, filter rows); `index`/`view_mode` still vary per list, so callers
+/// override them with struct-update syntax.
+fn scroll_parts(count: usize, height: u16, pad: u16, offset: usize) -> ListScroll {
+  ListScroll {
+    count,
+    viewport: height.saturating_sub(pad) as usize,
+    view_mode: false,
+    index: 0,
+    offset,
+  }
+}
+
 /// Single source of truth for (count, viewport, index/offset) of every
 /// scrollable list. `rect` is where the list is drawn; the viewport derives
-/// from it (tables reserve a header row + selection rows, selectable lists
-/// only the title).
+/// from it via [`scroll_parts`] (tables reserve a header row + selection
+/// rows, selectable lists only the title).
 pub fn list_scroll(app: &App, block: ActiveBlock, rect: Rect) -> Option<ListScroll> {
   let selection = |index: usize, count: usize| ListScroll {
-    count,
-    viewport: rect.height.saturating_sub(5) as usize,
-    view_mode: false,
     index,
-    offset: 0,
+    ..scroll_parts(count, rect.height, 5, 0)
   };
   Some(match block {
     ActiveBlock::HelpMenu => ListScroll {
-      count: app.help_docs_size as usize,
-      viewport: rect.height.saturating_sub(3) as usize,
       view_mode: true,
-      index: 0,
-      offset: app.help_scroll_offset as usize,
+      ..scroll_parts(
+        app.help_docs_size as usize,
+        rect.height,
+        3,
+        app.help_scroll_offset as usize,
+      )
     },
     ActiveBlock::RequestLog => ListScroll {
-      count: app.request_log.len(),
-      viewport: rect.height.saturating_sub(2) as usize,
-      view_mode: false,
       index: app.request_log_index.unwrap_or(0),
-      offset: 0,
+      ..scroll_parts(app.request_log.len(), rect.height, 2, 0)
     },
     ActiveBlock::Library => ListScroll {
-      count: visible_library_options(&app.hidden_library_sections).len(),
-      viewport: rect.height.saturating_sub(2) as usize,
-      view_mode: false,
       index: app.library.selected_index,
-      offset: 0,
+      ..scroll_parts(
+        visible_library_options(&app.hidden_library_sections).len(),
+        rect.height,
+        2,
+        0,
+      )
     },
     ActiveBlock::MyPlaylists => ListScroll {
-      count: app
-        .playlists
-        .as_ref()
-        .map(|playlists| playlists.items.len())
-        .unwrap_or(0),
-      viewport: rect.height.saturating_sub(2) as usize,
-      view_mode: false,
       index: app.selected_playlist_index.unwrap_or(0),
-      offset: 0,
+      ..scroll_parts(
+        app
+          .playlists
+          .as_ref()
+          .map(|playlists| playlists.items.len())
+          .unwrap_or(0),
+        rect.height,
+        2,
+        0,
+      )
     },
     ActiveBlock::TrackTable => ListScroll {
       // The load-more row is part of the drawn table, so it scrolls too.
-      count: app.track_table.tracks.len() + usize::from(app.track_table_has_more()),
-      viewport: rect.height.saturating_sub(3) as usize,
       view_mode: true,
-      index: 0,
-      offset: app.track_table.scroll_offset,
+      ..scroll_parts(
+        app.track_table.tracks.len() + usize::from(app.track_table_has_more()),
+        rect.height,
+        3,
+        app.track_table.scroll_offset,
+      )
     },
     ActiveBlock::AlbumTracks => match &app.album_table_context {
       AlbumTableContext::Simplified => {
@@ -862,36 +842,59 @@ pub fn track_table_with_date(context: Option<&TrackTableContext>) -> bool {
 
 // Columns of the song table: (ColumnId, x offset from content start, width).
 // Hidden columns (gear menu) are skipped; the remaining widths are unchanged.
-pub fn song_table_columns(
-  width: u16,
-  with_date: bool,
-  show_album: bool,
-  show_artist: bool,
-  show_length: bool,
-  show_date_added: bool,
-  show_remove: bool,
-  show_in_playlist: bool,
-) -> Vec<(ColumnId, u16, u16)> {
+/// Visibility flags for song-table columns. Bundles seven `bool` params
+/// so `song_table_columns` stays under clippy's argument limit.
+pub struct SongColumnFlags {
+  pub show_album: bool,
+  pub show_artist: bool,
+  pub show_length: bool,
+  pub show_date_added: bool,
+  pub show_remove: bool,
+  pub show_in_playlist: bool,
+}
+
+impl SongColumnFlags {
+  /// Flags for a song table. `with_date` is context (only playlist tables
+  /// carry dates); the date column shows only when the context has dates
+  /// *and* the gear menu enables it, so both fold into `show_date_added`.
+  pub fn for_view(
+    behavior: &BehaviorConfig,
+    with_date: bool,
+    show_remove: bool,
+    show_in_playlist: bool,
+  ) -> Self {
+    Self {
+      show_album: behavior.show_album_column,
+      show_artist: behavior.show_artist_column,
+      show_length: behavior.show_length_column,
+      show_date_added: with_date && behavior.show_date_added_column,
+      show_remove,
+      show_in_playlist,
+    }
+  }
+}
+
+pub fn song_table_columns(width: u16, flags: SongColumnFlags) -> Vec<(ColumnId, u16, u16)> {
   // Artist keeps its 30% share; DateAdded and Length are pinned to the
   // right. Title and Album split whatever is left over, with ~40% of the
   // flex going to Album so hiding a column widens the song names instead of
   // leaving a gap.
-  let artist = if show_artist {
+  let artist = if flags.show_artist {
     get_percentage_width(width, 0.3)
   } else {
     0
   };
-  let date = if with_date && show_date_added {
+  let date = if flags.show_date_added {
     get_percentage_width(width, 0.15)
   } else {
     0
   };
-  let length = if show_length {
+  let length = if flags.show_length {
     get_percentage_width(width, 0.1)
   } else {
     0
   };
-  let right = if show_remove || show_in_playlist {
+  let right = if flags.show_remove || flags.show_in_playlist {
     6
   } else {
     0
@@ -902,7 +905,7 @@ pub fn song_table_columns(
   let flex = width
     .saturating_sub(4 + right + artist + date + length)
     .max(1);
-  let album = if show_album {
+  let album = if flags.show_album {
     (flex * 2 / 5).min(flex.saturating_sub(4)).max(1)
   } else {
     0
@@ -913,23 +916,23 @@ pub fn song_table_columns(
   let mut x = 4;
   columns.push((ColumnId::Title, x, title));
   x += title;
-  if show_artist {
+  if flags.show_artist {
     columns.push((ColumnId::Artist, x, artist));
     x += artist;
   }
-  if show_album {
+  if flags.show_album {
     columns.push((ColumnId::Album, x, album));
     x += album;
   }
-  if with_date && show_date_added {
+  if flags.show_date_added {
     columns.push((ColumnId::DateAdded, x, date));
     x += date;
   }
-  if show_length {
+  if flags.show_length {
     columns.push((ColumnId::Length, x, length));
     x += length;
   }
-  if show_remove || show_in_playlist {
+  if flags.show_remove || flags.show_in_playlist {
     columns.push((ColumnId::None, x, 6));
   }
   columns
@@ -949,6 +952,37 @@ pub fn sort_column_for(column: ColumnId) -> Option<TrackSortColumn> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn behavior() -> BehaviorConfig {
+    BehaviorConfig {
+      seek_milliseconds: 5_000,
+      volume_increment: 5,
+      tick_rate_milliseconds: 250,
+      enable_text_emphasis: false,
+      volume_ramp_bar: false,
+      seek_by_typing: false,
+      restore_settings: false,
+      enforce_wide_search_bar: false,
+      liked_icon: String::new(),
+      shuffle_icon: String::new(),
+      repeat_track_icon: String::new(),
+      repeat_context_icon: String::new(),
+      playing_icon: String::new(),
+      paused_icon: String::new(),
+      set_window_title: false,
+      enable_mouse: false,
+      show_album_column: true,
+      show_artist_column: true,
+      show_length_column: true,
+      show_date_added_column: false,
+      enable_add_to_playlist: false,
+      in_playlist_icon: String::new(),
+      enable_remove_from_playlist: false,
+      max_display_length: 0,
+      enable_animations: false,
+      playback_poll_secs: 5,
+    }
+  }
 
   #[test]
   fn scrollbar_geometry_degenerate_rect() {
@@ -977,7 +1011,10 @@ mod tests {
   fn song_table_columns_number_column_is_four_wide() {
     // The leftmost column is the 4-wide number slot; the right-most None
     // column (✓ / ✕) appears only when remove or in-playlist is requested.
-    let no_right = song_table_columns(120, false, true, true, true, false, false, false);
+    let no_right = song_table_columns(
+      120,
+      SongColumnFlags::for_view(&behavior(), false, false, false),
+    );
     let (id, x, w) = no_right[0];
     assert!(matches!(id, ColumnId::Liked));
     assert_eq!(x, 0);
@@ -986,7 +1023,10 @@ mod tests {
       .iter()
       .any(|(id, _, _)| matches!(id, ColumnId::None)));
 
-    let with_playlist = song_table_columns(120, false, true, true, true, false, false, true);
+    let with_playlist = song_table_columns(
+      120,
+      SongColumnFlags::for_view(&behavior(), false, false, true),
+    );
     let (id, x, w) = with_playlist[0];
     assert!(matches!(id, ColumnId::Liked));
     assert_eq!(x, 0);
@@ -995,10 +1035,22 @@ mod tests {
       .iter()
       .any(|(id, _, _)| matches!(id, ColumnId::None)));
 
-    let with_remove = song_table_columns(120, false, true, true, true, false, true, false);
+    let with_remove = song_table_columns(
+      120,
+      SongColumnFlags::for_view(&behavior(), false, true, false),
+    );
     assert!(with_remove
       .iter()
       .any(|(id, _, _)| matches!(id, ColumnId::None)));
+  }
+
+  #[test]
+  fn date_column_needs_context_and_gear() {
+    let mut gear = behavior();
+    gear.show_date_added_column = true;
+    assert!(SongColumnFlags::for_view(&gear, true, false, false).show_date_added);
+    assert!(!SongColumnFlags::for_view(&gear, false, false, false).show_date_added);
+    assert!(!SongColumnFlags::for_view(&behavior(), true, false, false).show_date_added);
   }
 
   #[test]

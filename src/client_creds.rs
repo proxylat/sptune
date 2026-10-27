@@ -199,10 +199,8 @@ impl ClientConfig {
         "You are now ready to authenticate with Spotify!",
       ];
 
-      let mut number = 1;
-      for item in instructions.iter() {
+      for (number, item) in (1..).zip(instructions.iter()) {
         println!("  {}. {}", number, item);
-        number += 1;
       }
 
       let client_id = ClientConfig::get_client_key_from_input("Client ID")?;
@@ -261,10 +259,10 @@ impl ClientConfig {
           client_key.clear();
           num_retries += 1;
           if num_retries == MAX_RETRIES {
-            return Err(Error::from(std::io::Error::new(
-              std::io::ErrorKind::Other,
-              format!("Maximum retries ({}) exceeded.", MAX_RETRIES),
-            )));
+            return Err(Error::from(std::io::Error::other(format!(
+              "Maximum retries ({}) exceeded.",
+              MAX_RETRIES
+            ))));
           }
         }
       };
@@ -278,7 +276,7 @@ impl ClientConfig {
         std::io::ErrorKind::InvalidInput,
         format!("invalid length: {} (must be {})", key.len(), EXPECTED_LEN,),
       )))
-    } else if !key.chars().all(|c| c.is_digit(16)) {
+    } else if !key.chars().all(|c| c.is_ascii_hexdigit()) {
       Err(Error::from(std::io::Error::new(
         std::io::ErrorKind::InvalidInput,
         "invalid character found (must be hex digits)",

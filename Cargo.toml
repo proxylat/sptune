@@ -58,6 +58,14 @@ harness = false
 name = "iai"
 harness = false
 
+[[bench]]
+name = "render"
+harness = false
+
+[[bench]]
+name = "tick"
+harness = false
+
 [[bin]]
 bench = false
 path = "src/main.rs"
