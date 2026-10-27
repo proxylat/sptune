@@ -1304,10 +1304,7 @@ impl<'a> Network<'a> {
           .is_some_and(|ctx| ctx.is_playing);
         app.current_playback_context = Some(c.clone());
         if was_playing != c.is_playing {
-          crate::app::emit_program_status(
-            c.is_playing,
-            &crate::app::now_playing_title(Some(&c)),
-          );
+          crate::app::emit_program_status(c.is_playing, &crate::app::now_playing_title(Some(&c)));
         }
         app.playback_known = true;
         // Sync the real Smart Shuffle flag (undocumented API field); the
@@ -1639,12 +1636,7 @@ impl<'a> Network<'a> {
       "https://open.spotify.com/oembed?url=https://open.spotify.com/playlist/{}",
       playlist_id
     );
-    let resp: serde_json::Value = shared_http_client()
-      .get(&url)
-      .send()
-      .await?
-      .json()
-      .await?;
+    let resp: serde_json::Value = shared_http_client().get(&url).send().await?.json().await?;
     resp["title"]
       .as_str()
       .map(|s| s.to_string())
