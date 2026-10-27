@@ -197,11 +197,11 @@ async fn watch_mpris(io_tx: std::sync::mpsc::Sender<IoEvent>, conn: zbus::Connec
     for bus in &players {
       let Ok(proxy) = MprisPlayerProxy::builder(&conn)
         .destination(bus.as_str())
-        .map(|b| b.build())
+        .build()
+        .await
       else {
         continue;
       };
-      let Ok(proxy) = proxy.await else { continue };
       events.push(
         proxy
           .receive_metadata_changed()
