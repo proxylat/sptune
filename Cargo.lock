@@ -2863,6 +2863,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures",
+ "futures-util",
  "iai-callgrind",
  "ratatui",
  "reqwest 0.13.4",

@@ -30,6 +30,7 @@ tokio = { version = "1.53.1", features = ["full"] }
 reqwest = { version = "0.13", features = ["json"] }
 chrono = "0.4"
 futures = "0.3"
+futures-util = "0.3.32"
 clap_complete = "4.6.5"
 tokio-tungstenite = "0.30.0"
 [target.'cfg(windows)'.dependencies]
