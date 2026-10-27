@@ -1,6 +1,7 @@
 use super::user_config::{theme_presets, Theme, UserConfig};
 use crate::backend::IoEvent;
 use anyhow::anyhow;
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -690,6 +691,43 @@ impl Default for App {
   }
 }
 
+/// "title – artist, artist" for the OSC 7501 status message. Empty when idle.
+pub fn now_playing_title(ctx: Option<&CurrentPlaybackContext>) -> String {
+  let Some(item) = ctx.and_then(|c| c.item.clone()) else {
+    return String::new();
+  };
+  match item {
+    PlayableItem::Track(track) => {
+      let artists = track
+        .artists
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+      format!("{} – {artists}", track.name)
+    }
+    PlayableItem::Episode(episode) => episode.name,
+    PlayableItem::Unknown(_) => String::new(),
+  }
+}
+
+/// OSC 7501 program status: `working` (+ title) while playing, `idle` otherwise.
+/// One escape sequence on stdout; unknown OSCs are ignored, so zero-risk.
+pub fn emit_program_status(playing: bool, title: &str) {
+  use std::io::Write as _;
+  let body = if playing && !title.is_empty() {
+    format!(
+      "state=working:app=sptune:msg={}",
+      base64::engine::general_purpose::STANDARD.encode(title)
+    )
+  } else if playing {
+    "state=working:app=sptune".to_string()
+  } else {
+    "state=idle:app=sptune".to_string()
+  };
+  let _ = write!(std::io::stdout(), "\x1b]7501;{body}\x1b\\");
+}
+
 impl App {
   /// Log a request; repeats coalesce globally, keeping only latest timestamp (no tracetrail) — grouped display in tui.rs shows HH:MM header with counts.
   pub fn log_request(&mut self, text: String) {
@@ -1112,6 +1150,12 @@ impl App {
     if let Some(context) = self.current_playback_context.as_mut() {
       context.is_playing = !is_playing;
     }
+    // OSC 7501 program status: playing→working (with title), else idle.
+    // Terminals that don't know the sequence ignore it: zero-risk.
+    emit_program_status(
+      !is_playing,
+      &now_playing_title(self.current_playback_context.as_ref()),
+    );
     if is_playing {
       self.dispatch(IoEvent::PausePlayback);
     } else {
@@ -3196,6 +3240,14 @@ mod tests {
     // Other contexts never match.
     app.track_table.context = Some(TrackTableContext::SavedTracks);
     assert_eq!(app.viewed_playlist_id(), None);
+  }
+  #[test]
+  fn now_playing_title_formats_track_and_empty() {
+    assert_eq!(
+      now_playing_title(Some(&playing_playback_with_progress(0))),
+      "Mock Song 0 – Mock Artist"
+    );
+    assert_eq!(now_playing_title(None), "");
   }
   #[test]
   fn toggle_playback_flips_state_optimistically() {

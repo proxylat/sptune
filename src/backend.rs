@@ -1296,7 +1296,19 @@ impl<'a> Network<'a> {
     match context {
       Ok(Some(c)) => {
         let mut app = self.app.lock().await;
+        // OSC 7501: emit only on play/pause flips (polls run every few
+        // seconds; the toggle path already emitted the user's own presses).
+        let was_playing = app
+          .current_playback_context
+          .as_ref()
+          .is_some_and(|ctx| ctx.is_playing);
         app.current_playback_context = Some(c.clone());
+        if was_playing != c.is_playing {
+          crate::app::emit_program_status(
+            c.is_playing,
+            &crate::app::now_playing_title(Some(&c)),
+          );
+        }
         app.playback_known = true;
         // Sync the real Smart Shuffle flag (undocumented API field); the
         // merge keeps a locally-enabled Smart while shuffle stays on.
