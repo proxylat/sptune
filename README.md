@@ -1,12 +1,12 @@
 <div align="center">
 
-```text
+<pre>
  ___ _ __ | |_ _   _ _ __   ___ 
 / __| '_ \| __| | | | '_ \ / _ \
 \__ \ |_) | |_| |_| | | | |  __/
 |___| .__/ \__|\__,_|_| |_|\___|
     |_|                         
-```
+</pre>
 
 **A Spotify client for people who live in the terminal.**
 

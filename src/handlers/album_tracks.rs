@@ -1,7 +1,7 @@
-use super::common_key_events;
+use super::{common_key_events, original_simplified_track_id};
 use crate::{
   app::{AlbumTableContext, App},
-  backend::{original_simplified_track_id, IoEvent},
+  backend::IoEvent,
   event::Key,
 };
 use rspotify::model::Id;

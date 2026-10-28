@@ -1,8 +1,9 @@
+use super::is_unplayable;
 use super::{
   super::app::{ActiveBlock, App, DialogContext, RouteId, SearchResultBlock, TrackTableContext},
   common_key_events,
 };
-use crate::backend::{is_unplayable, IoEvent};
+use crate::backend::IoEvent;
 use crate::event::Key;
 use rspotify::model::Id;
 

@@ -15,8 +15,8 @@ use rspotify::{
   model::{
     AdditionalType, AlbumId, AlbumType, ArtistId, EpisodeId, FullArtist, FullTrack, Id, LibraryId,
     Market, Offset, Page, PlayContextId, PlayableId, PlayableItem, PlaylistId, PlaylistItem,
-    PrivateUser, RepeatState, RestrictionReason, SavedAlbum, SavedTrack, SearchResult, SearchType,
-    Show, ShowId, SimplifiedAlbum, SimplifiedPlaylist, SimplifiedShow, SimplifiedTrack, Token,
+    PrivateUser, RepeatState, SavedAlbum, SavedTrack, SearchResult, SearchType,
+    Show, ShowId, SimplifiedAlbum, SimplifiedPlaylist, SimplifiedShow, Token,
     TrackId, UserId,
   },
   AuthCodePkceSpotify, Config, Credentials, OAuth,
@@ -183,27 +183,6 @@ fn playlist_page_contains(page: &Page<PlaylistItem>, uri: &str) -> bool {
     .items
     .iter()
     .any(|item| playlist_item_uri(item).as_deref() == Some(uri))
-}
-
-/// Canonical track id. `linked_from` was removed upstream (always `None`),
-/// so the relink fallback below is the plain id.
-// Intentionally kept: the only callers are the unwired `handlers/*` WIP paths.
-// Do not delete as dead code; wire or remove with that work.
-pub(crate) fn original_track_id(t: &FullTrack) -> String {
-  t.id.as_ref().map(|i| i.to_string()).unwrap_or_default()
-}
-
-pub(crate) fn original_simplified_track_id(t: &SimplifiedTrack) -> String {
-  t.id.as_ref().map(|i| i.to_string()).unwrap_or_default()
-}
-
-/// Unplayable in the user's market — skip before uris-playback/queue.
-pub(crate) fn is_unplayable(t: &FullTrack) -> bool {
-  t.is_playable == Some(false)
-    || t
-      .restrictions
-      .as_ref()
-      .is_some_and(|r| r.reason == RestrictionReason::Market)
 }
 
 /// (items_len, total, offset, limit) of a page, for paging decisions.

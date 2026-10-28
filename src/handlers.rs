@@ -23,10 +23,31 @@ mod unfocused_keys;
 use super::app::{ActiveBlock, App, ArtistBlock, DialogContext, RouteId, SearchResultBlock};
 use crate::backend::IoEvent;
 use crate::event::Key;
-use rspotify::model::{context::CurrentPlaybackContext, PlayableItem};
+use rspotify::model::{
+  context::CurrentPlaybackContext, FullTrack, PlayableItem, RestrictionReason, SimplifiedTrack,
+};
 
 pub use mouse::handle_mouse;
 pub use search_input::handler as input_handler;
+
+/// Canonical track id. `linked_from` was removed upstream (always `None`),
+/// so the relink fallback below is the plain id.
+pub(crate) fn original_track_id(t: &FullTrack) -> String {
+  t.id.as_ref().map(|i| i.to_string()).unwrap_or_default()
+}
+
+pub(crate) fn original_simplified_track_id(t: &SimplifiedTrack) -> String {
+  t.id.as_ref().map(|i| i.to_string()).unwrap_or_default()
+}
+
+/// Unplayable in the user's market — skip before uris-playback/queue.
+pub(crate) fn is_unplayable(t: &FullTrack) -> bool {
+  t.is_playable == Some(false)
+    || t
+      .restrictions
+      .as_ref()
+      .is_some_and(|r| r.reason == RestrictionReason::Market)
+}
 
 pub fn handle_app(key: Key, app: &mut App) {
   // When the in-playlist search bar has text (playlist_filter Some),

@@ -159,8 +159,7 @@ const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 )]
 trait MprisPlayer {
   #[zbus(property)]
-  fn metadata(&self)
-    -> zbus::Result<std::collections::HashMap<String, zbus::zvariant::OwnedValue>>;
+  fn metadata(&self) -> zbus::Result<std::collections::HashMap<String, zbus::OwnedVariant>>;
 
   #[zbus(property)]
   fn playback_status(&self) -> zbus::Result<String>;

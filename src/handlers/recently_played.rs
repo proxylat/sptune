@@ -1,9 +1,5 @@
-use super::{super::app::App, common_key_events};
-use crate::{
-  backend::{original_track_id, IoEvent},
-  event::Key,
-  tui::group_consecutive_plays,
-};
+use super::{super::app::App, common_key_events, original_track_id};
+use crate::{backend::IoEvent, event::Key, tui::group_consecutive_plays};
 use anyhow::anyhow;
 use rspotify::model::{Id, PlayHistory};
 

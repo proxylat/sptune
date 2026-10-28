@@ -2,7 +2,8 @@ use super::{
   super::app::{App, TrackTable, TrackTableContext},
   common_key_events,
 };
-use crate::backend::{is_unplayable, original_track_id, IoEvent};
+use super::{is_unplayable, original_track_id};
+use crate::backend::IoEvent;
 use crate::event::Key;
 use crate::lcg::rand_idx;
 use crate::tui::layout::song_table_viewport;

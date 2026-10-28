@@ -1,8 +1,9 @@
+use super::original_track_id;
 use super::{
   super::app::{ActiveBlock, App},
   common_key_events,
 };
-use crate::backend::{original_track_id, IoEvent};
+use crate::backend::IoEvent;
 use crate::event::Key;
 use rspotify::model::{context::CurrentPlaybackContext, PlayableItem};
 
