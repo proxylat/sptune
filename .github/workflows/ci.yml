@@ -36,11 +36,11 @@ jobs:
       - name: baseline base ref
         run: |
           git checkout -q "${{ github.base_ref || 'HEAD' }}"
-          cargo bench --bench iai -- --save-baseline=ci-base
+          cargo bench --bench iai -- --save-baseline=ci_base
       - name: compare PR ref
         run: |
           git checkout -q "${{ github.sha || github.ref_name }}"
-          cargo bench --bench iai -- --baseline=ci-base
+          cargo bench --bench iai -- --baseline=ci_base
 
   profile:
     # Wall-clock profiles for human speedscope viewing. No gate: sampling

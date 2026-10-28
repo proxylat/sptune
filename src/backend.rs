@@ -15,9 +15,8 @@ use rspotify::{
   model::{
     AdditionalType, AlbumId, AlbumType, ArtistId, EpisodeId, FullArtist, FullTrack, Id, LibraryId,
     Market, Offset, Page, PlayContextId, PlayableId, PlayableItem, PlaylistId, PlaylistItem,
-    PrivateUser, RepeatState, SavedAlbum, SavedTrack, SearchResult, SearchType,
-    Show, ShowId, SimplifiedAlbum, SimplifiedPlaylist, SimplifiedShow, Token,
-    TrackId, UserId,
+    PrivateUser, RepeatState, SavedAlbum, SavedTrack, SearchResult, SearchType, Show, ShowId,
+    SimplifiedAlbum, SimplifiedPlaylist, SimplifiedShow, Token, TrackId, UserId,
   },
   AuthCodePkceSpotify, Config, Credentials, OAuth,
 };
