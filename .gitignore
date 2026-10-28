@@ -1,34 +1,7 @@
-# Whitelist: ignore everything except the source code and project files.
-
-/*
-# Project files (keep tracked)
-!.gitignore
-!Cargo.toml
-!Cargo.lock
-!rustfmt.toml
-!LICENSE
-!README.md
-!/chromium_flags.yml.example
-!/PLAN.md
-!/benches/
-!/tests/
-!/scripts/
-!/.github/
-!/.codemap/
-# Source code
-!/src/
-!/vendor/
-!/docs/
-
-# Secrets / local config (never commit, even if un-ignored later)
-/docs/*
 client.yml
 .env
 .spotify_token_cache.json
 .cached_device_id.txt
 *.rs.bk
-# Codemap generated outputs (state modules.json/config.json IS tracked)
-.codemap/codemap.html
-.codemap/codemap.md
-# Vendored crate build output (regenerable, never commit)
 /vendor/rspotify-model/target/
+/target/
