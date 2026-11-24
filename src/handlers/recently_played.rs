@@ -109,6 +109,9 @@ pub fn handler(key: Key, app: &mut App) {
           })
           .count();
 
+        if let Some(selected) = grouped_selected_item(items, app.recently_played.index) {
+          app.play_track_optimistic(selected.track.clone());
+        }
         app.dispatch(IoEvent::StartPlayback(None, Some(track_uris), Some(offset)));
       };
     }

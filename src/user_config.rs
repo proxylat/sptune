@@ -334,7 +334,6 @@ pub struct BehaviorConfigString {
   pub volume_increment: Option<u8>,
   pub tick_rate_milliseconds: Option<u64>,
   pub enable_text_emphasis: Option<bool>,
-  pub volume_ramp_bar: Option<bool>,
   pub seek_by_typing: Option<bool>,
   pub restore_settings: Option<bool>,
   pub enforce_wide_search_bar: Option<bool>,
@@ -356,6 +355,7 @@ pub struct BehaviorConfigString {
   pub max_display_length: Option<u16>,
   pub enable_animations: Option<bool>,
   pub playback_poll_secs: Option<u64>,
+  pub lastfm_api_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -364,7 +364,6 @@ pub struct BehaviorConfig {
   pub volume_increment: u8,
   pub tick_rate_milliseconds: u64,
   pub enable_text_emphasis: bool,
-  pub volume_ramp_bar: bool,
   pub seek_by_typing: bool,
   pub restore_settings: bool,
   pub enforce_wide_search_bar: bool,
@@ -390,6 +389,7 @@ pub struct BehaviorConfig {
   /// Cycle: 1 -> 2 -> 5 -> 10 -> 15 -> 30. Floor is 1s: sub-second
   /// polling would eat the token bucket and risk Spotify 429s.
   pub playback_poll_secs: u64,
+  pub lastfm_api_key: Option<String>,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -564,7 +564,6 @@ impl UserConfig {
         volume_increment: 10,
         tick_rate_milliseconds: 250,
         enable_text_emphasis: true,
-        volume_ramp_bar: false,
         seek_by_typing: false,
         restore_settings: false,
         enforce_wide_search_bar: false,
@@ -586,6 +585,7 @@ impl UserConfig {
         max_display_length: 0,
         enable_animations: true,
         playback_poll_secs: 5,
+        lastfm_api_key: None,
       },
       terminal: {
         let mut t = TerminalConfig::default();
@@ -605,6 +605,14 @@ impl UserConfig {
   }
 
   pub fn get_or_build_paths(&mut self) -> Result<()> {
+    // A --config path set by the caller wins; the fresh-install gate checks
+    // that same path, so the decline must land there too.
+    if let Some(paths) = self.path_to_config.clone() {
+      if let Some(parent) = paths.config_file_path.parent() {
+        fs::create_dir_all(parent)?;
+      }
+      return Ok(());
+    }
     match dirs::home_dir() {
       Some(home) => {
         let path = Path::new(&home);
@@ -744,10 +752,6 @@ impl UserConfig {
       self.behavior.enable_text_emphasis = text_emphasis;
     }
 
-    if let Some(volume_ramp) = behavior_config.volume_ramp_bar {
-      self.behavior.volume_ramp_bar = volume_ramp;
-    }
-
     if let Some(seek_by_typing) = behavior_config.seek_by_typing {
       self.behavior.seek_by_typing = seek_by_typing;
     }
@@ -782,6 +786,10 @@ impl UserConfig {
 
     if let Some(playback_poll_secs) = behavior_config.playback_poll_secs {
       self.behavior.playback_poll_secs = playback_poll_secs.clamp(1, 30);
+    }
+
+    if let Some(key) = behavior_config.lastfm_api_key {
+      self.behavior.lastfm_api_key = Some(key);
     }
 
     if let Some(paused_icon) = behavior_config.paused_icon {

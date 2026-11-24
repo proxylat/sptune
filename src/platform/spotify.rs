@@ -68,6 +68,7 @@ pub fn launch(cfg: &SpotifyConfig) -> anyhow::Result<std::process::Child> {
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
   }
   let child = cmd.spawn()?;
+  SPAWNED_BY_SPTUNE.store(true, std::sync::atomic::Ordering::SeqCst);
   // The suspend/trim/mem-limit policy is enforced by the periodic sweeper
   // thread started in main (it also covers externally launched Spotify and
   // children that spawn seconds after the browser process).
@@ -205,6 +206,12 @@ pub fn resume_processes(root: u32) {
     crate::platform::windows::resume_children_of(root);
   }
   handled_registry().lock().unwrap().clear();
+}
+
+static SPAWNED_BY_SPTUNE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn was_spawned() -> bool {
+  SPAWNED_BY_SPTUNE.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Terminate every Spotify process on the machine — used on sptune exit.

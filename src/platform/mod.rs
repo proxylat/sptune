@@ -2,8 +2,11 @@ pub mod chromium_flags;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod media_watch;
+pub mod notifications;
 pub mod soloist;
 pub mod spotify;
+pub mod tray;
+pub mod tray_ipc;
 #[cfg(windows)]
 pub mod windows;
 

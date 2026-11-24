@@ -45,6 +45,12 @@ can be used together
     .visible_alias("pb")
     .arg(device_arg())
     .arg(
+      Arg::new("xfce")
+        .long("xfce")
+        .action(ArgAction::SetTrue)
+        .help("Output playback status as XFCE genmon XML"),
+    )
+    .arg(
       format_arg()
         .default_value("%f %s %t - %a")
         .default_value_if("seek", ArgPredicate::IsPresent, "%f %s %t - %a %r")

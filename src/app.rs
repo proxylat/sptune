@@ -37,13 +37,14 @@ fn artist_key(track: &FullTrack) -> String {
     .join(", ")
 }
 
-pub const LIBRARY_OPTIONS: [&str; 6] = [
+pub const LIBRARY_OPTIONS: [&str; 7] = [
   "For you",
   "Recently Played",
   "Liked Songs",
   "Albums",
   "Artists",
   "Podcasts",
+  "Queue",
 ];
 
 /// Library sections not hidden via the '?' toggles (1-6).
@@ -247,6 +248,7 @@ pub enum ActiveBlock {
   MyPlaylists,
   Podcasts,
   EpisodeTable,
+  Queue,
   RecentlyPlayed,
   SearchResultBlock,
   SelectDevice,
@@ -265,6 +267,7 @@ pub enum RouteId {
   Artist,
   MusicView,
   Error,
+  Queue,
   RecentlyPlayed,
   Search,
   SelectedDevice,
@@ -283,8 +286,14 @@ pub struct Route {
   pub hovered_block: ActiveBlock,
 }
 
+#[derive(Debug)]
+pub struct ApiError {
+  pub text: String,
+  pub count: usize,
+}
+
 // Is it possible to compose enums?
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Copy, Clone, Debug)]
 pub enum TrackTableContext {
   MyPlaylists,
   AlbumSearch,
@@ -388,20 +397,34 @@ pub struct Artist {
   pub selected_top_track_index: usize,
   pub artist_hovered_block: ArtistBlock,
   pub artist_selected_block: ArtistBlock,
+  pub image_url: Option<String>,
+  pub is_following: Option<bool>,
+  pub followers: Option<u32>,
+  pub genres: Vec<String>,
+  pub meta: Option<crate::metadata::ArtistMeta>,
 }
 
 pub struct App {
   pub instant_since_last_current_playback_poll: Instant,
   navigation_stack: Vec<Route>,
   pub lyrics: Option<Vec<(u128, String)>>,
+  pub cover_art: Option<(String, image::DynamicImage)>,
+  pub cover_art_fetching: Option<String>,
+  pub artist_cover: Option<(String, image::DynamicImage)>,
+  pub artist_cover_fetching: Option<String>,
+  pub cover_picker: Option<ratatui_image::picker::Picker>,
+  pub cover_protocol: std::sync::Mutex<Option<(String, ratatui_image::protocol::StatefulProtocol)>>,
   pub track_credits: Option<Vec<String>>,
+  pub track_meta: Option<crate::metadata::TrackMeta>,
   pub queue_next: Option<String>,
+  pub queue_items: Vec<PlayableItem>,
+  pub queue_selected_index: usize,
   pub user_config: UserConfig,
   pub artists: Vec<FullArtist>,
   pub artist: Option<Artist>,
   pub album_table_context: AlbumTableContext,
   pub saved_album_tracks_index: usize,
-  pub api_error: String,
+  pub api_errors: Vec<ApiError>,
   pub current_playback_context: Option<CurrentPlaybackContext>,
   /// True while the soloist WS loop is feeding playback state; suppresses the Web API poll.
   pub soloist_live: bool,
@@ -455,9 +478,17 @@ pub struct App {
   pub size: Rect,
   pub song_progress_ms: u128,
   pub seek_ms: Option<u128>,
+  pub scrubbing_playbar: bool,
+  pub seek_pending: usize,
+  pub play_toggle_gen: u64,
+  pub play_toggle_pending: usize,
+  pub repeat_pending: usize,
+  pub track_end_polls: u8,
   pub volume_preview: Option<u8>,
   pub track_table: TrackTable,
   pub track_table_sort: Option<(TrackSortColumn, bool)>,
+  pub active_playlist_id: Option<String>,
+  pub playlist_sorts: std::collections::HashMap<String, (TrackSortColumn, bool)>,
   // When Some, the track-table view shows an in-playlist search bar (first
   // row) and only rows whose title or artist matches the query are listed.
   // None hides the bar and clears the filter. Toggled by the configurable
@@ -539,14 +570,24 @@ pub struct App {
   pub sidebar_minimized: bool,
   pub sidebar_width_override: Option<u16>,
   pub library_height_override: Option<u16>,
+  pub music_left_pct: Option<u16>,
+  pub music_lyrics_pct: Option<u16>,
+  pub music_cover_height: Option<u16>,
   pub hidden_library_sections: Vec<String>,
   pub config_theme: Theme,
   pub theme_preset_index: Option<usize>,
   pub dev_view: bool,
   pub request_log: VecDeque<RequestLogEntry>,
+  pub request_log_gen: u64,
+  pub startup_at: Instant,
+  pub first_draw_ms: Option<u64>,
   // Manual suspend state for the Spotify client's helper processes
   // (playbar button + "Suspend/Resume Process" settings row).
   pub processes_suspended: bool,
+  pub show_process_suspend: bool,
+  pub desktop_notifications: bool,
+  pub last_notified_uri: Option<String>,
+  pub visualizer: crate::visualizer::VizState,
   // Last track URI from the previous session (Resume Last Listening).
   pub saved_last_track: Option<String>,
   pub request_log_index: Option<usize>,
@@ -556,8 +597,17 @@ impl Default for App {
   fn default() -> Self {
     App {
       lyrics: None,
+      cover_art: None,
+      cover_art_fetching: None,
+      artist_cover: None,
+      artist_cover_fetching: None,
+      cover_picker: None,
+      cover_protocol: std::sync::Mutex::new(None),
       track_credits: None,
+      track_meta: None,
       queue_next: None,
+      queue_items: vec![],
+      queue_selected_index: 0,
       album_table_context: AlbumTableContext::Full,
       album_list_index: 0,
       made_for_you_index: 0,
@@ -588,7 +638,7 @@ impl Default for App {
       saved_show_ids_set: HashSet::new(),
       navigation_stack: vec![DEFAULT_ROUTE],
       large_search_limit: 50,
-      api_error: String::new(),
+      api_errors: Vec::new(),
       current_playback_context: None,
       soloist_live: false,
       devices: None,
@@ -620,12 +670,20 @@ impl Default for App {
       },
       song_progress_ms: 0,
       seek_ms: None,
+      scrubbing_playbar: false,
+      seek_pending: 0,
+      play_toggle_gen: 0,
+      play_toggle_pending: 0,
+      repeat_pending: 0,
+      track_end_polls: 0,
       volume_preview: None,
       selected_device_index: None,
       selected_playlist_index: None,
       active_playlist_index: None,
       track_table: Default::default(),
       track_table_sort: None,
+      active_playlist_id: None,
+      playlist_sorts: std::collections::HashMap::new(),
       playlist_filter: None,
       playlist_filter_idx: 0,
       playlist_filter_cursor_position: 0,
@@ -675,6 +733,9 @@ impl Default for App {
       sidebar_minimized: false,
       sidebar_width_override: None,
       library_height_override: None,
+      music_left_pct: None,
+      music_lyrics_pct: None,
+      music_cover_height: None,
       hovered_library_index: None,
       hovered_playlist_index: None,
       hovered_list_index: None,
@@ -684,8 +745,15 @@ impl Default for App {
       theme_preset_index: None,
       dev_view: false,
       processes_suspended: false,
+      show_process_suspend: false,
+      desktop_notifications: true,
+      last_notified_uri: None,
+      visualizer: crate::visualizer::VizState::new(),
       saved_last_track: None,
       request_log: VecDeque::new(),
+      request_log_gen: 0,
+      startup_at: Instant::now(),
+      first_draw_ms: None,
       request_log_index: None,
     }
   }
@@ -731,6 +799,7 @@ pub fn emit_program_status(playing: bool, title: &str) {
 impl App {
   /// Log a request; repeats coalesce globally, keeping only latest timestamp (no tracetrail) — grouped display in tui.rs shows HH:MM header with counts.
   pub fn log_request(&mut self, text: String) {
+    self.request_log_gen = self.request_log_gen.wrapping_add(1);
     let pos = self.request_log.iter().position(|e| e.text == text);
     if let Some(pos) = pos {
       let mut entry = self.request_log.remove(pos).unwrap();
@@ -758,6 +827,38 @@ impl App {
       user_config,
       spotify_token_expiry,
       ..App::default()
+    }
+  }
+
+  pub fn current_sort_key(&self) -> Option<String> {
+    match self.track_table.context {
+      Some(TrackTableContext::MyPlaylists)
+      | Some(TrackTableContext::PlaylistSearch)
+      | Some(TrackTableContext::MadeForYou) => self
+        .active_playlist_id
+        .as_ref()
+        .map(|id| format!("playlist:{id}"))
+        .or_else(|| {
+          self
+            .active_playlist_index
+            .and_then(|idx| self.playlists.as_ref().and_then(|p| p.items.get(idx)))
+            .map(|p| format!("playlist:{}", p.id.id()))
+        }),
+      Some(TrackTableContext::SavedTracks) => Some("saved_tracks".to_string()),
+      _ => None,
+    }
+  }
+
+  pub fn apply_saved_sort(&mut self, key: &str, is_playlist: bool) {
+    let Some((column, desc)) = self.playlist_sorts.get(key).copied() else {
+      self.track_table_sort = None;
+      return;
+    };
+    self.track_table_sort = Some((column, desc));
+    if is_playlist && column == TrackSortColumn::DateAdded {
+      self.materialize_date_added();
+    } else {
+      self.sort_tracks();
     }
   }
 
@@ -901,41 +1002,49 @@ impl App {
       action,
       IoEvent::GetCurrentPlayback
         | IoEvent::CurrentUserSavedTracksContains(_)
+        | IoEvent::GetCoverArt(_, _)
         | IoEvent::SoloistWsWatch { .. }
     );
     if let Some(io_tx) = &self.io_tx {
       if let Err(e) = io_tx.send(action) {
         self.is_loading = false;
-        self.api_error = format!("dispatch failed: {}", e);
+        self.push_api_error(format!("dispatch failed: {}", e));
       };
     }
   }
 
   fn apply_seek(&mut self, seek_ms: u32) {
-    if let Some(CurrentPlaybackContext {
-      item: Some(item), ..
-    }) = &self.current_playback_context
-    {
-      let duration_ms: u128 = match item {
+    let duration_ms = match &self.current_playback_context {
+      Some(CurrentPlaybackContext {
+        item: Some(item), ..
+      }) => match item {
         PlayableItem::Track(track) => track.duration.num_milliseconds() as u128,
         PlayableItem::Episode(episode) => episode.duration.num_milliseconds() as u128,
         _ => 0,
-      };
+      },
+      _ => return,
+    };
 
-      // Equality is a valid end-of-track seek (last bar cell); only a seek
-      // past the end advances to the next track.
-      let event = if (seek_ms as u128) <= duration_ms {
-        IoEvent::Seek(seek_ms)
-      } else {
-        IoEvent::NextTrack
-      };
+    // Equality is a valid end-of-track seek (last bar cell); only a seek
+    // past the end advances to the next track.
+    let event = if (seek_ms as u128) <= duration_ms {
+      self.seek_pending = self.seek_pending.saturating_add(1);
+      self.song_progress_ms = seek_ms as u128;
+      if let Some(ctx) = self.current_playback_context.as_mut() {
+        ctx.progress = Some(chrono::TimeDelta::milliseconds(seek_ms as i64));
+      }
+      self.instant_since_last_current_playback_poll = Instant::now();
+      self.track_end_polls = 0;
+      IoEvent::Seek(seek_ms)
+    } else {
+      IoEvent::NextTrack
+    };
 
-      self.dispatch(event);
-    }
+    self.dispatch(event);
   }
 
   /// Preview the seek position immediately and dispatch the seek right away;
-  /// `seek_ms` is cleared when the next playback fetch confirms the position.
+  /// `seek_ms` is cleared once the final in-flight seek settles.
   pub fn seek_to(&mut self, seek_ms: u32) {
     self.seek_ms = Some(seek_ms as u128);
     self.apply_seek(seek_ms);
@@ -945,6 +1054,22 @@ impl App {
   /// the draw code renders `seek_ms` live.
   pub fn preview_seek(&mut self, seek_ms: u32) {
     self.seek_ms = Some(seek_ms as u128);
+  }
+
+  /// Optimistically show a clicked track in the playbar right away so the UI
+  /// doesn't wait for the Spotify start-playback + GET /me/player round-trip.
+  pub fn play_track_optimistic(&mut self, track: FullTrack) {
+    if let Some(ctx) = self.current_playback_context.as_mut() {
+      ctx.item = Some(PlayableItem::Track(track));
+      ctx.is_playing = true;
+      ctx.progress = Some(chrono::TimeDelta::zero());
+      self.song_progress_ms = 0;
+      self.seek_ms = None;
+      self.track_end_polls = 0;
+      self.instant_since_last_current_playback_poll = Instant::now();
+      self.ui_dirty = true;
+      self.ensure_cover_art();
+    }
   }
 
   fn poll_current_playback(&mut self) {
@@ -974,10 +1099,22 @@ impl App {
       .elapsed()
       .as_millis();
 
-    // Near track end the next song is imminent: poll every second so it
-    // appears promptly instead of up to 5s late. ~10 extra cheap requests
-    // per track, inside the token bucket.
-    if let Some(remaining_ms) = self.playback_remaining_ms() {
+    let mut at_track_end = false;
+    if let Some(overrun_ms) = self.playback_overrun_ms() {
+      // Track's calculated end has passed: trigger an immediate refresh right
+      // after the boundary (150ms grace for Spotify to flip tracks), then up to
+      // 3 fast retries (350ms) before falling back to normal cadence so an
+      // ended/empty queue never spams the API.
+      if self.track_end_polls == 0 && overrun_ms >= 150 {
+        poll_interval_ms = 0;
+        at_track_end = true;
+      } else if self.track_end_polls > 0 && self.track_end_polls <= 3 {
+        poll_interval_ms = poll_interval_ms.min(350);
+        at_track_end = true;
+      }
+    } else if let Some(remaining_ms) = self.playback_remaining_ms() {
+      // Near track end the next song is imminent: keep a fresh progress anchor
+      // so the track-end boundary fires on time without up to 5s of lag.
       if remaining_ms < 10_000 {
         poll_interval_ms = poll_interval_ms.min(1_000);
       }
@@ -985,11 +1122,39 @@ impl App {
 
     if !self.is_fetching_current_playback && elapsed >= poll_interval_ms {
       self.is_fetching_current_playback = true;
+      if at_track_end {
+        self.track_end_polls = self.track_end_polls.saturating_add(1);
+      }
       // A pending seek was already dispatched by seek_to (click, release,
       // seek dialog); this tick only fetches, and the response clears
       // seek_ms. Re-applying the seek here duplicated it every tick.
       self.dispatch(IoEvent::GetCurrentPlayback);
     }
+  }
+
+  /// Milliseconds past the current item's duration while playing, or None if
+  /// not playing / still before track end.
+  fn playback_overrun_ms(&self) -> Option<u128> {
+    let context = self.current_playback_context.as_ref()?;
+    if !context.is_playing {
+      return None;
+    }
+    let item = context.item.as_ref()?;
+    let progress = context.progress.as_ref()?;
+    let duration_ms: u128 = match item {
+      PlayableItem::Track(track) => track.duration.num_milliseconds() as u128,
+      PlayableItem::Episode(episode) => episode.duration.num_milliseconds() as u128,
+      _ => return None,
+    };
+    if duration_ms == 0 {
+      return None;
+    }
+    let pos = progress.num_milliseconds().max(0) as u128
+      + self
+        .instant_since_last_current_playback_poll
+        .elapsed()
+        .as_millis();
+    (pos >= duration_ms).then(|| pos - duration_ms)
   }
 
   /// Milliseconds left in the current item, or None when unknown (no
@@ -1015,7 +1180,77 @@ impl App {
     Some(duration_ms.saturating_sub(progress.num_milliseconds() as u128 + elapsed))
   }
 
+  pub fn ensure_cover_art_url(&mut self, item_id: String, url: String) {
+    if let Some((id, u)) = self.prepare_cover_art_url(item_id, url) {
+      self.dispatch(IoEvent::GetCoverArt(id, u));
+    }
+  }
+
+  /// Populate cover art from disk cache synchronously when available, or mark
+  /// the item as fetching and return `(item_id, url)` for background download.
+  pub fn prepare_cover_art_url(
+    &mut self,
+    item_id: String,
+    url: String,
+  ) -> Option<(String, String)> {
+    let is_artist = item_id.starts_with("artist:");
+    if is_artist {
+      if self
+        .artist_cover
+        .as_ref()
+        .is_some_and(|(id, _)| id == &item_id)
+        || self.artist_cover_fetching.as_deref() == Some(item_id.as_str())
+      {
+        return None;
+      }
+      if let Some(img) = crate::cover_art::load_cached(&url) {
+        self.artist_cover = Some((item_id, img));
+        self.ui_dirty = true;
+        return None;
+      }
+      self.artist_cover_fetching = Some(item_id.clone());
+    } else {
+      if self
+        .cover_art
+        .as_ref()
+        .is_some_and(|(id, _)| id == &item_id)
+        || self.cover_art_fetching.as_deref() == Some(item_id.as_str())
+      {
+        return None;
+      }
+      if let Some(img) = crate::cover_art::load_cached(&url) {
+        self.cover_art = Some((item_id, img));
+        if let Ok(mut proto) = self.cover_protocol.lock() {
+          *proto = None;
+        }
+        self.ui_dirty = true;
+        return None;
+      }
+      self.cover_art_fetching = Some(item_id.clone());
+    }
+    Some((item_id, url))
+  }
+
+  pub fn prepare_cover_art(&mut self) -> Option<(String, String)> {
+    let (item_id, url) = crate::cover_art::now_playing(
+      self
+        .current_playback_context
+        .as_ref()
+        .and_then(|c| c.item.as_ref()),
+    )?;
+    self.prepare_cover_art_url(item_id, url)
+  }
+
+  pub fn ensure_cover_art(&mut self) {
+    if let Some((item_id, url)) = self.prepare_cover_art() {
+      self.dispatch(IoEvent::GetCoverArt(item_id, url));
+    }
+  }
+
   pub fn update_on_tick(&mut self) -> bool {
+    if self.get_current_route().active_block == ActiveBlock::MusicView {
+      self.ensure_cover_art();
+    }
     self.poll_current_playback();
     if let Some(CurrentPlaybackContext {
       item: Some(item),
@@ -1049,7 +1284,7 @@ impl App {
       };
       let prev = self.song_progress_ms;
       self.song_progress_ms = new_progress;
-      // ponytail: playbar renders whole seconds — redraw only when the visible
+      // playbar renders whole seconds — redraw only when the visible
       // second flips (1 Hz while playing, 0 when paused) instead of every 250ms tick
       return (new_progress / 1000) != (prev / 1000);
     }
@@ -1092,12 +1327,14 @@ impl App {
   }
 
   pub fn increase_volume(&mut self) {
-    if let Some(context) = self.current_playback_context.clone() {
+    if let Some(volume_percent) = self
+      .current_playback_context
+      .as_ref()
+      .map(|c| c.device.volume_percent.unwrap_or(0) as u8)
+    {
       // Chain on the optimistic preview so rapid presses step from the
       // pending value instead of collapsing onto the stale server snapshot.
-      let current_volume = self
-        .volume_preview
-        .unwrap_or(context.device.volume_percent.unwrap_or(0) as u8);
+      let current_volume = self.volume_preview.unwrap_or(volume_percent);
       let next_volume = min(
         current_volume + self.user_config.behavior.volume_increment,
         100,
@@ -1112,13 +1349,17 @@ impl App {
   }
 
   pub fn decrease_volume(&mut self) {
-    if let Some(context) = self.current_playback_context.clone() {
+    if let Some(volume_percent) = self
+      .current_playback_context
+      .as_ref()
+      .map(|c| c.device.volume_percent.unwrap_or(0) as i8)
+    {
       // Chain on the optimistic preview so rapid presses step from the
       // pending value instead of collapsing onto the stale server snapshot.
       let current_volume = self
         .volume_preview
         .map(|v| v as i8)
-        .unwrap_or(context.device.volume_percent.unwrap_or(0) as i8);
+        .unwrap_or(volume_percent);
       let next_volume = max(
         current_volume - self.user_config.behavior.volume_increment as i8,
         0,
@@ -1133,8 +1374,49 @@ impl App {
   }
 
   pub fn handle_error(&mut self, e: anyhow::Error) {
-    self.push_navigation_stack(RouteId::Error, ActiveBlock::Error);
-    self.api_error = e.to_string();
+    // Debug keeps the full anyhow chain (rspotify's parsed Spotify message);
+    // Display would reduce a 403 to a bare status code.
+    self.push_api_error(format!("{e:?}"));
+    // Don't pile Error routes: repeated startup failures would trap Esc
+    // behind a stack of identical error screens.
+    if self.get_current_route().id != RouteId::Error {
+      self.push_navigation_stack(RouteId::Error, ActiveBlock::Error);
+    }
+  }
+
+  pub fn push_api_error(&mut self, msg: String) {
+    // Repeats add no information; count them on the existing entry.
+    if let Some(existing) = self.api_errors.iter_mut().find(|e| e.text.contains(&msg)) {
+      existing.count += 1;
+      return;
+    }
+    if self.api_errors.len() >= 20 {
+      self.api_errors.remove(0);
+    }
+    self.api_errors.push(ApiError {
+      text: msg,
+      count: 1,
+    });
+  }
+
+  pub fn has_api_error(&self, msg: &str) -> bool {
+    self.api_errors.iter().any(|e| e.text.contains(msg))
+  }
+
+  pub fn api_errors_text(&self) -> String {
+    self
+      .api_errors
+      .iter()
+      .enumerate()
+      .map(|(i, e)| {
+        if e.count > 1 {
+          format!("{}: {} (×{})", i + 1, e.text, e.count)
+        } else {
+          format!("{}: {}", i + 1, e.text)
+        }
+      })
+      .collect::<Vec<_>>()
+      .join("\n\n")
   }
 
   pub fn toggle_playback(&mut self) {
@@ -1145,23 +1427,25 @@ impl App {
         ..
       })
     );
+    let target_playing = !is_playing;
     // Optimistic update: flip the playback state immediately so the UI reacts
-    // without waiting for the API round-trip. The playback response reconciles.
+    // without waiting for the API round-trip. Generation counter lets the
+    // backend drop intermediate clicks when toggled rapidly.
     if let Some(context) = self.current_playback_context.as_mut() {
-      context.is_playing = !is_playing;
+      context.is_playing = target_playing;
     }
+    self.play_toggle_gen = self.play_toggle_gen.wrapping_add(1);
+    self.play_toggle_pending = self.play_toggle_pending.saturating_add(1);
     // OSC 7501 program status: playing→working (with title), else idle.
     // Terminals that don't know the sequence ignore it: zero-risk.
     emit_program_status(
-      !is_playing,
+      target_playing,
       &now_playing_title(self.current_playback_context.as_ref()),
     );
-    if is_playing {
-      self.dispatch(IoEvent::PausePlayback);
-    } else {
-      // When no offset or uris are passed, spotify will resume current playback
-      self.dispatch(IoEvent::StartPlayback(None, None, None));
-    }
+    self.dispatch(IoEvent::SetPlaybackState(
+      target_playing,
+      self.play_toggle_gen,
+    ));
   }
 
   pub fn previous_track(&mut self) {
@@ -1213,8 +1497,27 @@ impl App {
   /// two entry points: the sidebar (MyPlaylists) and search results
   /// (PlaylistSearch). Returns None when no playlist context is active.
   pub fn track_table_playlist_uri(&self) -> Option<String> {
+    if matches!(
+      self.track_table.context.as_ref(),
+      Some(
+        TrackTableContext::MyPlaylists
+          | TrackTableContext::PlaylistSearch
+          | TrackTableContext::MadeForYou
+      )
+    ) {
+      if let Some(id) = &self.active_playlist_id {
+        return Some(if id.starts_with("spotify:") {
+          id.clone()
+        } else {
+          format!("spotify:playlist:{id}")
+        });
+      }
+    }
     let (playlists, index) = match self.track_table.context.as_ref()? {
-      TrackTableContext::MyPlaylists => (&self.playlists, self.active_playlist_index),
+      TrackTableContext::MyPlaylists => (
+        &self.playlists,
+        self.active_playlist_index.or(self.selected_playlist_index),
+      ),
       TrackTableContext::PlaylistSearch => (
         &self.search_results.playlists,
         self.search_results.selected_playlists_index,
@@ -1354,14 +1657,15 @@ impl App {
   }
 
   pub fn copy_error(&mut self) {
-    if self.api_error.is_empty() {
+    if self.api_errors.is_empty() {
       return;
     }
+    let text = self.api_errors_text();
     let clipboard = match &mut self.clipboard {
       Some(ctx) => ctx,
       None => return,
     };
-    if let Err(e) = clipboard.set_text(self.api_error.clone()) {
+    if let Err(e) = clipboard.set_text(text) {
       self.handle_error(anyhow!("failed to set clipboard content: {}", e));
     }
   }
@@ -1461,12 +1765,14 @@ impl App {
         self.library.saved_artists.index += 1
       }
       None => {
-        if let Some(saved_artists) = &self.library.saved_artists.clone().get_results(None) {
-          if let Some(last_artist) = saved_artists.items.last() {
-            self.dispatch(IoEvent::GetFollowedArtists(Some(
-              last_artist.id.to_string(),
-            )));
-          }
+        let last_id = self
+          .library
+          .saved_artists
+          .get_results(None)
+          .and_then(|saved_artists| saved_artists.items.last())
+          .map(|last_artist| last_artist.id.to_string());
+        if let Some(id) = last_id {
+          self.dispatch(IoEvent::GetFollowedArtists(Some(id)));
         }
       }
     }
@@ -1520,29 +1826,29 @@ impl App {
     // Shuffle, synced from the API on every playback poll. The flip is
     // optimistic so the icon paints on the next tick; the backend confirms
     // on Ok and the next poll corrects on Err.
-    if let Some(context) = self.current_playback_context.clone() {
-      if let Some(live) = &mut self.current_playback_context {
-        live.shuffle_state = !context.shuffle_state;
-      }
+    if let Some(live) = &mut self.current_playback_context {
+      let was_shuffle = live.shuffle_state;
+      live.shuffle_state = !was_shuffle;
       self.smart_shuffle = false;
-      self.dispatch(IoEvent::Shuffle(context.shuffle_state));
-    };
+      self.dispatch(IoEvent::Shuffle(was_shuffle));
+    }
   }
 
   pub fn get_current_user_saved_albums_next(&mut self) {
-    match self
+    if self
       .library
       .saved_albums
       .get_results(Some(self.library.saved_albums.index + 1))
-      .cloned()
+      .is_some()
     {
-      Some(_) => self.library.saved_albums.index += 1,
-      None => {
-        if let Some(saved_albums) = &self.library.saved_albums.get_results(None) {
-          let offset = Some(saved_albums.offset + saved_albums.limit);
-          self.dispatch(IoEvent::GetCurrentUserSavedAlbums(offset));
-        }
-      }
+      self.library.saved_albums.index += 1;
+    } else if let Some(offset) = self
+      .library
+      .saved_albums
+      .get_results(None)
+      .map(|saved_albums| saved_albums.offset + saved_albums.limit)
+    {
+      self.dispatch(IoEvent::GetCurrentUserSavedAlbums(Some(offset)));
     }
   }
 
@@ -1611,19 +1917,20 @@ impl App {
   }
 
   pub fn get_current_user_saved_shows_next(&mut self) {
-    match self
+    if self
       .library
       .saved_shows
       .get_results(Some(self.library.saved_shows.index + 1))
-      .cloned()
+      .is_some()
     {
-      Some(_) => self.library.saved_shows.index += 1,
-      None => {
-        if let Some(saved_shows) = &self.library.saved_shows.get_results(None) {
-          let offset = Some(saved_shows.offset + saved_shows.limit);
-          self.dispatch(IoEvent::GetCurrentUserSavedShows(offset));
-        }
-      }
+      self.library.saved_shows.index += 1;
+    } else if let Some(offset) = self
+      .library
+      .saved_shows
+      .get_results(None)
+      .map(|saved_shows| saved_shows.offset + saved_shows.limit)
+    {
+      self.dispatch(IoEvent::GetCurrentUserSavedShows(Some(offset)));
     }
   }
 
@@ -1634,19 +1941,20 @@ impl App {
   }
 
   pub fn get_episode_table_next(&mut self, show_id: String) {
-    match self
+    if self
       .library
       .show_episodes
       .get_results(Some(self.library.show_episodes.index + 1))
-      .cloned()
+      .is_some()
     {
-      Some(_) => self.library.show_episodes.index += 1,
-      None => {
-        if let Some(show_episodes) = &self.library.show_episodes.get_results(None) {
-          let offset = Some(show_episodes.offset + show_episodes.limit);
-          self.dispatch(IoEvent::GetCurrentShowEpisodes(show_id, offset));
-        }
-      }
+      self.library.show_episodes.index += 1;
+    } else if let Some(offset) = self
+      .library
+      .show_episodes
+      .get_results(None)
+      .map(|show_episodes| show_episodes.offset + show_episodes.limit)
+    {
+      self.dispatch(IoEvent::GetCurrentShowEpisodes(show_id, Some(offset)));
     }
   }
 
@@ -2038,7 +2346,18 @@ impl App {
       .map(|(_, id)| id.clone())
   }
 
+  /// Refresh all Music View data (cover art, lyrics, credits, queue) on view
+  /// open or when the playing track changes while Music View is open.
+  pub fn refresh_music_view_data(&mut self) {
+    self.lyrics = None;
+    self.track_credits = None;
+    self.queue_next = None;
+    self.get_panel_data();
+  }
+
   pub fn get_panel_data(&mut self) {
+    // Dispatch cover art first so it never queues behind lyrics/credits/queue.
+    self.ensure_cover_art();
     let track_id = match &self.current_playback_context {
       Some(CurrentPlaybackContext {
         item: Some(PlayableItem::Track(track)),
@@ -2054,18 +2373,17 @@ impl App {
   }
 
   pub fn repeat(&mut self) {
-    if let Some(context) = self.current_playback_context.clone() {
-      let next = match context.repeat_state {
+    if let Some(live) = &mut self.current_playback_context {
+      let prev = live.repeat_state;
+      live.repeat_state = match prev {
         RepeatState::Off => RepeatState::Context,
         RepeatState::Context => RepeatState::Track,
         RepeatState::Track => RepeatState::Off,
       };
-      // Optimistic flip so the icon paints on the next tick; the backend
-      // confirms on Ok and the next poll corrects on Err.
-      if let Some(live) = &mut self.current_playback_context {
-        live.repeat_state = next;
-      }
-      self.dispatch(IoEvent::Repeat(context.repeat_state));
+      self.repeat_pending = self.repeat_pending.saturating_add(1);
+      // Optimistic flip so the icon paints on the next tick; backend skips
+      // superseded clicks so rapid presses never jiggle backwards.
+      self.dispatch(IoEvent::Repeat(prev));
     }
   }
 
@@ -2299,16 +2617,20 @@ impl App {
   /// Client-side filter predicate for the in-playlist search bar: a track
   /// matches when the (lowercased) query is a substring of title or any artist
   /// name. Empty query matches all.
+  pub fn track_matches_needle(track: &FullTrack, needle: &str) -> bool {
+    track.name.to_lowercase().contains(needle)
+      || track
+        .artists
+        .iter()
+        .any(|a| a.name.to_lowercase().contains(needle))
+  }
+
   pub fn playlist_filter_matches(&self, track: &FullTrack) -> bool {
     let needle = match self.playlist_filter.as_deref() {
       Some(q) if !q.is_empty() => q.to_lowercase(),
       _ => return true,
     };
-    track.name.to_lowercase().contains(&needle)
-      || track
-        .artists
-        .iter()
-        .any(|a| a.name.to_lowercase().contains(&needle))
+    Self::track_matches_needle(track, &needle)
   }
 
   /// Whether the given search block has more pages past what is loaded.
@@ -2362,10 +2684,7 @@ impl App {
   /// if it has not been loaded yet.
   pub fn load_search_block(&mut self, block: &SearchResultBlock) {
     self.search_results.selected_block = block.clone();
-    if self.is_fetching_next_page || self.search_results.query.is_empty() {
-      return;
-    }
-    if self.search_block_loaded(block) {
+    if self.search_results.query.is_empty() || self.search_block_loaded(block) {
       return;
     }
     self.is_fetching_next_page = true;
@@ -2500,9 +2819,6 @@ impl App {
           }
         }
       }
-      3 => {
-        self.user_config.behavior.volume_ramp_bar = !self.user_config.behavior.volume_ramp_bar;
-      }
       4 => {
         self.user_config.behavior.enable_mouse = !self.user_config.behavior.enable_mouse;
         self.user_config.terminal.enable_mouse = self.user_config.behavior.enable_mouse;
@@ -2593,7 +2909,7 @@ impl App {
         };
       }
       23 => {
-        self.toggle_process_suspend();
+        self.show_process_suspend = !self.show_process_suspend;
       }
       24 => {
         // Playback poll cadence while playing. Floor is 1s: sub-second
@@ -2607,6 +2923,9 @@ impl App {
             15 => 30,
             _ => 1,
           };
+      }
+      25 => {
+        self.desktop_notifications = !self.desktop_notifications;
       }
       _ => {}
     }
@@ -2765,6 +3084,76 @@ mod tests {
       ..Default::default()
     };
     assert_eq!(app.playback_remaining_ms(), None);
+  }
+
+  #[test]
+  fn poll_fires_immediately_at_track_end() {
+    use std::time::Duration;
+
+    // Track is 180_000ms; progress=179_950ms + 250ms elapsed => 200ms overrun.
+    // Even though elapsed (250ms) is far below 1s/5s, poll must fire right away.
+    let mut app = App {
+      current_playback_context: Some(playing_playback_with_progress(179_950)),
+      instant_since_last_current_playback_poll: Instant::now() - Duration::from_millis(250),
+      ..Default::default()
+    };
+    app.update_on_tick();
+    assert!(app.is_fetching_current_playback);
+    assert_eq!(app.track_end_polls, 1);
+
+    // After 4 track-end polls (e.g. empty queue), back off to the normal 5s cadence.
+    app.is_fetching_current_playback = false;
+    app.track_end_polls = 4;
+    app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_millis(500);
+    app.update_on_tick();
+    assert!(!app.is_fetching_current_playback);
+  }
+
+  #[test]
+  fn play_track_optimistic_updates_playbar() {
+    let mut app = App {
+      current_playback_context: Some(playing_playback_with_progress(90_000)),
+      song_progress_ms: 90_000,
+      seek_ms: Some(120_000),
+      track_end_polls: 2,
+      ..Default::default()
+    };
+    let next = mock_track(7);
+    let expected_name = next.name.clone();
+    app.play_track_optimistic(next);
+    assert_eq!(app.song_progress_ms, 0);
+    assert_eq!(app.seek_ms, None);
+    assert_eq!(app.track_end_polls, 0);
+    assert!(app.ui_dirty);
+    let ctx = app.current_playback_context.as_ref().unwrap();
+    assert!(ctx.is_playing);
+    match ctx.item.as_ref().unwrap() {
+      PlayableItem::Track(t) => assert_eq!(t.name, expected_name),
+      _ => panic!("expected track"),
+    }
+  }
+
+  #[test]
+  fn refresh_music_view_data_clears_stale_and_fetches() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = App {
+      current_playback_context: Some(playing_playback_with_progress(0)),
+      io_tx: Some(tx),
+      lyrics: Some(vec![(0, "old".to_string())]),
+      track_credits: Some(vec!["Producer: Old".to_string()]),
+      queue_next: Some("Old Next".to_string()),
+      ..Default::default()
+    };
+    app.refresh_music_view_data();
+    assert!(app.lyrics.is_none());
+    assert!(app.track_credits.is_none());
+    assert!(app.queue_next.is_none());
+    let events: Vec<IoEvent> = rx.try_iter().collect();
+    assert!(events.contains(&IoEvent::GetLyrics));
+    assert!(events.contains(&IoEvent::GetQueue));
+    assert!(events
+      .iter()
+      .any(|e| matches!(e, IoEvent::GetTrackCredits(_))));
   }
 
   #[test]
@@ -2939,6 +3328,11 @@ mod tests {
       selected_top_track_index: 0,
       artist_hovered_block: ArtistBlock::TopTracks,
       artist_selected_block: ArtistBlock::Empty,
+      image_url: None,
+      is_following: None,
+      followers: None,
+      genres: vec![],
+      meta: None,
     });
     let (tx, rx) = std::sync::mpsc::channel();
     app.io_tx = Some(tx);
@@ -3001,6 +3395,11 @@ mod tests {
       selected_top_track_index: 0,
       artist_hovered_block: ArtistBlock::TopTracks,
       artist_selected_block: ArtistBlock::TopTracks,
+      image_url: None,
+      is_following: None,
+      followers: None,
+      genres: vec![],
+      meta: None,
     });
     let (tx, rx) = std::sync::mpsc::channel();
     app.io_tx = Some(tx);
@@ -3266,7 +3665,12 @@ mod tests {
         ..
       })
     ));
-    assert!(matches!(io_rx.try_recv(), Ok(IoEvent::PausePlayback)));
+    assert_eq!(app.play_toggle_gen, 1);
+    assert_eq!(app.play_toggle_pending, 1);
+    assert_eq!(
+      io_rx.try_recv().ok(),
+      Some(IoEvent::SetPlaybackState(false, 1))
+    );
 
     app.toggle_playback();
     assert!(matches!(
@@ -3276,10 +3680,40 @@ mod tests {
         ..
       })
     ));
-    assert!(matches!(
-      io_rx.try_recv(),
-      Ok(IoEvent::StartPlayback(None, None, None))
-    ));
+    assert_eq!(app.play_toggle_gen, 2);
+    assert_eq!(app.play_toggle_pending, 2);
+    assert_eq!(
+      io_rx.try_recv().ok(),
+      Some(IoEvent::SetPlaybackState(true, 2))
+    );
+  }
+
+  #[test]
+  fn rapid_repeat_cycles_and_tracks_pending() {
+    use rspotify::model::RepeatState;
+    let (io_tx, io_rx) = std::sync::mpsc::channel();
+    let mut app = App {
+      current_playback_context: Some(playing_playback_with_progress(0)),
+      io_tx: Some(io_tx),
+      ..Default::default()
+    };
+    app.repeat();
+    app.repeat();
+    app.repeat();
+    assert_eq!(app.repeat_pending, 3);
+    assert_eq!(
+      app.current_playback_context.as_ref().unwrap().repeat_state,
+      RepeatState::Off
+    );
+    let events: Vec<IoEvent> = io_rx.try_iter().collect();
+    assert_eq!(
+      events,
+      vec![
+        IoEvent::Repeat(RepeatState::Off),
+        IoEvent::Repeat(RepeatState::Context),
+        IoEvent::Repeat(RepeatState::Track),
+      ]
+    );
   }
 
   #[test]

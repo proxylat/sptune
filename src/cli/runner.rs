@@ -478,7 +478,7 @@ impl<'a> CliApp<'a> {
     let offset = if random {
       // Only works with playlists for now
       if uri.contains("spotify:playlist:") {
-        let id = uri.split(':').last().unwrap();
+        let id = uri.split(':').next_back().unwrap();
         match self
           .net
           .spotify

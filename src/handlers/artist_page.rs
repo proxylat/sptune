@@ -213,6 +213,9 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
           .iter()
           .map(|track| track.id.as_ref().map(|id| id.uri()).unwrap_or_default())
           .collect();
+        if let Some(track) = artist.top_tracks.get(selected_index) {
+          app.play_track_optimistic(track.clone());
+        }
         app.dispatch(IoEvent::StartPlayback(
           None,
           Some(top_tracks),
@@ -281,6 +284,16 @@ fn handle_enter_event_on_hovered_block(app: &mut App) {
 pub fn handler(key: Key, app: &mut App) {
   if let Some(artist) = &mut app.artist {
     match key {
+      Key::Char('f') => {
+        let id = artist.artist_id.clone();
+        let following = artist.is_following.unwrap_or(false);
+        artist.is_following = Some(!following);
+        if following {
+          app.dispatch(IoEvent::UserUnfollowArtists(vec![id]));
+        } else {
+          app.dispatch(IoEvent::UserFollowArtists(vec![id]));
+        }
+      }
       Key::Esc => {
         artist.artist_selected_block = ArtistBlock::Empty;
       }

@@ -2,12 +2,15 @@ mod app;
 mod backend;
 mod cli;
 mod client_creds;
+mod cover_art;
 mod handlers;
+mod metadata;
 mod platform;
 mod redirect_uri;
 mod soloist_setup;
 mod soloist_ws;
 mod tui;
+mod visualizer;
 
 use sptune::{event, lcg, library_cache, playlist_cache, user_config};
 
@@ -88,7 +91,7 @@ pub async fn get_token_auto(spotify: &mut AuthCodePkceSpotify, port: u16) -> Opt
     }
   }
 
-  // ponytail: expired cached token is still usable — refresh_authentication
+  // expired cached token is still usable — refresh_authentication
   // refetches via the stored refresh_token on the next event-loop tick.
   if let Ok(token) = Token::from_cache(spotify.get_config().cache_path.clone()) {
     if let Some(token) = usable(token) {
@@ -135,7 +138,7 @@ fn open_url(url: &str) {
   let _ = std::process::Command::new("open").arg(url).spawn();
   #[cfg(target_os = "windows")]
   {
-    // ponytail: avoid cmd.exe '&' splitting — explorer/rundll32 take the URL as a single arg
+    // avoid cmd.exe '&' splitting — explorer/rundll32 take the URL as a single arg
     if std::process::Command::new("rundll32")
       .args(["url.dll,FileProtocolHandler", url])
       .spawn()
@@ -153,6 +156,14 @@ async fn get_code_from_url(spotify: &mut AuthCodePkceSpotify, url: String) -> Op
   if let Err(e) = spotify.request_token(code.as_str()).await {
     eprintln!("Failed to exchange code for token: {}", e);
     return None;
+  }
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(
+      &spotify.get_config().cache_path,
+      std::fs::Permissions::from_mode(0o600),
+    );
   }
   spotify.get_token().lock().await.unwrap().clone()
 }
@@ -193,13 +204,16 @@ fn panic_hook(info: &PanicHookInfo<'_>) {
 
   eprintln!("thread '<unnamed>' panicked at '{}' ({})", msg, location);
   eprintln!("{:?}", Backtrace::capture());
-  // Panic = sptune is going down: take Spotify with it, same as a clean exit.
-  crate::platform::spotify::kill_all_spotify();
+  // Panic = sptune is going down: take Spotify with it only if sptune launched it.
+  if crate::platform::spotify::was_spawned() {
+    crate::platform::spotify::kill_all_spotify();
+  }
   crate::platform::soloist::kill_spawned();
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+  let startup_at = std::time::Instant::now();
   panic::set_hook(Box::new(|info| {
     panic_hook(info);
   }));
@@ -254,9 +268,20 @@ of the app. Beware that this comes at a CPU cost!",
     .subcommand(cli::play_subcommand())
     .subcommand(cli::list_subcommand())
     .subcommand(cli::search_subcommand())
-    .subcommand(cli::clean_cache_subcommand());
+    .subcommand(cli::clean_cache_subcommand())
+    .arg(
+      Arg::new("mini-popup")
+        .long("mini-popup")
+        .action(clap::ArgAction::SetTrue)
+        .help("Open or toggle the floating mini-player popup window"),
+    );
 
   let matches = clap_app.clone().get_matches();
+
+  if matches.get_flag("mini-popup") {
+    crate::platform::tray::toggle_integrated_popover(None);
+    return Ok(());
+  }
 
   if matches.get_flag("no-cache") {
     crate::library_cache::CACHE_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -301,7 +326,7 @@ of the app. Beware that this comes at a CPU cost!",
     if *tick_rate >= 1000 {
       panic!("Tick rate must be below 1000");
     } else {
-      user_config.behavior.tick_rate_milliseconds = *tick_rate as u64;
+      user_config.behavior.tick_rate_milliseconds = *tick_rate;
     }
   }
 
@@ -326,7 +351,7 @@ of the app. Beware that this comes at a CPU cost!",
   let config = rspotify::Config {
     cache_path: config_paths.token_cache_path,
     token_cached: true,
-    // ponytail: rspotify's auto_reauth calls PKCE refetch_token, which drops
+    // rspotify's auto_reauth calls PKCE refetch_token, which drops
     // refresh_token (0.16.1) and poisons the in-memory token to Ok(None) on
     // the next refresh. sptune owns refresh via refresh_authentication
     // (carry-over + write-back) instead.
@@ -356,12 +381,13 @@ of the app. Beware that this comes at a CPU cost!",
   let mut restored_sidebar_width = None;
   let mut restored_library_height = None;
   let mut restored_dev_view = None;
-  if let Some(saved) = SavedState::load() {
+  let mut saved_state = SavedState::load();
+  if let Some(saved) = saved_state.as_ref() {
     if let Some(enabled) = saved.mouse_enabled {
       user_config.behavior.enable_mouse = enabled;
       user_config.terminal.enable_mouse = enabled;
     }
-    if let Some(name) = saved.theme_preset {
+    if let Some(name) = saved.theme_preset.as_deref() {
       if let Some(index) = theme_presets().iter().position(|(n, _)| *n == name) {
         user_config.theme = theme_presets()[index].1;
         restored_theme_index = Some(index);
@@ -391,9 +417,6 @@ of the app. Beware that this comes at a CPU cost!",
     }
     if let Some(restore_settings) = saved.restore_settings {
       user_config.behavior.restore_settings = restore_settings;
-    }
-    if let Some(ramp) = saved.volume_ramp_bar {
-      user_config.behavior.volume_ramp_bar = ramp;
     }
     if let Some(enable) = saved.enable_add_to_playlist {
       user_config.behavior.enable_add_to_playlist = enable;
@@ -442,6 +465,7 @@ of the app. Beware that this comes at a CPU cost!",
     token_expiry,
   )));
   let mut app_guard = app.lock().await;
+  app_guard.startup_at = startup_at;
   app_guard.theme_preset_index = restored_theme_index;
   if let Some(show) = restored_show_library {
     app_guard.show_library = show;
@@ -461,11 +485,27 @@ of the app. Beware that this comes at a CPU cost!",
   if let Some(dev) = restored_dev_view {
     app_guard.dev_view = dev;
   }
-  if let Some(saved) = SavedState::load() {
-    if let Some(custom) = saved.made_for_you_custom {
+  if let Some(saved) = saved_state.as_mut() {
+    app_guard.music_left_pct = saved.music_left_pct;
+    app_guard.music_lyrics_pct = saved.music_lyrics_pct;
+    app_guard.music_cover_height = saved.music_cover_height;
+    if let Some(show) = saved.show_process_suspend {
+      app_guard.show_process_suspend = show;
+    }
+    if let Some(notif) = saved.desktop_notifications {
+      app_guard.desktop_notifications = notif;
+    }
+    if let Some(sorts) = saved.playlist_sorts.take() {
+      for (key, (name, desc)) in sorts {
+        if let Some(col) = backend::sort_column_from_name(&name) {
+          app_guard.playlist_sorts.insert(key, (col, desc));
+        }
+      }
+    }
+    if let Some(custom) = saved.made_for_you_custom.take() {
       app_guard.made_for_you_custom = custom;
     }
-    if let Some(uri) = saved.last_played_track {
+    if let Some(uri) = saved.last_played_track.take() {
       app_guard.saved_last_track = Some(uri);
     }
   }
@@ -565,30 +605,26 @@ of the app. Beware that this comes at a CPU cost!",
     // spending API tokens. Dies silently where unsupported; the poll below
     // and the 5s cadence keep working regardless.
     crate::platform::media_watch::spawn_media_watcher(sync_io_tx.clone());
+    crate::platform::tray_ipc::spawn(Arc::clone(&cloned_app));
+    crate::platform::tray::spawn_tray(sync_io_tx.clone(), Arc::clone(&cloned_app));
     // Restore the last session: volume/shuffle/repeat apply only when
     // nothing is already playing (gated inside AutoRestore), last
     // page/sort always. One event instead of the old ResumeState + ChangeVolume pair.
     // GetCurrentPlayback goes first so AutoRestore (and the first paint)
     // can read the live state instead of paying a second fetch.
+    if SystemTime::now() >= token_expiry {
+      let _ = sync_io_tx.send(IoEvent::RefreshAuthentication);
+    }
     let _ = sync_io_tx.send(IoEvent::GetCurrentPlayback);
-    // Pre-warm the shared ad-hoc HTTP pool (devices/lyrics/credits) so the
-    // first real use skips TCP+TLS. Fire-and-forget; the 401 warms the pipe.
-    tokio::spawn(async {
-      let _ = crate::backend::shared_http_client()
-        .get("https://api.spotify.com/v1/")
-        .send()
-        .await;
-    });
-    if let Some(saved) = SavedState::load() {
-      if user_config.behavior.restore_settings {
-        if saved.volume.is_some()
+    if let Some(saved) = saved_state {
+      if user_config.behavior.restore_settings
+        && (saved.volume.is_some()
           || saved.shuffle.is_some()
           || saved.repeat.is_some()
           || saved.track_sort.is_some()
-          || saved.last_page.is_some()
-        {
-          let _ = sync_io_tx.send(IoEvent::AutoRestore(saved.clone()));
-        }
+          || saved.last_page.is_some())
+      {
+        let _ = sync_io_tx.send(IoEvent::AutoRestore(Box::new(saved)));
       }
     }
     // The UI must run in the "main" thread
@@ -603,8 +639,15 @@ fn start_tokio(io_rx: std::sync::mpsc::Receiver<IoEvent>, network: &mut Network)
     .enable_all()
     .build()
     .expect("failed to build network runtime");
+  // Pre-warm the shared HTTP pool on the network runtime while UI starts.
+  rt.spawn(async {
+    let _ = crate::backend::shared_http_client()
+      .get("https://api.spotify.com/v1/")
+      .send()
+      .await;
+  });
   while let Ok(io_event) = io_rx.recv() {
-    // ponytail: catch one handler panic so the thread (and the channel) survives;
+    // catch one handler panic so the thread (and the channel) survives;
     // a panicking handler is skipped and the next event is processed.
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
       rt.block_on(network.handle_network_event(io_event));
@@ -622,6 +665,11 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     execute!(stdout, EnableMouseCapture)?;
   }
   enable_raw_mode()?;
+  {
+    let picker = ratatui_image::picker::Picker::from_query_stdio()
+      .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+    app.lock().await.cover_picker = Some(picker);
+  }
 
   let mut backend = CrosstermBackend::new(stdout);
 
@@ -648,6 +696,9 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
 
   let mut is_first_render = true;
   let mut last_refresh_attempt = SystemTime::UNIX_EPOCH;
+  let mut last_active_block: Option<ActiveBlock> = None;
+  let mut kitty_placed: Option<(String, Rect)> = None;
+  let is_tmux = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
 
   loop {
     // Wait for the next event WITHOUT holding the app lock, so the network
@@ -706,7 +757,7 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
 
     let mut quit = false;
     for event in batch {
-      // ponytail: cooldown 60s so a failed refetch (main.rs:505 every 250ms) doesn't tight-loop
+      // cooldown 60s so a failed refetch (main.rs:505 every 250ms) doesn't tight-loop
       let now = SystemTime::now();
       if !app.auth_reauth_required
         && now > app.spotify_token_expiry
@@ -762,78 +813,139 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
           if app.update_on_tick() {
             needs_redraw = true;
           }
+          if app.get_current_route().active_block == ActiveBlock::MusicView {
+            app.visualizer.poll();
+            app.visualizer.tick();
+            if app.visualizer.mode == visualizer::VizMode::Mosaic {
+              let rows = (app.size.height as usize * 30 / 100)
+                .saturating_sub(2)
+                .max(1);
+              let cols = (app.size.width as usize * 70 / 100)
+                .saturating_sub(2)
+                .max(1);
+              app.visualizer.mosaic_tick(rows, cols);
+            }
+            needs_redraw = true;
+          }
         }
       }
     }
     if quit {
       break;
     }
-    // ponytail: idle throttle — skip full redraw when paused and no input; cuts 4 fps wake-ups to 0 when idle
+    // idle throttle — skip full redraw when paused and no input; cuts 4 fps wake-ups to 0 when idle
     if !needs_redraw {
       drop(app);
       continue;
     }
 
-    let current_route = app.get_current_route();
-    terminal.draw(|mut f| {
+    let active_block = app.get_current_route().active_block;
+    events.set_fast_tick(
+      active_block == ActiveBlock::MusicView && app.visualizer.mode != visualizer::VizMode::Off,
+    );
+    if active_block == ActiveBlock::MusicView && last_active_block != Some(ActiveBlock::MusicView) {
+      app.visualizer.poll();
+    }
+    let is_fullscreen = |b: ActiveBlock| {
+      matches!(
+        b,
+        ActiveBlock::HelpMenu
+          | ActiveBlock::Error
+          | ActiveBlock::SelectDevice
+          | ActiveBlock::MusicView
+      )
+    };
+    if last_active_block.is_some_and(|prev| {
+      prev != active_block && (is_fullscreen(prev) || is_fullscreen(active_block))
+    }) {
+      if last_active_block == Some(ActiveBlock::MusicView) {
+        app.visualizer.stop();
+      }
+      let pb_was_placed = PLAYBAR_KITTY
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+        .is_some();
+      if kitty_placed.take().is_some() || pb_was_placed {
+        use std::io::Write as _;
+        let _ = write!(
+          terminal.backend_mut(),
+          "{}{}",
+          cover_art::kitty_delete_seq(is_tmux),
+          cover_art::kitty_delete_id_seq(cover_art::KITTY_PLAYBAR_COVER_ID, is_tmux),
+        );
+      }
+      terminal.clear()?;
+    }
+    last_active_block = Some(active_block);
+
+    terminal.draw(|f| {
       // Paint the theme background so "black theme" is actually black
       f.render_widget(
         Block::default().style(Style::default().bg(app.user_config.theme.background)),
         f.area(),
       );
-      match current_route.active_block {
+      match active_block {
         ActiveBlock::HelpMenu => {
-          tui::draw_help_menu(&mut f, &app);
+          tui::draw_help_menu(f, &app);
         }
         ActiveBlock::Error => {
-          tui::draw_error_screen(&mut f, &app);
+          tui::draw_error_screen(f, &app);
         }
         ActiveBlock::SelectDevice => {
-          tui::draw_device_list(&mut f, &app);
+          tui::draw_device_list(f, &app);
         }
         ActiveBlock::MusicView => {
-          tui::draw_music_view(&mut f, &app);
+          tui::draw_music_view(f, &app);
         }
         _ => {
-          tui::draw_main_layout(&mut f, &app);
+          tui::draw_main_layout(f, &app);
         }
       }
     })?;
 
-    if current_route.active_block == ActiveBlock::Input {
+    sync_kitty_cover(
+      terminal.backend_mut(),
+      &app,
+      active_block,
+      is_tmux,
+      &mut kitty_placed,
+    )?;
+
+    if active_block == ActiveBlock::Input {
       terminal.show_cursor()?;
+      // Put the cursor back inside the search box (replicated header geometry,
+      // matching what the drawer renders, so it tracks layout changes).
+      let margin = tui::layout::get_main_layout_margin(&app);
+      let input_box = ratatui::layout::Rect::new(
+        margin,
+        margin,
+        app.size.width.saturating_sub(margin * 2),
+        tui::layout::HEADER_HEIGHT,
+      );
+      let search_box = tui::layout::search_box_rect(&app, input_box);
+      let w = terminal.backend_mut();
+      // Scroll the input so the cursor stays in view; drawer uses the same
+      // viewport (inner width minus the clear ✕ reserve).
+      let input_string: String = app.input.iter().collect();
+      let inner_w = search_box.width.saturating_sub(2) as usize;
+      let reserve = if app.input.is_empty() { 0 } else { 3 };
+      let viewport_w = inner_w.saturating_sub(reserve);
+      let (_, vis_cursor) = tui::layout::search_input_visible(
+        &input_string,
+        app.input_cursor_position as usize,
+        viewport_w,
+      );
+      let cursor_col = search_box.x + 1 + vis_cursor as u16;
+      execute!(w, MoveTo(cursor_col, search_box.y + 1))?;
     } else {
       terminal.hide_cursor()?;
     }
 
-    // Put the cursor back inside the search box (replicated header geometry,
-    // matching what the drawer renders, so it tracks layout changes).
-    let margin = tui::layout::get_main_layout_margin(&app);
-    let input_box = ratatui::layout::Rect::new(
-      margin,
-      margin,
-      app.size.width.saturating_sub(margin * 2),
-      tui::layout::HEADER_HEIGHT,
-    );
-    let search_box = tui::layout::search_box_rect(&app, input_box);
-    let w = terminal.backend_mut();
-    // Scroll the input so the cursor stays in view; drawer uses the same
-    // viewport (inner width minus the clear ✕ reserve).
-    let input_string: String = app.input.iter().collect();
-    let inner_w = search_box.width.saturating_sub(2) as usize;
-    let reserve = if app.input.is_empty() { 0 } else { 3 };
-    let viewport_w = inner_w.saturating_sub(reserve);
-    let (_, vis_cursor) = tui::layout::search_input_visible(
-      &input_string,
-      app.input_cursor_position as usize,
-      viewport_w,
-    );
-    let cursor_col = search_box.x + 1 + vis_cursor as u16;
-    execute!(w, MoveTo(cursor_col, search_box.y + 1))?;
-
     // Delay spotify request until first render, will have the effect of improving
     // startup speed
     if is_first_render {
+      app.first_draw_ms = Some(app.startup_at.elapsed().as_millis() as u64);
       app.dispatch(IoEvent::GetPlaylists);
       app.dispatch(IoEvent::GetUser);
       let soloist_transfer = app
@@ -859,10 +971,11 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     }
   }
 
-  // Exit policy: Spotify dies with sptune. Runs before anything fallible so
-  // a terminal-teardown error can't skip it; matches processes by name, so
-  // it works no matter who launched Spotify.
-  crate::platform::spotify::kill_all_spotify();
+  crate::platform::tray_ipc::cleanup();
+  // Only close Spotify desktop on exit if sptune itself launched it.
+  if crate::platform::spotify::was_spawned() {
+    crate::platform::spotify::kill_all_spotify();
+  }
   // Soloist is our own child, so ask first: restore the terminal so the
   // question is visible (close_application is idempotent — the final
   // teardown below repeats it harmlessly). Anything but y/yes kills it,
@@ -879,6 +992,17 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     crate::platform::soloist::kill_spawned();
   }
 
+  {
+    use std::io::Write as _;
+    let _ = write!(
+      terminal.backend_mut(),
+      "{}{}",
+      cover_art::kitty_delete_seq(is_tmux),
+      cover_art::kitty_delete_id_seq(cover_art::KITTY_PLAYBAR_COVER_ID, is_tmux),
+    );
+    let _ = Backend::flush(terminal.backend_mut());
+  }
+  let _ = kitty_placed.take();
   terminal.show_cursor()?;
 
   // The single save point: the full snapshot (settings + playback state +
@@ -894,5 +1018,153 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     user_config.terminal.enable_mouse,
   )?;
 
+  Ok(())
+}
+
+static PLAYBAR_KITTY: std::sync::Mutex<Option<(String, Rect)>> = std::sync::Mutex::new(None);
+
+/// Emit direct Kitty graphics placement (`a=T,f=100,t=d,i=1,c=cols,r=rows,C=1`)
+/// outside ratatui's cell buffer so Ghostty/Kitty render the cover cleanly on
+/// the first frame without Unicode-placeholder alignment or cursor glitches.
+fn sync_kitty_cover<W: io::Write>(
+  w: &mut W,
+  app: &App,
+  active_block: ActiveBlock,
+  is_tmux: bool,
+  placed: &mut Option<(String, Rect)>,
+) -> Result<()> {
+  let Some(picker) = app.cover_picker.as_ref() else {
+    return Ok(());
+  };
+  if picker.protocol_type() != ratatui_image::picker::ProtocolType::Kitty {
+    return Ok(());
+  }
+  let route = app.get_current_route();
+  let (want_id, target_inner, src_cover) = if active_block == ActiveBlock::MusicView {
+    let id = cover_art::now_playing(
+      app
+        .current_playback_context
+        .as_ref()
+        .and_then(|c| c.item.as_ref()),
+    )
+    .map(|(id, _)| id);
+    (
+      id,
+      Some(tui::music_view::cover_inner_rect_for(app, app.size)),
+      app.cover_art.as_ref(),
+    )
+  } else if route.id == RouteId::Artist
+    && !matches!(
+      active_block,
+      ActiveBlock::HelpMenu | ActiveBlock::Error | ActiveBlock::SelectDevice
+    )
+  {
+    let id = app
+      .artist
+      .as_ref()
+      .filter(|a| a.image_url.is_some())
+      .map(|a| format!("artist:{}", a.artist_id));
+    let inner = tui::layout::main_body_content_rect(app)
+      .and_then(tui::layout::artist_header_rect)
+      .map(tui::layout::artist_cover_rect);
+    (id, inner, app.artist_cover.as_ref())
+  } else {
+    (None, None, None)
+  };
+  let next = match (want_id, target_inner, src_cover) {
+    (Some(want), Some(inner), Some((have, img))) if &want == have => {
+      let target =
+        tui::music_view::fit_cover_rect(inner, (img.width(), img.height()), picker.font_size());
+      (target.width > 0 && target.height > 0).then_some((want, img, target))
+    }
+    _ => None,
+  };
+  match next {
+    Some((id, img, target)) => {
+      if placed.as_ref() != Some(&(id.clone(), target)) {
+        let seq = cover_art::kitty_place_seq(
+          img,
+          target.width,
+          target.height,
+          picker.font_size(),
+          is_tmux,
+        )?;
+        write!(w, "{}", cover_art::kitty_delete_seq(is_tmux))?;
+        execute!(w, MoveTo(target.x, target.y))?;
+        w.write_all(seq.as_bytes())?;
+        w.flush()?;
+        *placed = Some((id, target));
+      }
+    }
+    None if placed.is_some() => {
+      write!(w, "{}", cover_art::kitty_delete_seq(is_tmux))?;
+      w.flush()?;
+      *placed = None;
+    }
+    None => {}
+  }
+
+  let pb_next = if !matches!(
+    active_block,
+    ActiveBlock::MusicView | ActiveBlock::HelpMenu | ActiveBlock::Error | ActiveBlock::SelectDevice
+  ) && app.dialog.is_none()
+  {
+    let want_id = cover_art::now_playing(
+      app
+        .current_playback_context
+        .as_ref()
+        .and_then(|c| c.item.as_ref()),
+    )
+    .map(|(id, _)| id);
+    match (
+      want_id,
+      tui::layout::playbar_cover_rect(app),
+      &app.cover_art,
+    ) {
+      (Some(want), Some(inner), Some((have, img))) if &want == have => {
+        let target =
+          tui::music_view::fit_cover_rect(inner, (img.width(), img.height()), picker.font_size());
+        (target.width > 0 && target.height > 0).then_some((want, img, target))
+      }
+      _ => None,
+    }
+  } else {
+    None
+  };
+  if let Ok(mut pb_placed) = PLAYBAR_KITTY.lock() {
+    match pb_next {
+      Some((id, img, target)) => {
+        if pb_placed.as_ref() != Some(&(id.clone(), target)) {
+          let seq = cover_art::kitty_place_id_seq(
+            cover_art::KITTY_PLAYBAR_COVER_ID,
+            img,
+            target.width,
+            target.height,
+            picker.font_size(),
+            is_tmux,
+          )?;
+          write!(
+            w,
+            "{}",
+            cover_art::kitty_delete_id_seq(cover_art::KITTY_PLAYBAR_COVER_ID, is_tmux)
+          )?;
+          execute!(w, MoveTo(target.x, target.y))?;
+          w.write_all(seq.as_bytes())?;
+          w.flush()?;
+          *pb_placed = Some((id, target));
+        }
+      }
+      None if pb_placed.is_some() => {
+        write!(
+          w,
+          "{}",
+          cover_art::kitty_delete_id_seq(cover_art::KITTY_PLAYBAR_COVER_ID, is_tmux)
+        )?;
+        w.flush()?;
+        *pb_placed = None;
+      }
+      None => {}
+    }
+  }
   Ok(())
 }

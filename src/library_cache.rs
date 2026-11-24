@@ -2,8 +2,11 @@ use std::{
   collections::HashMap,
   fs,
   path::PathBuf,
-  sync::atomic::{AtomicBool, Ordering},
-  time::{SystemTime, UNIX_EPOCH},
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+  },
+  time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// Set false by `sptune --no-cache`: every cache read/write is skipped for
@@ -15,14 +18,15 @@ use serde::{Deserialize, Serialize};
 const CONFIG_DIR: &str = ".config";
 const APP_CONFIG_DIR: &str = "sptune";
 const CACHE_FILE: &str = "library_cache.json";
+const MAX_CACHED_LISTS: usize = 16;
 /// Entries older than this are evicted on load (ToS: no indefinite storage).
-const CACHE_TTL_SECS: u64 = 30 * 86400;
+const CACHE_TTL_SECS: u64 = 7 * 86400;
 
 /// Disk cache of whole "my library" lists (playlists, saved
 /// tracks/albums/shows), keyed by endpoint. Entries live 30 days; the
 /// screen is served from cache and merged with a delta probe on open, so a
 /// throttled endpoint never blanks the UI.
-// ponytail: terms — caches only track metadata (FullTrack/SavedTrack), never audio features; TTL infinite but reconciled on each open via snapshot/total delta (backend.rs:2710); attribution intact via Spotify Web API; no Cache-Control headers from API so client-side only
+// terms — caches only track metadata (FullTrack/SavedTrack), never audio features; TTL infinite but reconciled on each open via snapshot/total delta (backend.rs:2710); attribution intact via Spotify Web API; no Cache-Control headers from API so client-side only
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct CachedList {
   pub fetched_at: u64,
@@ -36,6 +40,7 @@ pub struct LibraryCache {
   path: PathBuf,
   pub map: HashMap<String, CachedList>,
   loaded: bool,
+  last_save: Arc<Mutex<Instant>>,
 }
 
 impl Default for LibraryCache {
@@ -52,6 +57,7 @@ impl LibraryCache {
         .unwrap_or_default(),
       map: HashMap::new(),
       loaded: false,
+      last_save: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10))),
     }
   }
 
@@ -81,8 +87,11 @@ impl LibraryCache {
 
   /// Cached items deserialized to `T`, plus the stored total.
   pub fn get_typed<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<(Vec<T>, u32)> {
+    if !CACHE_ENABLED.load(Ordering::Relaxed) {
+      return None;
+    }
     let entry = self.map.get(key)?;
-    serde_json::from_value::<Vec<T>>(entry.items.clone())
+    Vec::<T>::deserialize(&entry.items)
       .ok()
       .map(|items| (items, entry.total))
   }
@@ -95,6 +104,16 @@ impl LibraryCache {
     let Ok(items) = serde_json::to_value(items) else {
       return;
     };
+    if !self.map.contains_key(key) && self.map.len() >= MAX_CACHED_LISTS {
+      if let Some(oldest) = self
+        .map
+        .iter()
+        .min_by_key(|(_, v)| v.fetched_at)
+        .map(|(k, _)| k.clone())
+      {
+        self.map.remove(&oldest);
+      }
+    }
     let entry = self.map.entry(key.to_string()).or_default();
     entry.fetched_at = now_secs();
     entry.items = items;
@@ -116,6 +135,16 @@ impl LibraryCache {
       return;
     }
     self.ensure_loaded();
+    if !self.map.contains_key(key) && self.map.len() >= MAX_CACHED_LISTS {
+      if let Some(oldest) = self
+        .map
+        .iter()
+        .min_by_key(|(_, v)| v.fetched_at)
+        .map(|(k, _)| k.clone())
+      {
+        self.map.remove(&oldest);
+      }
+    }
     let entry = self.map.entry(key.to_string()).or_default();
     let mut merged: Vec<serde_json::Value> = match entry.items {
       serde_json::Value::Array(ref arr) => arr.clone(),
@@ -156,15 +185,47 @@ impl LibraryCache {
   }
 
   fn save(&self) {
+    if !cfg!(test) {
+      let due = self
+        .last_save
+        .lock()
+        .map(|mut t| {
+          if t.elapsed() >= Duration::from_secs(2) {
+            *t = Instant::now();
+            true
+          } else {
+            false
+          }
+        })
+        .unwrap_or(true);
+      if !due {
+        return;
+      }
+    }
     if let Ok(json) = serde_json::to_string(&self.map) {
       if cfg!(test) {
-        let _ = fs::write(&self.path, json);
-      } else {
-        let path = self.path.clone();
-        std::thread::spawn(move || {
-          let _ = fs::write(path, json);
-        });
+        Self::write_atomic(&self.path, &json);
+        return;
       }
+      let path = self.path.clone();
+      std::thread::spawn(move || {
+        Self::write_atomic(&path, &json);
+      });
+    }
+  }
+
+  fn write_atomic(path: &std::path::Path, json: &str) {
+    if let Some(dir) = path.parent() {
+      let _ = fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("json.tmp");
+    if fs::write(&tmp, json).is_ok() {
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+      }
+      let _ = fs::rename(&tmp, path);
     }
   }
 }

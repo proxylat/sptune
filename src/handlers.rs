@@ -12,6 +12,7 @@ mod mouse;
 mod playbar;
 mod playlist;
 mod podcasts;
+mod queue;
 mod recently_played;
 mod request_log;
 mod search_input;
@@ -224,6 +225,9 @@ fn handle_block_events(key: Key, app: &mut App) {
     ActiveBlock::RecentlyPlayed => {
       recently_played::handler(key, app);
     }
+    ActiveBlock::Queue => {
+      queue::handler(key, app);
+    }
     ActiveBlock::Artists => {
       artist_list::handler(key, app);
     }
@@ -240,7 +244,10 @@ fn handle_block_events(key: Key, app: &mut App) {
       playbar::handler(key, app);
     }
     ActiveBlock::MusicView => {
-      // Music view is a global overlay; no per-block keys.
+      if key == Key::Char('v') {
+        let next = app.visualizer.mode.cycle();
+        app.visualizer.set_mode(next);
+      }
     }
     ActiveBlock::Dialog(_) => {
       dialog::handler(key, app);
@@ -278,8 +285,9 @@ fn handle_escape(app: &mut App) {
         app.set_current_route_state(Some(ActiveBlock::Empty), None);
       }
     }
-    // These are global views that have no active/inactive distinction so do nothing
-    ActiveBlock::SelectDevice => {}
+    ActiveBlock::SelectDevice => {
+      app.pop_navigation_stack();
+    }
     _ => {
       app.set_current_route_state(Some(ActiveBlock::Empty), None);
     }

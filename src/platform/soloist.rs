@@ -37,7 +37,7 @@ pub fn take_runtime() -> Option<(PathBuf, String)> {
 fn child_alive(pid: u32) -> bool {
   #[cfg(target_os = "linux")]
   {
-    // ponytail: /proc presence instead of a signal crate for one check.
+    // /proc presence instead of a signal crate for one check.
     Path::new(&format!("/proc/{pid}")).exists()
   }
   #[cfg(windows)]

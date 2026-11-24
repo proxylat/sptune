@@ -92,6 +92,7 @@ pub struct Events {
   rx: mpsc::Receiver<Event<InputEvent>>,
   // Need to be kept around to prevent disposing the sender side.
   _tx: mpsc::Sender<Event<InputEvent>>,
+  fast_tick: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Events {
@@ -103,9 +104,17 @@ impl Events {
     })
   }
 
+  pub fn set_fast_tick(&self, fast: bool) {
+    self
+      .fast_tick
+      .store(fast, std::sync::atomic::Ordering::Relaxed);
+  }
+
   /// Constructs an new instance of `Events` from given config.
   pub fn with_config(config: EventConfig) -> Events {
     let (tx, rx) = mpsc::channel();
+    let fast_tick = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fast_tick_thread = std::sync::Arc::clone(&fast_tick);
 
     let event_tx = tx.clone();
     thread::spawn(move || {
@@ -115,9 +124,14 @@ impl Events {
       #[cfg(windows)]
       let mut dup_filter = DupPressFilter::default();
       loop {
+        let timeout = if fast_tick_thread.load(std::sync::atomic::Ordering::Relaxed) {
+          Duration::from_millis(33).min(config.tick_rate)
+        } else {
+          config.tick_rate
+        };
         // poll for tick rate duration, if no event, sent tick event.
         // poll/read failures mean terminal is closing; exit thread instead of panicking.
-        let has_event = match event::poll(config.tick_rate) {
+        let has_event = match event::poll(timeout) {
           Ok(v) => v,
           Err(_) => {
             if event_tx.send(Event::Tick).is_err() {
@@ -181,7 +195,11 @@ impl Events {
       }
     });
 
-    Events { rx, _tx: tx }
+    Events {
+      rx,
+      _tx: tx,
+      fast_tick,
+    }
   }
 
   /// Attempts to read an event.

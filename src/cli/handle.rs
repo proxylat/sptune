@@ -36,7 +36,7 @@ pub async fn handle_matches<'a>(
   let device_id = cli.net.client_config.device_id.clone();
   if device_id.is_none() || !devices_list.contains(&device_id.unwrap()) {
     // Select the first device available
-    if let Some(d) = devices_list.get(0) {
+    if let Some(d) = devices_list.first() {
       cli.net.client_config.set_device_id(d.clone())?;
     }
   }
@@ -83,6 +83,54 @@ pub async fn handle_matches<'a>(
       }
       if let Some(secs) = matches.get_one::<String>("seek") {
         cli.seek(secs.clone()).await?;
+      }
+
+      if matches.get_flag("xfce") {
+        let app = cli.net.app.lock().await;
+        let exe = std::env::current_exe()
+          .map(|p| p.to_string_lossy().into_owned())
+          .unwrap_or_else(|_| "sptune".to_string());
+        let xml = match &app.current_playback_context {
+          Some(ctx) => {
+            let (title, artist, album) = match &ctx.item {
+              Some(rspotify::model::PlayableItem::Track(t)) => (
+                t.name.clone(),
+                t.artists
+                  .iter()
+                  .map(|a| a.name.as_str())
+                  .collect::<Vec<_>>()
+                  .join(", "),
+                t.album.name.clone(),
+              ),
+              Some(rspotify::model::PlayableItem::Episode(e)) => {
+                (e.name.clone(), e.show.name.clone(), String::new())
+              }
+              _ => (String::new(), String::new(), String::new()),
+            };
+            let esc = |s: &str| {
+              s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+            };
+            let txt = if title.is_empty() {
+              "󰓇 Spotify".to_string()
+            } else if artist.is_empty() {
+              format!("󰓇 {}", esc(&title))
+            } else {
+              format!("󰓇 {} - {}", esc(&title), esc(&artist))
+            };
+            let tip = if album.is_empty() {
+              esc(&title)
+            } else {
+              format!("{}\n{} — {}", esc(&title), esc(&artist), esc(&album))
+            };
+            format!("<txt>{txt}</txt><txtclick>{exe} --mini-popup</txtclick><tool>{tip}</tool>")
+          }
+          None => {
+            format!("<txt>󰓇</txt><txtclick>{exe} --mini-popup</txtclick><tool>Not playing</tool>")
+          }
+        };
+        return Ok(xml);
       }
 
       // Print out the status if no errors were found
@@ -141,7 +189,7 @@ pub async fn handle_matches<'a>(
   };
 
   // Check if there was an error
-  let api_error = cli.net.app.lock().await.api_error.clone();
+  let api_error = cli.net.app.lock().await.api_errors_text();
   if api_error.is_empty() {
     output
   } else {

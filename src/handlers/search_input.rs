@@ -85,10 +85,8 @@ pub fn handler(key: Key, app: &mut App) {
         app.input_cursor_position -= compute_character_width(last_c);
       }
     }
-    Key::Delete | Key::Ctrl('d') => {
-      if !app.input.is_empty() && app.input_idx < app.input.len() {
-        app.input.remove(app.input_idx);
-      }
+    Key::Delete | Key::Ctrl('d') if !app.input.is_empty() && app.input_idx < app.input.len() => {
+      app.input.remove(app.input_idx);
     }
     _ => {}
   }
@@ -119,7 +117,7 @@ fn spotify_resource_id(base: &str, uri: &str, sep: &str, resource_type: &str) ->
   let id_string_with_query_params = uri.trim_start_matches(&uri_prefix);
   let query_idx = id_string_with_query_params
     .find('?')
-    .unwrap_or_else(|| id_string_with_query_params.len());
+    .unwrap_or(id_string_with_query_params.len());
   let id_string = id_string_with_query_params[0..query_idx].to_string();
   // If the lengths aren't equal, we must have found a match.
   let matched = id_string_with_query_params.len() != uri.len() && id_string.len() != uri.len();
@@ -408,7 +406,7 @@ mod tests {
     const URL_BASE: &str = "https://open.spotify.com/";
 
     fn check_uri_parse(expected_id: &str, parsed: (String, bool)) {
-      assert_eq!(parsed.1, true);
+      assert!(parsed.1);
       assert_eq!(parsed.0, expected_id);
     }
 
@@ -469,13 +467,13 @@ mod tests {
       let totally_wrong = "hehe-haha-3aNsrV6lkzmcU1w8u8kA7N";
       let random = "random string";
       let (_, matched) = spotify_resource_id(URI_BASE, swapped, ":", "track");
-      assert_eq!(matched, false);
+      assert!(!matched);
       let (_, matched) = spotify_resource_id(URI_BASE, totally_wrong, ":", "track");
-      assert_eq!(matched, false);
+      assert!(!matched);
       let (_, matched) = spotify_resource_id(URL_BASE, totally_wrong, "/", "track");
-      assert_eq!(matched, false);
+      assert!(!matched);
       let (_, matched) = spotify_resource_id(URL_BASE, random, "/", "track");
-      assert_eq!(matched, false);
+      assert!(!matched);
     }
 
     #[test]
@@ -488,12 +486,12 @@ mod tests {
       let expected_id = "1cJ6lPBYj2fscs0kqBHsVV";
 
       let (actual_id, matched) = spotify_resource_id(URL_BASE, playlist_url, "/", "playlist");
-      assert_eq!(matched, true);
+      assert!(matched);
       assert_eq!(actual_id, expected_id);
 
       let (actual_id, matched) =
         spotify_resource_id(URL_BASE, playlist_url_with_query, "/", "playlist");
-      assert_eq!(matched, true);
+      assert!(matched);
       assert_eq!(actual_id, expected_id);
     }
 
@@ -502,7 +500,7 @@ mod tests {
       let playlist_url =
         "https://open.spotify.com/playlist/1cJ6lPBYj2fscs0kqBHsVV?si=OdwuJsbsSeuUAOadehng3A";
       let (_, matched) = spotify_resource_id(URL_BASE, playlist_url, "/", "album");
-      assert_eq!(matched, false);
+      assert!(!matched);
     }
   }
 }

@@ -181,8 +181,8 @@ pub fn handler(key: Key, app: &mut App) {
     }
     // Scroll down
     k if k == app.user_config.keys.next_page => {
-      match &app.track_table.context {
-        Some(context) => match context {
+      if let Some(context) = &app.track_table.context {
+        match context {
           TrackTableContext::MyPlaylists => {
             if let (Some(playlists), Some(selected_playlist_index)) =
               (&app.playlists, &app.selected_playlist_index)
@@ -221,14 +221,13 @@ pub fn handler(key: Key, app: &mut App) {
               }
             }
           }
-        },
-        None => {}
+        }
       };
     }
     // Scroll up
     k if k == app.user_config.keys.previous_page => {
-      match &app.track_table.context {
-        Some(context) => match context {
+      if let Some(context) = &app.track_table.context {
+        match context {
           TrackTableContext::MyPlaylists => {
             if let (Some(playlists), Some(selected_playlist_index)) =
               (&app.playlists, &app.selected_playlist_index)
@@ -263,8 +262,7 @@ pub fn handler(key: Key, app: &mut App) {
               ));
             }
           }
-        },
-        None => {}
+        }
       };
     }
     Key::Char('s') => handle_save_track_event(app),
@@ -396,8 +394,8 @@ fn handle_save_track_event(app: &mut App) {
 }
 
 fn jump_to_end(app: &mut App) {
-  match &app.track_table.context {
-    Some(context) => match context {
+  if let Some(context) = &app.track_table.context {
+    match context {
       TrackTableContext::MyPlaylists => {
         if let (Some(playlists), Some(selected_playlist_index)) =
           (&app.playlists, &app.selected_playlist_index)
@@ -417,74 +415,72 @@ fn jump_to_end(app: &mut App) {
       TrackTableContext::AlbumSearch => {}
       TrackTableContext::PlaylistSearch => {}
       TrackTableContext::MadeForYou => {}
-    },
-    None => {}
+    }
   }
 }
 
 fn on_enter(app: &mut App) {
-  let TrackTable {
-    context,
-    selected_index,
-    tracks,
-    ..
-  } = &app.track_table;
-  match &context {
-    Some(context) => match context {
-      TrackTableContext::MyPlaylists => {
-        if let Some(track) = tracks.get(*selected_index) {
-          let context_uri = app.track_table_playlist_uri();
-          let track_uri = track.id.as_ref().map(|id| id.uri());
-          app.dispatch(IoEvent::StartPlaybackAt(context_uri, track_uri));
-        };
-      }
-      TrackTableContext::SavedTracks => {
-        if let Some(saved_tracks) = &app.library.saved_tracks.get_results(None) {
-          let track_uris: Vec<String> = saved_tracks
-            .items
-            .iter()
-            .map(|item| {
-              item
-                .track
-                .id
-                .as_ref()
-                .map(|id| id.uri())
-                .unwrap_or_default()
-            })
-            .collect();
-
-          app.dispatch(IoEvent::StartPlayback(
-            None,
-            Some(track_uris),
-            Some(app.track_table.selected_index),
-          ));
-        };
-      }
-      TrackTableContext::AlbumSearch => {}
-      TrackTableContext::PlaylistSearch => {
-        let TrackTable {
-          selected_index,
-          tracks,
-          ..
-        } = &app.track_table;
-        if let Some(track) = tracks.get(*selected_index) {
-          let context_uri = app.track_table_playlist_uri();
-          let track_uri = track.id.as_ref().map(|id| id.uri());
-          app.dispatch(IoEvent::StartPlaybackAt(context_uri, track_uri));
-        };
-      }
-      TrackTableContext::MadeForYou => {
-        if let Some(track) = tracks.get(*selected_index) {
-          let context_uri = app
-            .made_for_you_playlist_id(app.made_for_you_index)
-            .map(|id| format!("spotify:playlist:{}", id));
-          let track_uri = track.id.as_ref().map(|id| id.uri());
-          app.dispatch(IoEvent::StartPlaybackAt(context_uri, track_uri));
-        }
-      }
-    },
-    None => {}
+  let Some(context) = app.track_table.context else {
+    return;
   };
+  let selected_index = app.track_table.selected_index;
+  match context {
+    TrackTableContext::MyPlaylists => {
+      if let Some(track) = app.track_table.tracks.get(selected_index).cloned() {
+        let context_uri = app.track_table_playlist_uri();
+        let track_uri = track.id.as_ref().map(|id| id.uri());
+        app.play_track_optimistic(track);
+        app.dispatch(IoEvent::StartPlaybackAt(context_uri, track_uri));
+      };
+    }
+    TrackTableContext::SavedTracks => {
+      if let Some(saved_tracks) = app.library.saved_tracks.get_results(None) {
+        let clicked = saved_tracks
+          .items
+          .get(selected_index)
+          .map(|item| item.track.clone());
+        let track_uris: Vec<String> = saved_tracks
+          .items
+          .iter()
+          .map(|item| {
+            item
+              .track
+              .id
+              .as_ref()
+              .map(|id| id.uri())
+              .unwrap_or_default()
+          })
+          .collect();
+        if let Some(track) = clicked {
+          app.play_track_optimistic(track);
+        }
+        app.dispatch(IoEvent::StartPlayback(
+          None,
+          Some(track_uris),
+          Some(selected_index),
+        ));
+      };
+    }
+    TrackTableContext::AlbumSearch => {}
+    TrackTableContext::PlaylistSearch => {
+      if let Some(track) = app.track_table.tracks.get(selected_index).cloned() {
+        let context_uri = app.track_table_playlist_uri();
+        let track_uri = track.id.as_ref().map(|id| id.uri());
+        app.play_track_optimistic(track);
+        app.dispatch(IoEvent::StartPlaybackAt(context_uri, track_uri));
+      };
+    }
+    TrackTableContext::MadeForYou => {
+      if let Some(track) = app.track_table.tracks.get(selected_index).cloned() {
+        let context_uri = app
+          .made_for_you_playlist_id(app.made_for_you_index)
+          .map(|id| format!("spotify:playlist:{}", id));
+        let track_uri = track.id.as_ref().map(|id| id.uri());
+        app.play_track_optimistic(track);
+        app.dispatch(IoEvent::StartPlaybackAt(context_uri, track_uri));
+      }
+    }
+  }
 }
 
 fn on_queue(app: &mut App) {
@@ -494,8 +490,8 @@ fn on_queue(app: &mut App) {
     tracks,
     ..
   } = &app.track_table;
-  match &context {
-    Some(context) => match context {
+  if let Some(context) = &context {
+    match context {
       TrackTableContext::MyPlaylists => {
         if let Some(track) = tracks.get(*selected_index) {
           let uri = track.id.as_ref().map(|id| id.uri()).unwrap_or_default();
@@ -533,14 +529,13 @@ fn on_queue(app: &mut App) {
           app.dispatch(IoEvent::AddItemToQueue(uri));
         }
       }
-    },
-    None => {}
+    }
   };
 }
 
 fn jump_to_start(app: &mut App) {
-  match &app.track_table.context {
-    Some(context) => match context {
+  if let Some(context) = &app.track_table.context {
+    match context {
       TrackTableContext::MyPlaylists => {
         if let (Some(playlists), Some(selected_playlist_index)) =
           (&app.playlists, &app.selected_playlist_index)
@@ -556,8 +551,7 @@ fn jump_to_start(app: &mut App) {
       TrackTableContext::AlbumSearch => {}
       TrackTableContext::PlaylistSearch => {}
       TrackTableContext::MadeForYou => {}
-    },
-    None => {}
+    }
   }
 }
 
@@ -565,8 +559,8 @@ fn try_load_next_page(app: &mut App) {
   if app.is_fetching_next_page {
     return;
   }
-  match &app.track_table.context {
-    Some(context) => match context {
+  if let Some(context) = &app.track_table.context {
+    match context {
       TrackTableContext::MyPlaylists => {
         if let (Some(playlists), Some(selected_playlist_index)) =
           (&app.playlists, &app.selected_playlist_index)
@@ -605,7 +599,6 @@ fn try_load_next_page(app: &mut App) {
         }
       }
       _ => {}
-    },
-    None => {}
+    }
   }
 }

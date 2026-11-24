@@ -42,6 +42,13 @@ struct ScrollbarDrag {
   grab_offset: usize,
 }
 
+#[derive(Clone, Copy)]
+enum MusicResizeAxis {
+  Columns,
+  Lyrics,
+  Cover,
+}
+
 #[derive(Clone)]
 struct SidebarDrag {
   start_x: u16,
@@ -104,6 +111,9 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
         if handle_sidebar_drag_down(x, y, app) {
           return;
         }
+        if handle_music_view_drag_down(x, y, app) {
+          return;
+        }
         // Press on the scrollbar thumb starts a drag
         if handle_scrollbar_down(x, y, app) {
           return;
@@ -119,6 +129,9 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
         return;
       }
       if handle_sidebar_drag(mouse.column, app) {
+        return;
+      }
+      if handle_music_view_drag(mouse.column, mouse.row, app) {
         return;
       }
       PLAYBAR_DRAG.with(|d| {
@@ -140,7 +153,8 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
             } else {
               (clamped_x - drag.bar_x as f32) / drag.bar_w as f32
             };
-            app.preview_seek((drag.duration_ms as f32 * fraction) as u32);
+            let ms = (drag.duration_ms as f32 * fraction) as u32;
+            app.preview_seek(ms);
           } else {
             let percent =
               (((x as i32 - drag.bar_x as i32) * 100) / drag.bar_w as i32).clamp(0, 100);
@@ -170,32 +184,91 @@ pub fn handle_mouse(mouse: MouseEvent, app: &mut App) {
       SIDEBAR_DRAG.with(|d| *d.borrow_mut() = None);
       LIBRARY_DRAG.with(|d| *d.borrow_mut() = None);
       SCROLLBAR_DRAG.with(|d| *d.borrow_mut() = None);
-      // Commit a scrubbed seek/volume once on release (immediate jump on
-      // press already dispatched; only a real drag to a NEW value commits).
+      MUSIC_VIEW_DRAG.with(|d| *d.borrow_mut() = None);
+      // Commit music seek once on release (press only previews, so dragging
+      // never causes a 1ms audio blip at the mouse-down point). Keep
+      // volume_preview intact while ChangeVolume is in flight so the bar
+      // never snaps back to the old server volume; backend clears it on reply.
       PLAYBAR_DRAG.with(|d| {
         if let Some(drag) = d.borrow_mut().take() {
-          if drag.dragged {
-            if drag.music {
-              if app.user_config.terminal.progress_seek {
-                if let Some(ms) = app.seek_ms {
-                  if ms as u32 != drag.pressed {
-                    app.seek_to(ms as u32);
-                  }
-                }
+          if drag.music {
+            app.scrubbing_playbar = false;
+            if app.user_config.terminal.progress_seek {
+              if let Some(ms) = app.seek_ms {
+                app.seek_to(ms as u32);
               }
-            } else if let Some(pct) = app.volume_preview.take() {
+            }
+          } else if drag.dragged {
+            if let Some(pct) = app.volume_preview {
               if pct as u32 != drag.pressed {
                 app.dispatch(IoEvent::ChangeVolume(pct));
               }
             }
-          } else {
-            app.volume_preview = None;
           }
         }
       });
     }
     _ => {}
   }
+}
+
+thread_local! {
+  static MUSIC_VIEW_DRAG: std::cell::RefCell<Option<MusicResizeAxis>> = const { std::cell::RefCell::new(None) };
+}
+
+fn handle_music_view_drag_down(x: u16, y: u16, app: &App) -> bool {
+  if app.get_current_route().active_block != ActiveBlock::MusicView {
+    return false;
+  }
+  let area = Rect::new(0, 0, app.size.width, app.size.height);
+  let rects = crate::tui::music_view::music_view_rects(app, area);
+  let on_vertical = x.abs_diff(rects.right.x) <= 1;
+  let on_lyrics = x < rects.right.x && y.abs_diff(rects.visualizer.y) <= 1;
+  let on_cover = x >= rects.right.x && y.abs_diff(rects.details.y) <= 1;
+  let axis = if on_vertical {
+    Some(MusicResizeAxis::Columns)
+  } else if on_lyrics {
+    Some(MusicResizeAxis::Lyrics)
+  } else if on_cover {
+    Some(MusicResizeAxis::Cover)
+  } else {
+    None
+  };
+  if let Some(axis) = axis {
+    MUSIC_VIEW_DRAG.with(|d| *d.borrow_mut() = Some(axis));
+    return true;
+  }
+  false
+}
+
+fn handle_music_view_drag(x: u16, y: u16, app: &mut App) -> bool {
+  let axis = MUSIC_VIEW_DRAG.with(|d| *d.borrow());
+  let Some(axis) = axis else {
+    return false;
+  };
+  let area = Rect::new(0, 0, app.size.width, app.size.height);
+  if area.width == 0 || area.height == 0 {
+    return true;
+  }
+  let rects = crate::tui::music_view::music_view_rects(app, area);
+  match axis {
+    MusicResizeAxis::Columns => {
+      let pct = ((x as u32 * 100) / area.width as u32).clamp(30, 85) as u16;
+      app.music_left_pct = Some(pct);
+    }
+    MusicResizeAxis::Lyrics => {
+      let h = rects.left.height.max(1);
+      let pct = ((y.saturating_sub(rects.left.y) as u32 * 100) / h as u32).clamp(20, 85) as u16;
+      app.music_lyrics_pct = Some(pct);
+    }
+    MusicResizeAxis::Cover => {
+      let max_h = rects.right.height.saturating_sub(6).max(6);
+      let h = y.saturating_sub(rects.right.y).clamp(6, max_h);
+      app.music_cover_height = Some(h);
+    }
+  }
+  app.ui_dirty = true;
+  true
 }
 
 fn handle_confirm_remove_dialog_click(x: u16, y: u16, app: &mut App) -> bool {
@@ -221,7 +294,7 @@ fn handle_confirm_remove_dialog_click(x: u16, y: u16, app: &mut App) -> bool {
   let vchunks = Layout::default()
     .direction(Direction::Vertical)
     .margin(2)
-    .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
+    .constraints([Constraint::Min(3), Constraint::Length(3)])
     .split(rect);
   if vchunks.len() < 2 {
     return true;
@@ -229,7 +302,7 @@ fn handle_confirm_remove_dialog_click(x: u16, y: u16, app: &mut App) -> bool {
   let hchunks = Layout::default()
     .direction(Direction::Horizontal)
     .horizontal_margin(3)
-    .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)].as_ref())
+    .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
     .split(vchunks[1]);
   if hchunks.len() < 2 {
     return true;
@@ -279,7 +352,7 @@ fn handle_confirm_remove_hover(x: u16, y: u16, app: &mut App) -> bool {
   let vchunks = Layout::default()
     .direction(Direction::Vertical)
     .margin(2)
-    .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
+    .constraints([Constraint::Min(3), Constraint::Length(3)])
     .split(rect);
   if vchunks.len() < 2 {
     return true;
@@ -287,7 +360,7 @@ fn handle_confirm_remove_hover(x: u16, y: u16, app: &mut App) -> bool {
   let hchunks = Layout::default()
     .direction(Direction::Horizontal)
     .horizontal_margin(3)
-    .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)].as_ref())
+    .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
     .split(vchunks[1]);
   if hchunks.len() < 2 {
     return true;
@@ -427,7 +500,7 @@ fn handle_device_list_click(x: u16, y: u16, app: &mut App) -> bool {
   let area = Rect::new(0, 0, app.size.width, app.size.height);
   let chunks = Layout::default()
     .direction(Direction::Vertical)
-    .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
+    .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
     .margin(5)
     .split(area);
   let list = chunks[1];
@@ -481,7 +554,7 @@ fn handle_left_click(x: u16, y: u16, app: &mut App) -> bool {
       {
         let panel = Layout::default()
           .direction(Direction::Horizontal)
-          .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
+          .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
           .split(Rect::new(0, 0, app.size.width, app.size.height))[1];
         if x >= panel.x && x < panel.x + panel.width && y >= panel.y && y < panel.y + panel.height {
           if let Some(artist) = track.artists.first() {
@@ -543,6 +616,7 @@ fn handle_left_click(x: u16, y: u16, app: &mut App) -> bool {
     let title_y = panel.y.saturating_add(4);
     if y == title_y {
       app.request_log.clear();
+      app.request_log_gen = app.request_log_gen.wrapping_add(1);
       app.request_log_index = None;
     }
     false
@@ -566,8 +640,11 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
   {
     return;
   }
+  let viewport = settings.height.saturating_sub(2) as usize;
+  let total = 36usize;
+  let offset = (app.help_scroll_offset as usize).min(total.saturating_sub(viewport.min(total)));
   let vis_row = (y - settings.y - 1) as usize;
-  let row = vis_row + app.help_scroll_offset as usize;
+  let row = vis_row + offset;
 
   // Row -> toggle_setting index map for the categorized layout (35 rows):
   // headers and the Shortcuts link are None.
@@ -586,24 +663,24 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
     Some(0),  // 1  Black theme
     Some(5),  // 2  Theme
     Some(16), // 3  Animations
-    Some(3),  // 4  Volume ramp bar
-    Some(1),  // 5  Library block
-    Some(2),  // 6  Playlists block
-    Some(9),  // 7  Column Album
-    Some(10), // 8  Column Artist
-    Some(11), // 9  Column Length
-    Some(12), // 10 Column Date Added
-    Some(15), // 11 Max name length
-    Some(23), // 12 Suspend/Resume Process
-    Some(4),  // 13 Mouse interactions
-    Some(13), // 14 Add to playlist
-    Some(14), // 15 Remove from playlist
-    Some(8),  // 16 Requests View
-    None,     // 17 blank
-    None,     // 18 ─ Playback ─
-    Some(6),  // 19 Timestamp by typing
-    Some(7),  // 20 Restore settings
-    Some(24), // 21 Playback poll
+    Some(1),  // 4  Library block
+    Some(2),  // 5  Playlists block
+    Some(9),  // 6  Column Album
+    Some(10), // 7  Column Artist
+    Some(11), // 8  Column Length
+    Some(12), // 9  Column Date Added
+    Some(15), // 10 Max name length
+    Some(23), // 11 Suspend/Resume Process
+    Some(4),  // 12 Mouse interactions
+    Some(13), // 13 Add to playlist
+    Some(14), // 14 Remove from playlist
+    Some(8),  // 15 Requests View
+    None,     // 16 blank
+    None,     // 17 ─ Playback ─
+    Some(6),  // 18 Timestamp by typing
+    Some(7),  // 19 Restore settings
+    Some(24), // 20 Playback poll
+    Some(25), // 21 Desktop notifications
     None,     // 22 blank
     None,     // 23 ─ Spotify in launch ─
     Some(18), // 24 Auto launch with sptune
@@ -766,6 +843,7 @@ fn content_block_at(app: &App) -> Option<ActiveBlock> {
     RouteId::TrackTable => Some(ActiveBlock::TrackTable),
     RouteId::AlbumTracks => Some(ActiveBlock::AlbumTracks),
     RouteId::RecentlyPlayed => Some(ActiveBlock::RecentlyPlayed),
+    RouteId::Queue => Some(ActiveBlock::Queue),
     RouteId::AlbumList => Some(ActiveBlock::AlbumList),
     RouteId::Artists => Some(ActiveBlock::Artists),
     RouteId::Podcasts => Some(ActiveBlock::Podcasts),
@@ -786,14 +864,11 @@ fn main_layout(app: &App) -> Option<(Rect, Rect, Option<Rect>)> {
   // Header row is global now: [Search | title | Settings] on top
   let parent = Layout::default()
     .direction(Direction::Vertical)
-    .constraints(
-      [
-        Constraint::Length(HEADER_HEIGHT),
-        Constraint::Min(1),
-        Constraint::Length(PLAYBAR_HEIGHT),
-      ]
-      .as_ref(),
-    )
+    .constraints([
+      Constraint::Length(HEADER_HEIGHT),
+      Constraint::Min(1),
+      Constraint::Length(PLAYBAR_HEIGHT),
+    ])
     .margin(margin)
     .split(app.size);
   Some((parent[1], parent[2], Some(parent[0])))
@@ -825,6 +900,9 @@ fn handle_scrollbar_down(x: u16, y: u16, app: &mut App) -> bool {
   }
   let (left, right) = layout::sidebar_content_split(app, routes);
   if x < left.x + left.width {
+    if app.sidebar_minimized {
+      return false;
+    }
     if let Some(block) = user_block_at(y, left, app) {
       let rect = if app.show_library && app.show_playlists {
         let (lib, _, pl) = crate::tui::layout::sidebar_combined_split(app, left);
@@ -871,7 +949,7 @@ fn handle_scrollbar_down(x: u16, y: u16, app: &mut App) -> bool {
 fn dev_panel_rect(right: Rect) -> Rect {
   Layout::default()
     .direction(Direction::Horizontal)
-    .constraints([Constraint::Percentage(75), Constraint::Percentage(25)].as_ref())
+    .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
     .split(right)[1]
 }
 
@@ -944,6 +1022,16 @@ fn handle_sidebar_drag_down(x: u16, y: u16, app: &mut App) -> bool {
     return false;
   };
   let handle = layout::sidebar_handle_rect(app, routes);
+  let (left, _) = layout::sidebar_content_split(app, routes);
+  // Don't steal clicks on the minimized sidebar (playlist numbers / ≡ button)
+  // or on the expanded Library title row's ≡ collapse glyph.
+  if app.sidebar_minimized {
+    if x <= handle.x {
+      return false;
+    }
+  } else if app.show_library && (y == left.y || y == left.y + 1) {
+    return false;
+  }
   // 2-col grab zone (handle + first content col) so the 1-col border is not a pixel hunt;
   // we avoid handle-1 which is the scrollbar column (width-2)
   if (x == handle.x || x == handle.x + 1) && y >= handle.y && y < handle.y + handle.height {
@@ -954,7 +1042,6 @@ fn handle_sidebar_drag_down(x: u16, y: u16, app: &mut App) -> bool {
         start_width: w,
       })
     });
-    // Dragging from minimized should immediately expand
     if app.sidebar_minimized {
       app.sidebar_minimized = false;
     }
@@ -1314,20 +1401,27 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
   // other cell opens the device selector.
   if y == playbar.y {
     if let Some(ctx) = &app.current_playback_context {
-      let title = build_playbar_title("", &ctx.device.name);
+      let max_title_w = if app.show_process_suspend {
+        crate::tui::layout::playbar_title_max_width(playbar.width, app.processes_suspended)
+      } else {
+        playbar.width.saturating_sub(2) as usize
+      };
+      let title = build_playbar_title("", &ctx.device.name, max_title_w);
       let glyph_x = playbar.x + 1 + title.width() as u16;
       if x >= glyph_x.saturating_sub(3) && x < glyph_x {
         toggle_music_view(app);
         return;
       }
-      let (px0, px1) = crate::tui::layout::playbar_processes_range(
-        playbar,
-        &ctx.device.name,
-        app.processes_suspended,
-      );
-      if x >= px0 && x < px1 {
-        app.toggle_process_suspend();
-        return;
+      if app.show_process_suspend {
+        let (px0, px1) = crate::tui::layout::playbar_processes_range(
+          playbar,
+          &ctx.device.name,
+          app.processes_suspended,
+        );
+        if x >= px0 && x < px1 {
+          app.toggle_process_suspend();
+          return;
+        }
       }
     }
     app.dispatch(IoEvent::GetDevices);
@@ -1374,7 +1468,13 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
     if y == volume_rect.y && x >= volume_rect.x && x < volume_rect.x + volume_rect.width {
       // Skip the "♪ 100% " label; map only over the filled bar.
       let bar_x = volume_rect.x + VOLUME_LABEL_LEN;
-      let percent = (((x as i32 - bar_x as i32) * 100) / VOLUME_BAR_LEN as i32).clamp(0, 100);
+      let percent = if x >= bar_x + VOLUME_BAR_LEN.saturating_sub(1) {
+        100
+      } else {
+        (((x as i32 - bar_x as i32) * 100) / VOLUME_BAR_LEN as i32).clamp(0, 100)
+      };
+      // Paint immediately via volume_preview; backend clears it when confirmed.
+      app.volume_preview = Some(percent as u8);
       app.dispatch(IoEvent::ChangeVolume(percent as u8));
       // Arm a scrub drag over the 17-cell volume bar so subsequent Drag
       // ticks preview locally and Up commits the final value.
@@ -1393,16 +1493,16 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
   }
 
   // Transport buttons (shuffle, prev, play/pause, next, repeat)
-  // dead-centered on the first inner row, just above the music bar.
+  // dead-centered on the first content row, just above the music bar.
   let controls = build_playbar_controls(current_playback_context.is_playing, app.smart_shuffle);
-  if y == playbar.y + 1 {
+  if y == crate::tui::layout::playbar_controls_row(playbar).y {
     let mut btn_x = playbar_controls_x(playbar, &controls);
     for (kind, text) in &controls {
       let w = text.width() as u16;
       if x >= btn_x && x < btn_x + w {
         match kind {
           PlaybarButton::Shuffle => app.shuffle(),
-          PlaybarButton::Prev => app.dispatch(IoEvent::PreviousTrack),
+          PlaybarButton::Prev => app.previous_track(),
           PlaybarButton::PlayPause => app.toggle_playback(),
           PlaybarButton::Next => app.dispatch(IoEvent::NextTrack),
           PlaybarButton::Repeat => app.repeat(),
@@ -1422,10 +1522,26 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
     }
   }
 
+  let cover_off = crate::tui::layout::playbar_cover_offset(playbar, app.cover_art.is_some());
+  if cover_off > 0
+    && playbar.height >= 4
+    && y > playbar.y
+    && y < playbar.y + playbar.height.saturating_sub(1)
+    && x > playbar.x
+    && x < playbar.x + 1 + crate::tui::layout::PLAYBAR_COVER_COLS
+  {
+    toggle_music_view(app);
+    return;
+  }
+
+  let mut song_row = playbar_song_row(playbar);
+  song_row.x = song_row.x.saturating_add(cover_off);
+  song_row.width = song_row.width.saturating_sub(cover_off);
+
   // Prefix [+ / ✓] on the song row: + opens add-to-playlist picker
-  if y == playbar_song_row(playbar).y {
+  if y == song_row.y {
     if let Some(uri) = app.playing_track_uri() {
-      if !app.is_in_any_playlist(&uri) && x == playbar_song_row(playbar).x {
+      if !app.is_in_any_playlist(&uri) && x == song_row.x {
         app.open_add_to_playlist_for_uri(uri);
         return;
       }
@@ -1433,8 +1549,8 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
   }
   // Liked heart right after the prefix (tracks only): toggles save on the
   // now-playing track. Runs before the name range so it never opens the album.
-  if y == playbar_song_row(playbar).y {
-    let heart_x = playbar_song_row(playbar).x + 2;
+  if y == song_row.y {
+    let heart_x = song_row.x + 2;
     if x >= heart_x && x < heart_x + PLAYBAR_HEART_WIDTH {
       if let Some(id) = app.now_playing_track_id() {
         app.dispatch(IoEvent::ToggleSaveTrack(id));
@@ -1445,7 +1561,7 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
   // Track name opens the album, artist name opens the artist page. Both
   // zones cover only the text as drawn (shared truncation limits), not the
   // whole row.
-  if y == playbar_song_row(playbar).y {
+  if y == song_row.y {
     let (_item_id, name) = match track_item {
       PlayableItem::Track(track) => (
         track
@@ -1459,11 +1575,13 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
       _ => (String::new(), String::new()),
     };
     let track_name = name;
-    let (start, end) = playbar_text_click_range(
-      playbar_song_row(playbar),
-      playbar_controls_x(playbar, &controls),
-      &track_name,
-    );
+    let ctrl_row_y = crate::tui::layout::playbar_controls_row(playbar).y;
+    let name_limit_x = if song_row.y == ctrl_row_y {
+      playbar_controls_x(playbar, &controls)
+    } else {
+      song_row.x + song_row.width
+    };
+    let (start, end) = playbar_text_click_range(song_row, name_limit_x, &track_name);
     if x >= start && x < end {
       if let Some(album) = &album_click {
         app.track_table.context = Some(TrackTableContext::AlbumSearch);
@@ -1472,16 +1590,22 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
       }
     }
   }
-  if y == playbar_artist_row(playbar).y {
-    if let Some(bar) = playbar_progress_rect(playbar) {
+  let mut artist_row = playbar_artist_row(playbar);
+  artist_row.x = artist_row.x.saturating_add(cover_off);
+  artist_row.width = artist_row.width.saturating_sub(cover_off);
+  if y == artist_row.y {
+    let ctrl_row_y = crate::tui::layout::playbar_controls_row(playbar).y;
+    let artist_right = if artist_row.y == ctrl_row_y {
+      Some(playbar_controls_x(playbar, &controls))
+    } else {
+      playbar_progress_rect(playbar).map(|b| b.x.saturating_sub(PLAYBAR_TIME_LEN))
+    };
+    if let Some(right_x) = artist_right {
       if let PlayableItem::Track(track) = track_item {
         // Every artist name is its own click zone: a multi-artist track
         // ("Avicii, Nicky Romero") opens whichever name is clicked.
-        let row = playbar_artist_row(playbar);
-        let limit = (bar
-          .x
-          .saturating_sub(PLAYBAR_TIME_LEN)
-          .saturating_sub(row.x + 1)) as usize;
+        let row = artist_row;
+        let limit = right_x.saturating_sub(row.x + 1) as usize;
         let mut offset = 0usize;
         for artist in &track.artists {
           let seg = artist.name.chars().count();
@@ -1515,9 +1639,10 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
         } else {
           (duration_ms as f32 * fraction) as u32
         };
-        app.seek_to(position_ms);
-        // Arm a scrub drag over the music bar; Drag ticks preview the target
-        // time live via seek_ms and Up commits the final position.
+        app.scrubbing_playbar = true;
+        // Preview immediately on press; commit the single Seek on Up so
+        // dragging never triggers a 1ms audio flick at the press point.
+        app.preview_seek(position_ms);
         PLAYBAR_DRAG.with(|d| {
           *d.borrow_mut() = Some(PlaybarDrag {
             music: true,
@@ -1545,9 +1670,9 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
   match (app.show_library, app.show_playlists) {
     (true, true) => {
       let (library, _sep, playlists) = layout::sidebar_combined_split(app, chunk);
-      if y == library.y {
+      if y == library.y || (app.sidebar_minimized && y == chunk.y) {
         if app.sidebar_minimized {
-          app.sidebar_minimized = !app.sidebar_minimized;
+          app.sidebar_minimized = false;
           return false;
         }
         if x < library.x + 3 {
@@ -1558,10 +1683,10 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           return false;
         }
         // Library text or Library≡ toggles minimize (hitbox = rest of title row)
-        app.sidebar_minimized = !app.sidebar_minimized;
+        app.sidebar_minimized = true;
         return false;
       }
-      if y >= library.y + 1 && y < library.y + library.height {
+      if y > library.y && y < library.y + library.height {
         if let Some(index) = combined_sidebar_row_index(
           y,
           library,
@@ -1593,9 +1718,9 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
     }
     (true, false) => {
       let count = visible_library_options(&app.hidden_library_sections).len();
-      if y == chunk.y {
+      if y == chunk.y || (app.sidebar_minimized && y == chunk.y + 1) {
         if app.sidebar_minimized {
-          app.sidebar_minimized = !app.sidebar_minimized;
+          app.sidebar_minimized = false;
           return false;
         }
         if x < chunk.x + 3 {
@@ -1604,10 +1729,10 @@ fn handle_user_block_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           app.dispatch(IoEvent::RefreshSavedAlbums);
           return false;
         }
-        app.sidebar_minimized = !app.sidebar_minimized;
+        app.sidebar_minimized = true;
         return false;
       }
-      if y >= chunk.y + 1 && y < chunk.y + chunk.height {
+      if y > chunk.y && y < chunk.y + chunk.height {
         if let Some(index) = list_row_index(y, chunk, count, app.library.selected_index) {
           return select_library_index(app, index);
         }
@@ -1782,9 +1907,10 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
               app.track_table.context,
               Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
             );
+          let show_in_playlist = !show_remove && b.enable_add_to_playlist;
           let columns = song_table_columns(
             chunk.width.saturating_sub(2),
-            SongColumnFlags::for_view(b, with_date, show_remove, false),
+            SongColumnFlags::for_view(b, with_date, show_remove, show_in_playlist),
           );
           if let Some(x_in) = x.checked_sub(chunk.x + 1) {
             if let Some((column, _, _)) = columns
@@ -1853,6 +1979,15 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
         }
         app.set_current_route_state(Some(ActiveBlock::AlbumTracks), None);
         return !is_load_more;
+      }
+    }
+    RouteId::Queue => {
+      if let Some(index) =
+        table_row_index(y, chunk, app.queue_items.len(), app.queue_selected_index)
+      {
+        app.queue_selected_index = index;
+        app.set_current_route_state(Some(ActiveBlock::Queue), None);
+        return true;
       }
     }
     RouteId::RecentlyPlayed => {
@@ -2075,11 +2210,12 @@ fn handle_search_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           .as_ref()
           .and_then(|r| r.items.get(index))
         {
-          app.get_artist(artist.id.to_string(), artist.name.clone());
-          app.push_navigation_stack(RouteId::Artist, ActiveBlock::ArtistBlock);
+          let artist_id = artist.id.to_string();
+          let artist_name = artist.name.clone();
           app.search_results.selected_block = block;
-          app.set_current_route_state(Some(ActiveBlock::SearchResultBlock), None);
-          return true;
+          app.get_artist(artist_id, artist_name);
+          app.push_navigation_stack(RouteId::Artist, ActiveBlock::ArtistBlock);
+          return false;
         }
       }
       app.search_results.selected_block = block;
@@ -2120,35 +2256,37 @@ fn handle_search_wheel(up: bool, app: &mut App) {
 }
 
 fn handle_artist_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
-  if y == chunk.y {
-    let tabs = [
-      ArtistBlock::TopTracks,
-      ArtistBlock::Albums,
-      ArtistBlock::Singles,
-      ArtistBlock::EPs,
-      ArtistBlock::AppearsOn,
-    ];
-    let n = tabs.len() as u16;
-    let cell_w = if n > 0 { chunk.width / n } else { chunk.width };
-    let idx = ((x.saturating_sub(chunk.x)) / cell_w.max(1)) as usize;
-    let tab = tabs
-      .get(idx.min(tabs.len() - 1))
-      .cloned()
-      .unwrap_or(ArtistBlock::TopTracks);
-    app.artist_select_tab(tab);
-    app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
+  let (tab_bar, tab_cells, list_rect) = layout::artist_layout(chunk, ArtistBlock::Empty);
+  if y == tab_bar.y {
+    if let Some((tab, _)) = tab_cells
+      .into_iter()
+      .find(|(_, rect)| x >= rect.x && x < rect.x + rect.width)
+    {
+      app.artist_select_tab(tab);
+      app.set_current_route_state(Some(ActiveBlock::ArtistBlock), None);
+    }
     // Return false: a tab click only switches tabs. The caller's
     // click-to-Enter chain must not fire here, or the freshly selected
     // top-tracks tab would start playing its first song.
     return false;
   }
 
-  let list_rect = Rect {
-    x: chunk.x,
-    y: chunk.y + 1,
-    width: chunk.width,
-    height: chunk.height.saturating_sub(1),
-  };
+  if let Some(header) = layout::artist_header_rect(chunk) {
+    let follow = layout::artist_follow_rect(header);
+    if y == follow.y && x >= follow.x && x < follow.x + follow.width {
+      if let Some(artist) = app.artist.as_mut() {
+        let id = artist.artist_id.clone();
+        let following = artist.is_following.unwrap_or(false);
+        artist.is_following = Some(!following);
+        if following {
+          app.dispatch(IoEvent::UserUnfollowArtists(vec![id]));
+        } else {
+          app.dispatch(IoEvent::UserFollowArtists(vec![id]));
+        }
+      }
+      return false;
+    }
+  }
 
   let (shown, top_has_more, albums_has_more, singles_has_more, appears_has_more, count, selected) = {
     let Some(artist) = &app.artist else {
@@ -2350,9 +2488,10 @@ fn handle_table_header_click(x: u16, chunk: Rect, app: &mut App) {
       app.track_table.context,
       Some(TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch)
     );
+  let show_in_playlist = !show_remove && b.enable_add_to_playlist;
   let columns = song_table_columns(
     chunk.width.saturating_sub(2),
-    SongColumnFlags::for_view(b, with_date, show_remove, false),
+    SongColumnFlags::for_view(b, with_date, show_remove, show_in_playlist),
   );
   let Some(x_in) = x.checked_sub(chunk.x + 1) else {
     return;
@@ -2371,6 +2510,9 @@ fn handle_table_header_click(x: u16, chunk: Rect, app: &mut App) {
     _ => sort_column == TrackSortColumn::DateAdded,
   };
   app.track_table_sort = Some((sort_column, desc));
+  if let Some(key) = app.current_sort_key() {
+    app.playlist_sorts.insert(key, (sort_column, desc));
+  }
 
   if sort_column == TrackSortColumn::DateAdded {
     // Date Added is a pure local reordering of the loaded slice — a sort
@@ -2554,14 +2696,14 @@ mod tests {
 
   #[test]
   fn keyboard_down_keeps_selection_visible() {
-    // viewport = 36 (200x50, 3-row header): selection below the window must
-    // push the view so the selection stays on the bottom row.
+    // viewport = 34 (200x50, 3-row header, 6-row playbar): selection below
+    // the window must push the view so the selection stays on the bottom row.
     let mut app = track_table_app(40);
     app.track_table.selected_index = 35;
     app.track_table.scroll_offset = 0;
     handle_app(Key::Down, &mut app);
     assert_eq!(app.track_table.selected_index, 36);
-    assert_eq!(app.track_table.scroll_offset, 1);
+    assert_eq!(app.track_table.scroll_offset, 3);
   }
 
   #[test]
@@ -2602,13 +2744,13 @@ mod tests {
 
   #[test]
   fn click_dev_view_row_toggles_request_log() {
-    // help_full_rect = (2,2,196,46); Requests View row 16 sits at y=19.
+    // help_full_rect = (2,2,196,46); Requests View row 15 sits at y=18.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.dev_view);
-    handle_mouse(click_event(10, 19), &mut app);
+    handle_mouse(click_event(10, 18), &mut app);
     assert!(app.dev_view);
-    handle_mouse(click_event(10, 19), &mut app);
+    handle_mouse(click_event(10, 18), &mut app);
     assert!(!app.dev_view);
   }
 
@@ -2617,6 +2759,8 @@ mod tests {
     // The processes button sits on the title row, right of the [ ] window
     // toggle; x derives from the shared playbar_processes_range helper.
     let mut app = playback_app();
+    // The pill is hidden by default; this test covers its click behavior.
+    app.show_process_suspend = true;
     let ctx = app.current_playback_context.as_ref().unwrap();
     let (_, playbar, _) = main_layout(&app).unwrap();
     let (px0, px1) = crate::tui::layout::playbar_processes_range(
@@ -2696,13 +2840,13 @@ mod tests {
   #[test]
   fn scrollbar_drag_moves_selection() {
     let mut app = track_table_app(40);
-    // size 200x50: right=(41,6,158,39), track_h=37, viewport=36, count=40,
-    // max offset 4. TrackTable drags move the VIEW offset (website-style):
+    // size 200x50: right=(41,6,158,37), track_h=35, viewport=34, count=40,
+    // max offset 6. TrackTable drags move the VIEW offset (website-style):
     // the thumb reaches the end of the track, selection stays put.
     // Press on the thumb (top = right.y+1 = 7), then drag down to the bottom.
     handle_mouse(click_event(197, 7), &mut app);
-    handle_mouse(drag_event(197, 43), &mut app);
-    assert_eq!(app.track_table.scroll_offset, 4);
+    handle_mouse(drag_event(197, 41), &mut app);
+    assert_eq!(app.track_table.scroll_offset, 6);
     assert_eq!(app.track_table.selected_index, 0);
     // Drag back to the top of the track.
     handle_mouse(drag_event(197, 2), &mut app);
@@ -2725,10 +2869,10 @@ mod tests {
     let mut app = track_table_app(40);
     // Press on the scrollbar TRACK well below the thumb (thumb is 1-2 rows on
     // big lists): the drag arms anyway and the thumb jumps under the cursor.
-    handle_mouse(click_event(197, 43), &mut app);
-    handle_mouse(drag_event(197, 43), &mut app);
-    assert_eq!(app.track_table.scroll_offset, 4);
-    handle_mouse(up_event(197, 43), &mut app);
+    handle_mouse(click_event(197, 41), &mut app);
+    handle_mouse(drag_event(197, 41), &mut app);
+    assert_eq!(app.track_table.scroll_offset, 6);
+    handle_mouse(up_event(197, 41), &mut app);
   }
 
   #[test]
@@ -2838,11 +2982,11 @@ mod tests {
       previous: None,
       total: 505,
     });
-    // right=(41,6,158,39), track rows 7..44, viewport 36, count 59 → max
-    // offset 23. Press the thumb at the top, drag to the bottom.
+    // right=(41,6,158,37), track rows 7..42, viewport 34, count 59 → max
+    // offset 25. Press the thumb at the top, drag to the bottom.
     handle_mouse(click_event(197, 7), &mut app);
-    handle_mouse(drag_event(197, 44), &mut app);
-    assert_eq!(app.track_table.scroll_offset, 23);
+    handle_mouse(drag_event(197, 42), &mut app);
+    assert_eq!(app.track_table.scroll_offset, 25);
     // And back to the top.
     handle_mouse(drag_event(197, 7), &mut app);
     assert_eq!(app.track_table.scroll_offset, 0);
@@ -3125,18 +3269,18 @@ mod tests {
   #[test]
   fn click_selects_row_under_cursor_with_scrolled_view() {
     let mut app = track_table_app(40);
-    // Wheel-scroll the view all the way down (viewport 36 → max offset 4).
+    // Wheel-scroll the view all the way down (viewport 34 → max offset 6).
     for _ in 0..10 {
       wheel_over_track_table(false, &mut app);
     }
-    assert_eq!(app.track_table.scroll_offset, 4);
-    // size 200x50: right=(41,6,158,39); first data row is chunk.y+2 = 8.
-    // Clicking row 10 with offset 4 → index 4 + (10-8) = 6.
+    assert_eq!(app.track_table.scroll_offset, 6);
+    // size 200x50: right=(41,6,158,37); first data row is chunk.y+2 = 8.
+    // Clicking row 10 with offset 6 → index 6 + (10-8) = 8.
     handle_mouse(click_event(150, 10), &mut app);
-    assert_eq!(app.track_table.selected_index, 6);
+    assert_eq!(app.track_table.selected_index, 8);
     // Click the row right below the header (row 8) → index == offset.
     handle_mouse(click_event(150, 8), &mut app);
-    assert_eq!(app.track_table.selected_index, 4);
+    assert_eq!(app.track_table.selected_index, 6);
   }
 
   #[test]
@@ -3230,11 +3374,12 @@ mod tests {
 
   #[test]
   fn playbar_heart_click_toggles_save_on_now_playing() {
-    // size 200x50: playbar song row y=46, prefix at x=2, heart at x=4..6.
+    // size 200x50: playbar=(1,43,198,6), song row y=45, prefix at x=2, heart at x=4..6.
     let mut app = playback_app();
     let (tx, rx) = std::sync::mpsc::channel();
     app.io_tx = Some(tx);
-    handle_mouse(click_event(4, 46), &mut app);
+    let (_, playbar, _) = main_layout(&app).unwrap();
+    handle_mouse(click_event(4, playbar_song_row(playbar).y), &mut app);
     let dispatched: Vec<IoEvent> = rx.try_iter().collect();
     assert!(
       dispatched.iter().any(
@@ -3362,7 +3507,7 @@ mod tests {
     // it must fetch the next page, NOT fire Enter and play the song behind it.
     let (mut app, rx) = recently_played_app(40, true);
     app.recently_played.index = 40;
-    handle_mouse(click_event(150, 43), &mut app);
+    handle_mouse(click_event(150, 41), &mut app);
     assert_eq!(app.recently_played.index, 40);
     let dispatched: Vec<IoEvent> = rx.try_iter().collect();
     assert_eq!(dispatched, vec![IoEvent::GetMoreRecentlyPlayed(None)]);
@@ -3554,7 +3699,7 @@ mod tests {
 
   #[test]
   fn click_on_progress_bar_seeks() {
-    // size 200x50, margin 1: playbar=(1,45,198,4), bar row y=47;
+    // size 200x50, margin 1: playbar=(1,43,198,6), bar row y=47;
     // bar_len=70 cells (1 cell ≈ 2.57s of a 180s track), centered:
     // bar_x = 2+(196-82)/2+6 = 65, so the bar spans x 65..134 and the
     // left "0:00" label sits in x 59..64.
@@ -3574,38 +3719,26 @@ mod tests {
   }
 
   #[test]
-  fn click_volume_ramp_bar_row_toggles_setting() {
-    // help_full_rect (2,2,196,46); Volume ramp bar row 4 at y=7.
-    let mut app = playback_app();
-    app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
-    assert!(!app.user_config.behavior.volume_ramp_bar);
-    handle_mouse(click_event(10, 7), &mut app);
-    assert!(app.user_config.behavior.volume_ramp_bar);
-    handle_mouse(click_event(10, 7), &mut app);
-    assert!(!app.user_config.behavior.volume_ramp_bar);
-  }
-
-  #[test]
   fn click_playlists_row_toggles_show_playlists() {
-    // help_full_rect (2,2,196,46); Playlists block row 6 at y=9.
+    // help_full_rect (2,2,196,46); Playlists block row 5 at y=8.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(app.show_playlists);
-    handle_mouse(click_event(10, 9), &mut app);
+    handle_mouse(click_event(10, 8), &mut app);
     assert!(!app.show_playlists);
-    handle_mouse(click_event(10, 9), &mut app);
+    handle_mouse(click_event(10, 8), &mut app);
     assert!(app.show_playlists);
   }
 
   #[test]
   fn click_mouse_settings_row_toggles_enable_mouse() {
-    // help_full_rect (2,2,196,46); Mouse interactions row 13 at y=16.
+    // help_full_rect (2,2,196,46); Mouse interactions row 12 at y=15.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(app.user_config.behavior.enable_mouse);
-    handle_mouse(click_event(100, 16), &mut app);
+    handle_mouse(click_event(100, 15), &mut app);
     assert!(!app.user_config.behavior.enable_mouse);
-    handle_mouse(click_event(100, 16), &mut app);
+    handle_mouse(click_event(100, 15), &mut app);
     assert!(app.user_config.behavior.enable_mouse);
   }
 
@@ -3633,45 +3766,49 @@ mod tests {
 
   #[test]
   fn click_seek_by_typing_row_toggles_setting() {
-    // help_full_rect (2,2,196,46); Seek by typing row 19 at y=22.
+    // help_full_rect (2,2,196,46); Seek by typing row 18 at y=21.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.user_config.behavior.seek_by_typing);
-    handle_mouse(click_event(10, 22), &mut app);
+    handle_mouse(click_event(10, 21), &mut app);
     assert!(app.user_config.behavior.seek_by_typing);
-    handle_mouse(click_event(10, 22), &mut app);
+    handle_mouse(click_event(10, 21), &mut app);
     assert!(!app.user_config.behavior.seek_by_typing);
   }
 
   #[test]
   fn click_restore_settings_row_toggles_setting() {
-    // help_full_rect (2,2,196,46); Restore settings row 20 at y=23.
+    // help_full_rect (2,2,196,46); Restore settings row 19 at y=22.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.user_config.behavior.restore_settings);
-    handle_mouse(click_event(10, 23), &mut app);
+    handle_mouse(click_event(10, 22), &mut app);
     assert!(app.user_config.behavior.restore_settings);
-    handle_mouse(click_event(10, 23), &mut app);
+    handle_mouse(click_event(10, 22), &mut app);
     assert!(!app.user_config.behavior.restore_settings);
   }
 
   #[test]
   fn click_volume_box_changes_volume() {
     let mut app = playback_app();
-    // volume rect = (174, 47, 24, 1) on the music bar row; bar_x = 174+2 = 176
-    // ("♪ " prefix 2 wide), bar spans 17 chars (176..194); clicking 190 → ~82%.
-    handle_mouse(click_event(190, 47), &mut app);
+    // volume rect = (174, 46, 24, 1) on the music bar row; bar_x = 174+2 = 176
+    // ("♪ " prefix 2 wide), bar spans 17 chars (176..194); clicking 190 → 82%.
+    handle_mouse(click_event(190, 46), &mut app);
     assert!(app.is_loading);
+    assert_eq!(app.volume_preview, Some(82));
   }
 
   #[test]
   fn drag_on_progress_bar_previews_then_seeks() {
     let mut app = playback_app();
-    // Press = immediate jump (click at x=100 → ~50% of 180s).
+    // Press = live preview only (no audio seek until release).
     handle_mouse(click_event(100, 47), &mut app);
+    assert!(app.scrubbing_playbar);
+    assert!(!app.is_loading);
     assert!((85_000..95_000).contains(&app.seek_ms.unwrap()));
     // Drag right (x=130 → ~93%): live preview only, nothing dispatched yet.
     handle_mouse(drag_event(130, 47), &mut app);
+    assert!(!app.is_loading);
     let preview = app.seek_ms.unwrap();
     assert!(
       (165_000..172_000).contains(&preview),
@@ -3680,11 +3817,12 @@ mod tests {
     );
     // Drag left (x=72 → ~10%): preview follows the cursor.
     handle_mouse(drag_event(72, 47), &mut app);
+    assert!(!app.is_loading);
     let preview = app.seek_ms.unwrap();
     assert!((12_000..24_000).contains(&preview), "preview = {}", preview);
     // Release commits the scrubbed position once (is_loading = dispatched).
-    app.is_loading = false;
     handle_mouse(up_event(72, 47), &mut app);
+    assert!(!app.scrubbing_playbar);
     assert!(app.is_loading);
     assert!((12_000..24_000).contains(&app.seek_ms.unwrap()));
   }
@@ -3692,63 +3830,107 @@ mod tests {
   #[test]
   fn drag_on_volume_previews_then_commits() {
     let mut app = playback_app();
-    // Press on the volume bar still applies instantly.
-    handle_mouse(click_event(190, 47), &mut app);
+    // Press on the volume bar applies instantly and sets optimistic preview.
+    handle_mouse(click_event(190, 46), &mut app);
     assert!(app.is_loading);
+    assert_eq!(app.volume_preview, Some(82));
     app.is_loading = false;
-    app.volume_preview = None;
     // Drag over the 17-cell bar (bar_x = 176): preview only, no dispatch.
-    handle_mouse(drag_event(180, 47), &mut app);
+    handle_mouse(drag_event(180, 46), &mut app);
     assert_eq!(app.volume_preview, Some(23));
-    handle_mouse(drag_event(187, 47), &mut app);
+    handle_mouse(drag_event(187, 46), &mut app);
     assert_eq!(app.volume_preview, Some(64));
     assert!(!app.is_loading);
-    // Release dispatches the final volume once and clears the preview.
-    handle_mouse(up_event(187, 47), &mut app);
+    // Release dispatches the final volume once and keeps preview until API replies.
+    handle_mouse(up_event(187, 46), &mut app);
     assert!(app.is_loading);
-    assert_eq!(app.volume_preview, None);
+    assert_eq!(app.volume_preview, Some(64));
   }
 
   #[test]
-  fn click_without_drag_commits_nothing_extra() {
+  fn click_without_drag_seeks_once_on_release() {
+    let (tx, rx) = std::sync::mpsc::channel();
     let mut app = playback_app();
+    app.io_tx = Some(tx);
     handle_mouse(click_event(100, 47), &mut app);
     let seek = app.seek_ms.unwrap();
-    app.is_loading = false;
-    // Plain release after a press: no second dispatch, no stray preview.
-    handle_mouse(up_event(100, 47), &mut app);
-    assert_eq!(app.seek_ms, Some(seek));
     assert!(!app.is_loading);
+    assert!(rx.try_recv().is_err());
+    // Plain release after a press: commits the single Seek once.
+    handle_mouse(up_event(100, 47), &mut app);
+    assert!(!app.scrubbing_playbar);
+    assert_eq!(app.seek_ms, Some(seek));
+    assert!(app.is_loading);
     assert_eq!(app.volume_preview, None);
+    let events: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(events, vec![IoEvent::Seek(seek as u32)]);
   }
 
   #[test]
   fn jitter_drag_to_same_volume_commits_nothing() {
     let mut app = playback_app();
     // Press dispatches the volume once.
-    handle_mouse(click_event(190, 47), &mut app);
+    handle_mouse(click_event(190, 46), &mut app);
     assert!(app.is_loading);
     app.is_loading = false;
     // A 1px tremor: Drag tick lands on the same cell, so the preview
     // equals the pressed value — release must not re-dispatch.
-    handle_mouse(drag_event(190, 47), &mut app);
-    handle_mouse(up_event(190, 47), &mut app);
+    handle_mouse(drag_event(190, 46), &mut app);
+    handle_mouse(up_event(190, 46), &mut app);
     assert!(!app.is_loading);
-    assert_eq!(app.volume_preview, None);
+    assert_eq!(app.volume_preview, Some(82));
   }
 
   #[test]
   fn jitter_drag_to_same_position_seeks_once() {
+    let (tx, rx) = std::sync::mpsc::channel();
     let mut app = playback_app();
-    // Press seeks once.
+    app.io_tx = Some(tx);
+    // Press + same-cell Drag only preview; release commits exactly one Seek.
     handle_mouse(click_event(100, 47), &mut app);
-    assert!(app.is_loading);
-    app.is_loading = false;
-    // Same-cell Drag tick previews the identical position — release
-    // must not dispatch a second seek.
     handle_mouse(drag_event(100, 47), &mut app);
-    handle_mouse(up_event(100, 47), &mut app);
     assert!(!app.is_loading);
+    handle_mouse(up_event(100, 47), &mut app);
+    assert!(app.is_loading);
+    let events: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], IoEvent::Seek(_)));
+  }
+
+  #[test]
+  fn click_prev_and_next_buttons_dispatch() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = playback_app();
+    app.io_tx = Some(tx);
+    let ctx = app.current_playback_context.as_ref().unwrap();
+    let controls = build_playbar_controls(ctx.is_playing, false);
+    let (_, playbar, _) = main_layout(&app).unwrap();
+    let mut btn_x = playbar_controls_x(playbar, &controls);
+    let mut prev_x = None;
+    let mut next_x = None;
+    for (kind, text) in &controls {
+      let w = text.width() as u16;
+      if matches!(kind, PlaybarButton::Prev) {
+        prev_x = Some(btn_x + w / 2);
+      }
+      if matches!(kind, PlaybarButton::Next) {
+        next_x = Some(btn_x + w / 2);
+      }
+      btn_x += w + 1;
+    }
+    let ctrl_y = crate::tui::layout::playbar_controls_row(playbar).y;
+    // Under 3s progress: Prev skips to PreviousTrack; Next skips to NextTrack.
+    app.song_progress_ms = 1_000;
+    handle_mouse(click_event(prev_x.unwrap(), ctrl_y), &mut app);
+    handle_mouse(click_event(next_x.unwrap(), ctrl_y), &mut app);
+    // At >= 3s progress: Prev restarts the current track (Seek(0)).
+    app.song_progress_ms = 10_000;
+    handle_mouse(click_event(prev_x.unwrap(), ctrl_y), &mut app);
+    let events: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(
+      events,
+      vec![IoEvent::PreviousTrack, IoEvent::NextTrack, IoEvent::Seek(0)]
+    );
   }
 
   #[test]
@@ -3771,7 +3953,10 @@ mod tests {
       btn_x += w + 1;
     }
     let play_x = play_x.unwrap();
-    handle_mouse(click_event(play_x, playbar.y + 1), &mut app);
+    handle_mouse(
+      click_event(play_x, crate::tui::layout::playbar_controls_row(playbar).y),
+      &mut app,
+    );
     assert!(app.is_loading);
     // The title row is a button: any cell except the [ ] window opens the
     // device selector, the window toggles the music view fullscreen.
@@ -3784,6 +3969,7 @@ mod tests {
     let title = build_playbar_title(
       if ctx.is_playing { "Playing" } else { "Paused" },
       &ctx.device.name,
+      crate::tui::layout::playbar_title_max_width(playbar.width, app.processes_suspended),
     );
     // The [ ] button is three cells: any of them toggles the music view.
     let glyph_right = playbar.x + 1 + title.width() as u16;
@@ -3846,6 +4032,39 @@ mod tests {
     assert_ne!(
       app.get_current_route().active_block,
       crate::app::ActiveBlock::Empty
+    );
+  }
+
+  #[test]
+  fn collapsed_library_toggle_and_playlist_reentry_work() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = playback_app();
+    app.io_tx = Some(tx);
+    app.playlists = Some(mock_playlist_page(2));
+    // Expand → click Library≡ right side (x=10, y=7) collapses sidebar.
+    handle_mouse(click_event(10, 7), &mut app);
+    assert!(app.sidebar_minimized);
+    // Collapsed → click ≡ button (x=1, y=7) expands sidebar.
+    handle_mouse(click_event(1, 7), &mut app);
+    assert!(!app.sidebar_minimized);
+
+    // Collapse again, open playlist 0, navigate to Artist, then click playlist 0
+    // in the collapsed sidebar — must dispatch GetPlaylistItems to go back.
+    app.sidebar_minimized = true;
+    app.active_playlist_index = Some(0);
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.push_navigation_stack(RouteId::Artist, ActiveBlock::ArtistBlock);
+    let (routes, _, _) = main_layout(&app).unwrap();
+    let (left, _) = layout::sidebar_content_split(&app, routes);
+    let (_, _, playlists) = layout::sidebar_combined_split(&app, left);
+    handle_mouse(click_event(playlists.x, playlists.y + 1), &mut app);
+    let dispatched: Vec<IoEvent> = rx.try_iter().collect();
+    assert_eq!(
+      dispatched,
+      vec![IoEvent::GetPlaylistItems(
+        "spotify:playlist:mockplaylist0".to_string(),
+        0
+      )]
     );
   }
 }

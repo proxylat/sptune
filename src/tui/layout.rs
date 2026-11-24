@@ -4,13 +4,13 @@ use super::super::app::{
 use crate::app::{TrackSortColumn, TrackTableContext};
 use crate::tui::ColumnId;
 use crate::user_config::{BehaviorConfig, Theme};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::Style;
 use rspotify::model::artist::SimplifiedArtist;
 use rspotify::model::RepeatState;
 use unicode_width::UnicodeWidthStr;
 
-pub const PLAYBAR_HEIGHT: u16 = 4;
+pub const PLAYBAR_HEIGHT: u16 = 6;
 pub const SMALL_TERMINAL_HEIGHT: u16 = 45;
 // plain volume bar width (label "♪ 100% " + filled bar)
 pub const VOLUME_BAR_WIDTH: u16 = 24;
@@ -27,7 +27,7 @@ pub const PLAYBAR_TIME_LEN: u16 = 6;
 // volume ramp bar, mouse interactions, theme preset, seek by typing,
 // resume last song, restore settings, clear cache, dev view, columns,
 // visualizer style
-pub const SETTINGS_ROW_COUNT: u16 = 33;
+pub const SETTINGS_ROW_COUNT: u16 = 34;
 
 // Prefix for list panel titles; clicking the title row refreshes the list.
 pub const REFRESH_GLYPH: &str = "♻ ";
@@ -48,12 +48,19 @@ pub fn help_full_rect(area: Rect) -> Rect {
   )
 }
 
+/// First row of the 2-row playbar content block, vertically centered
+/// inside the playbar's inner height (y+2 when PLAYBAR_HEIGHT == 6).
+pub fn playbar_content_top_y(playbar: Rect) -> u16 {
+  let inner_h = playbar.height.saturating_sub(2);
+  playbar.y + 1 + inner_h.saturating_sub(2) / 2
+}
+
 // The volume bar: 1 row, right-aligned inside the playbar, on the same row
 // as the music bar. Shared by drawer and mouse hit-test.
 pub fn playbar_volume_rect(playbar: Rect) -> Rect {
   Rect::new(
     playbar.x + playbar.width.saturating_sub(VOLUME_BAR_WIDTH + 1),
-    playbar.y + 2,
+    playbar_content_top_y(playbar) + 1,
     VOLUME_BAR_WIDTH,
     1,
   )
@@ -63,6 +70,42 @@ pub fn playbar_volume_rect(playbar: Rect) -> Rect {
 // 2 cols (blank for episodes) so the song name never shifts. Shared by the
 // drawer, the truncation math and the mouse hit-test.
 pub const PLAYBAR_HEART_WIDTH: u16 = 2;
+pub const PLAYBAR_COVER_COLS: u16 = 10;
+pub const PLAYBAR_COVER_GAP: u16 = 1;
+
+pub fn playbar_cover_offset(playbar: Rect, has_cover: bool) -> u16 {
+  if has_cover && playbar.width > 60 {
+    PLAYBAR_COVER_COLS + PLAYBAR_COVER_GAP
+  } else {
+    0
+  }
+}
+
+pub fn playbar_cover_rect(app: &App) -> Option<Rect> {
+  let has_track = app
+    .current_playback_context
+    .as_ref()
+    .and_then(|c| c.item.as_ref())
+    .is_some();
+  if !has_track || app.cover_art.is_none() {
+    return None;
+  }
+  let margin = get_main_layout_margin(app);
+  let inner_w = app.size.width.saturating_sub(margin * 2);
+  let inner_h = app.size.height.saturating_sub(margin * 2);
+  let header_h = HEADER_HEIGHT.min(inner_h);
+  let playbar_h = PLAYBAR_HEIGHT.min(inner_h.saturating_sub(header_h));
+  if inner_w <= 60 || playbar_h < 4 {
+    return None;
+  }
+  let playbar_y = margin + inner_h.saturating_sub(playbar_h);
+  Some(Rect::new(
+    margin + 1,
+    playbar_y + 1,
+    PLAYBAR_COVER_COLS,
+    playbar_h.saturating_sub(2).min(4),
+  ))
+}
 
 // The playbar row holding the song name, full inner width. Shares the first
 // inner row (y+1) with the centered transport buttons: the name renders left
@@ -70,29 +113,27 @@ pub const PLAYBAR_HEART_WIDTH: u16 = 2;
 pub fn playbar_song_row(playbar: Rect) -> Rect {
   Rect::new(
     playbar.x + 1,
-    playbar.y + 1,
+    playbar_content_top_y(playbar),
     playbar.width.saturating_sub(2),
     1,
   )
 }
 
-// The playbar row holding the centered progress bar, sharing the music-bar
-// row (y+2): the artist name is drawn on the left, the bar centered.
+// The playbar row holding the centered progress bar, at the bottom inner row.
 pub fn playbar_bar_row(playbar: Rect) -> Rect {
   Rect::new(
     playbar.x + 1,
-    playbar.y + 2,
+    playbar.y + playbar.height.saturating_sub(2),
     playbar.width.saturating_sub(2),
     1,
   )
 }
 
-// The playbar row holding the artist name, on the music-bar row (y+2), left
-// of the centered progress bar.
+// The playbar row holding the artist name, vertically centered below the song name.
 pub fn playbar_artist_row(playbar: Rect) -> Rect {
   Rect::new(
     playbar.x + 1,
-    playbar.y + 2,
+    playbar_content_top_y(playbar) + 1,
     playbar.width.saturating_sub(2),
     1,
   )
@@ -181,33 +222,29 @@ pub fn song_table_viewport(app: &App) -> usize {
     .saturating_sub(3) as usize
 }
 
-// Header-row column zones (mirror of draw_input_and_help_box's split):
+// Header-row column zones (exact mirror of draw_input_and_help_box's integer split):
 // title on the left, centered smaller search box, gear zone on the right.
 pub fn header_zones(_app: &App, input_box: Rect) -> Vec<Rect> {
-  Layout::default()
-    .direction(Direction::Horizontal)
-    .constraints(
-      [
-        Constraint::Percentage(35),
-        Constraint::Percentage(30),
-        Constraint::Percentage(35),
-      ]
-      .as_ref(),
-    )
-    .split(input_box)
-    .to_vec()
-    .into_iter()
-    // The 3-row search box is vertically centered inside the taller banner
-    // header; keep click/cursor zones on the visual box only.
-    .map(|mut r| {
-      if r.height > 3 {
-        let inset = (r.height - 3) / 2;
-        r.y += inset;
-        r.height = 3;
-      }
-      r
-    })
-    .collect()
+  let w0 = (input_box.width as u32 * 35 / 100) as u16;
+  let w1 = (input_box.width as u32 * 30 / 100) as u16;
+  let w2 = input_box.width.saturating_sub(w0 + w1);
+  [
+    Rect::new(input_box.x, input_box.y, w0, input_box.height),
+    Rect::new(input_box.x + w0, input_box.y, w1, input_box.height),
+    Rect::new(input_box.x + w0 + w1, input_box.y, w2, input_box.height),
+  ]
+  .into_iter()
+  // The 3-row search box is vertically centered inside the taller banner
+  // header; keep click/cursor zones on the visual box only.
+  .map(|mut r| {
+    if r.height > 3 {
+      let inset = (r.height - 3) / 2;
+      r.y += inset;
+      r.height = 3;
+    }
+    r
+  })
+  .collect()
 }
 
 // The centered search box of the header row, used to make it clickable.
@@ -330,10 +367,65 @@ pub fn search_layout(
 /// (Artist / Albums / Singles / EPs / Featuring) and the active tab's list below.
 /// Shared with the mouse hit-testing so the two never drift.
 /// Returns (tab_bar_rect, tab_cells, list_rect).
-pub fn artist_layout(chunk: Rect, expanded: ArtistBlock) -> (Rect, Vec<(ArtistBlock, Rect)>, Rect) {
-  let tab_bar = Rect {
+pub fn main_body_content_rect(app: &App) -> Option<Rect> {
+  let margin = get_main_layout_margin(app);
+  let inner = Rect::new(
+    margin,
+    margin,
+    app.size.width.saturating_sub(margin * 2),
+    app.size.height.saturating_sub(margin * 2),
+  );
+  let header_h = HEADER_HEIGHT.min(inner.height);
+  let playbar_h = PLAYBAR_HEIGHT.min(inner.height.saturating_sub(header_h));
+  let body_h = inner.height.saturating_sub(header_h + playbar_h);
+  if body_h == 0 || inner.width == 0 {
+    return None;
+  }
+  let routes = Rect::new(inner.x, inner.y + header_h, inner.width, body_h);
+  let (_, content) = sidebar_content_split(app, routes);
+  Some(content)
+}
+
+pub const ARTIST_HEADER_HEIGHT: u16 = 6;
+
+pub fn artist_header_rect(chunk: Rect) -> Option<Rect> {
+  (chunk.height >= 16 && chunk.width >= 20).then_some(Rect {
     x: chunk.x,
     y: chunk.y,
+    width: chunk.width,
+    height: ARTIST_HEADER_HEIGHT,
+  })
+}
+
+pub fn artist_cover_rect(header: Rect) -> Rect {
+  Rect {
+    x: header.x + 1,
+    y: header.y + 1,
+    width: 10.min(header.width.saturating_sub(2)),
+    height: header.height.saturating_sub(2),
+  }
+}
+
+pub fn artist_follow_rect(header: Rect) -> Rect {
+  let w = 13u16.min(header.width.saturating_sub(14));
+  Rect {
+    x: header.x + header.width.saturating_sub(w + 2),
+    y: header.y + 1,
+    width: w,
+    height: 1,
+  }
+}
+
+pub fn artist_layout(chunk: Rect, expanded: ArtistBlock) -> (Rect, Vec<(ArtistBlock, Rect)>, Rect) {
+  let header_h = if artist_header_rect(chunk).is_some() {
+    ARTIST_HEADER_HEIGHT
+  } else {
+    0
+  };
+  let tab_y = chunk.y + header_h;
+  let tab_bar = Rect {
+    x: chunk.x,
+    y: tab_y,
     width: chunk.width,
     height: 1,
   };
@@ -354,7 +446,7 @@ pub fn artist_layout(chunk: Rect, expanded: ArtistBlock) -> (Rect, Vec<(ArtistBl
         *block,
         Rect {
           x: chunk.x + (i as u16) * cell_w,
-          y: chunk.y,
+          y: tab_y,
           width: cell_w,
           height: 1,
         },
@@ -363,9 +455,9 @@ pub fn artist_layout(chunk: Rect, expanded: ArtistBlock) -> (Rect, Vec<(ArtistBl
     .collect::<Vec<_>>();
   let below = Rect {
     x: chunk.x,
-    y: chunk.y + 1,
+    y: tab_y + 1,
     width: chunk.width,
-    height: chunk.height.saturating_sub(1),
+    height: chunk.height.saturating_sub(header_h + 1),
   };
   if expanded == ArtistBlock::Empty {
     return (tab_bar, tab_cells, below);
@@ -374,27 +466,27 @@ pub fn artist_layout(chunk: Rect, expanded: ArtistBlock) -> (Rect, Vec<(ArtistBl
 }
 
 pub fn create_artist_string(artists: &[SimplifiedArtist]) -> String {
-  artists
-    .iter()
-    .map(|artist| artist.name.to_string())
-    .collect::<Vec<String>>()
-    .join(", ")
+  match artists {
+    [] => String::new(),
+    [one] => one.name.clone(),
+    many => {
+      let cap: usize = many.iter().map(|a| a.name.len() + 2).sum();
+      let mut out = String::with_capacity(cap);
+      for (i, artist) in many.iter().enumerate() {
+        if i > 0 {
+          out.push_str(", ");
+        }
+        out.push_str(&artist.name);
+      }
+      out
+    }
+  }
 }
 
 pub fn millis_to_minutes(millis: u128) -> String {
-  let minutes = millis / 60000;
-  let seconds = (millis % 60000) / 1000;
-  let seconds_display = if seconds < 10 {
-    format!("0{}", seconds)
-  } else {
-    format!("{}", seconds)
-  };
-
-  if seconds == 60 {
-    format!("{}:00", minutes + 1)
-  } else {
-    format!("{}:{}", minutes, seconds_display)
-  }
+  let minutes = millis / 60_000;
+  let seconds = (millis % 60_000) / 1_000;
+  format!("{minutes}:{seconds:02}")
 }
 
 pub fn format_playlist_duration(total_ms: i64) -> String {
@@ -460,12 +552,11 @@ pub fn scrollbar_geometry(
 // Sidebar content split: auto-sizes the sidebar to fit its content, with the
 // content area taking the remaining space.
 pub fn sidebar_content_split(app: &App, chunk: Rect) -> (Rect, Rect) {
-  let width = sidebar_width(app, chunk);
-  let columns = Layout::default()
-    .direction(Direction::Horizontal)
-    .constraints([Constraint::Length(width), Constraint::Min(1)].as_ref())
-    .split(chunk);
-  (columns[0], columns[1])
+  let w = sidebar_width(app, chunk).min(chunk.width);
+  (
+    Rect::new(chunk.x, chunk.y, w, chunk.height),
+    Rect::new(chunk.x + w, chunk.y, chunk.width - w, chunk.height),
+  )
 }
 
 pub const SIDEBAR_MIN_WIDTH: u16 = 12;
@@ -482,7 +573,7 @@ pub fn sidebar_width(app: &App, chunk: Rect) -> u16 {
     }
   }
   let playlist_len = app.playlists.as_ref().map(|p| p.items.len()).unwrap_or(0);
-  let playlist_digits = format!("{}", playlist_len).len();
+  let playlist_digits = (playlist_len.max(1).ilog10() as usize) + 1;
   let content_len = if app.sidebar_minimized {
     playlist_digits
   } else {
@@ -504,24 +595,25 @@ pub fn sidebar_handle_rect(app: &App, chunk: Rect) -> Rect {
 // never needs a scrollbar; playlists take the rest. The cap keeps playlists
 // visible when the library itself overflows.
 pub fn library_playlists_split(app: &App, chunk: Rect) -> (Rect, Rect) {
-  if app.user_config.behavior.enable_animations {
-    if let Some(h) = app.library_height_override {
-      let lib_h = h.clamp(4, chunk.height.saturating_sub(4));
-      let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(lib_h), Constraint::Min(1)].as_ref())
-        .split(chunk);
-      return (chunks[0], chunks[1]);
+  let override_h = app
+    .user_config
+    .behavior
+    .enable_animations
+    .then_some(app.library_height_override)
+    .flatten();
+  let lib_h = match override_h {
+    Some(h) => h.clamp(4, chunk.height.saturating_sub(4)),
+    None => {
+      let library_len = visible_library_options(&app.hidden_library_sections).len() + 2;
+      let cap = ((chunk.height * 2 / 5) as usize).max(4);
+      library_len.min(cap) as u16
     }
   }
-  let library_len = visible_library_options(&app.hidden_library_sections).len() + 2;
-  let cap = ((chunk.height * 2 / 5) as usize).max(4);
-  let lib_h = library_len.min(cap) as u16;
-  let chunks = Layout::default()
-    .direction(Direction::Vertical)
-    .constraints([Constraint::Length(lib_h), Constraint::Min(1)].as_ref())
-    .split(chunk);
-  (chunks[0], chunks[1])
+  .min(chunk.height);
+  (
+    Rect::new(chunk.x, chunk.y, chunk.width, lib_h),
+    Rect::new(chunk.x, chunk.y + lib_h, chunk.width, chunk.height - lib_h),
+  )
 }
 
 pub fn library_handle_rect(app: &App, chunk: Rect) -> Rect {
@@ -754,7 +846,11 @@ pub fn playbar_processes_label(suspended: bool) -> &'static str {
 
 // X range [start, end) of the processes button on the title row.
 pub fn playbar_processes_range(playbar: Rect, device_name: &str, suspended: bool) -> (u16, u16) {
-  let title = build_playbar_title("", device_name);
+  let title = build_playbar_title(
+    "",
+    device_name,
+    playbar_title_max_width(playbar.width, suspended),
+  );
   let start = playbar.x + 1 + title.width() as u16 + 2; // ── separator after [ ]
   (
     start,
@@ -765,41 +861,37 @@ pub fn playbar_processes_range(playbar: Rect, device_name: &str, suspended: bool
 pub fn playbar_controls_row(playbar: Rect) -> Rect {
   Rect::new(
     playbar.x + 1,
-    playbar.y + 1,
+    playbar.y + playbar.height.saturating_sub(3),
     playbar.width.saturating_sub(2),
     1,
   )
 }
 
 // x where the transport buttons text starts — the button group
-// dead-centered on the playbar row, so the buttons always sit above the
-// middle of the music bar regardless of repeat mode. Shared by drawer and
-// mouse hit-test.
+// dead-centered on the progress bar midpoint, so the 5 symmetric transport
+// buttons always sit dead-center above the music bar regardless of Smart
+// Shuffle or repeat mode. Shared by drawer and mouse hit-test.
 pub fn playbar_controls_x(playbar: Rect, controls: &[(PlaybarButton, String)]) -> u16 {
   let row = playbar_controls_row(playbar);
   let group: u16 = controls.iter().map(|(_, t)| t.width() as u16 + 1).sum();
-  row.x + row.width.saturating_sub(group) / 2
+  let center = playbar_progress_rect(playbar)
+    .map(|b| b.x + b.width / 2)
+    .unwrap_or_else(|| row.x + row.width / 2);
+  center.saturating_sub(group / 2).max(row.x)
 }
 
 // The five transport buttons with their glyphs, left to right: shuffle,
-// prev, play/pause, next, repeat. Active state is carried by the drawer
-// (color) and by the play/pause glyph itself; the repeat mode word is a
-// separate span rendered after the group (see repeat_label) so the button
-// group keeps a constant width. All strings are fixed-width so the group
-// never re-centers between states; the centering math uses unicode widths.
-// Smart shuffle is "Smart ⇄" padded to 7 cols so the group never moves.
+// prev, play/pause, next, repeat. Every button is 2 cols (" <glyph>") + 1
+// trailing space = 15 cols total, keeping PlayPause dead-center. "Smart "
+// renders in the left margin and the repeat mode word in the right margin
+// so neither shifts the group.
 pub fn build_playbar_controls(
   is_playing: bool,
-  smart_shuffle: bool,
+  _smart_shuffle: bool,
 ) -> Vec<(PlaybarButton, String)> {
-  let shuffle_text = if smart_shuffle {
-    "Smart ⇄".to_string()
-  } else {
-    format!("{:>7}", "⇄")
-  };
   vec![
-    (PlaybarButton::Shuffle, shuffle_text),
-    (PlaybarButton::Prev, "⏮".into()),
+    (PlaybarButton::Shuffle, " ⇄".into()),
+    (PlaybarButton::Prev, " «".into()),
     (
       PlaybarButton::PlayPause,
       if is_playing {
@@ -808,7 +900,7 @@ pub fn build_playbar_controls(
         " ▶".into()
       },
     ),
-    (PlaybarButton::Next, "⏭".into()),
+    (PlaybarButton::Next, " »".into()),
     (PlaybarButton::Repeat, " ↻".into()),
   ]
 }
@@ -826,8 +918,21 @@ pub fn repeat_label(repeat: RepeatState) -> Option<String> {
 // Builds the playbar title string.
 // Playbar title: the trailing cells of the title text are the fullscreen
 // toggle (see handle_playbar_click). ASCII so every terminal renders it.
-pub fn build_playbar_title(_play_title: &str, device_name: &str) -> String {
-  format!("{:-7}({})——[ ]", "Device", device_name)
+// The device name is truncated to `max_width` so the trailing [ ] is never
+// cut off by block-title truncation (drawn and hit-tested from this same
+// string, so both always agree).
+pub fn build_playbar_title(_play_title: &str, device_name: &str, max_width: usize) -> String {
+  let fixed = UnicodeWidthStr::width("Device-()──[ ]");
+  let device = super::widgets::ellipsize(device_name, max_width.saturating_sub(fixed));
+  format!("{:-7}({})──[ ]", "Device", device)
+}
+
+// Title-row budget for build_playbar_title: block borders, the ── separator
+// and the trailing processes label all eat into the available width.
+pub fn playbar_title_max_width(playbar_width: u16, suspended: bool) -> usize {
+  (playbar_width.saturating_sub(2) as usize)
+    .saturating_sub(2)
+    .saturating_sub(UnicodeWidthStr::width(playbar_processes_label(suspended)))
 }
 
 // Which track-table contexts have a Date Added column (they carry added_at).
@@ -959,7 +1064,6 @@ mod tests {
       volume_increment: 5,
       tick_rate_milliseconds: 250,
       enable_text_emphasis: false,
-      volume_ramp_bar: false,
       seek_by_typing: false,
       restore_settings: false,
       enforce_wide_search_bar: false,
@@ -981,6 +1085,7 @@ mod tests {
       max_display_length: 0,
       enable_animations: false,
       playback_poll_secs: 5,
+      lastfm_api_key: None,
     }
   }
 
@@ -1112,5 +1217,15 @@ mod tests {
     // A shifted header keeps the same relative geometry.
     let rect = gear_click_rect(&app, Rect::new(4, 0, 200, 3));
     assert_eq!((rect.x, rect.y), (199, 1));
+  }
+
+  #[test]
+  fn playbar_content_rows_are_vertically_centered() {
+    let playbar = Rect::new(0, 20, 120, PLAYBAR_HEIGHT);
+    assert_eq!(playbar_song_row(playbar).y, 22);
+    assert_eq!(playbar_artist_row(playbar).y, 23);
+    assert_eq!(playbar_volume_rect(playbar).y, 23);
+    assert_eq!(playbar_controls_row(playbar).y, 23);
+    assert_eq!(playbar_bar_row(playbar).y, 24);
   }
 }

@@ -268,11 +268,26 @@ async fn handle_playback_state(
     *live = true;
     guard.soloist_live = true;
   }
-  if heart.as_ref() != last_heart.as_ref() {
+  let pending_cover = if heart.as_ref() != last_heart.as_ref() {
     *last_heart = heart.clone();
     if let Some(id) = heart {
       guard.dispatch(IoEvent::CurrentUserSavedTracksContains(vec![id]));
     }
+    if guard.get_current_route().active_block == crate::app::ActiveBlock::MusicView {
+      guard.refresh_music_view_data();
+      None
+    } else {
+      guard.lyrics = None;
+      guard.track_credits = None;
+      guard.queue_next = None;
+      guard.prepare_cover_art()
+    }
+  } else {
+    guard.prepare_cover_art()
+  };
+  drop(guard);
+  if let Some((cid, url)) = pending_cover {
+    crate::backend::spawn_cover_fetch(Arc::clone(app), cid, url);
   }
 }
 
@@ -293,7 +308,7 @@ where
 }
 
 /// Map a `playback_state` snapshot onto [`CurrentPlaybackContext`].
-#[allow(deprecated)]
+#[allow(deprecated)] // rspotify-model marks removed Spotify fields deprecated on public struct literals
 fn build_context(state: &PlaybackState, device_name: &str) -> CurrentPlaybackContext {
   let item = &state.item;
   let decorations = &item.decorations;
@@ -355,7 +370,7 @@ fn build_context(state: &PlaybackState, device_name: &str) -> CurrentPlaybackCon
     artists,
     available_markets: vec![],
     disc_number: 0,
-    duration: chrono::Duration::milliseconds(decorations.playback.duration_ms),
+    duration: chrono::TimeDelta::milliseconds(decorations.playback.duration_ms),
     explicit: decorations
       .playback
       .content_ratings

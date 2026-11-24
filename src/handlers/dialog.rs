@@ -172,10 +172,8 @@ fn handle_add_to_playlist_dialog(key: Key, app: &mut App) {
       Key::Backspace => {
         app.new_playlist_name.pop();
       }
-      Key::Char(c) => {
-        if app.new_playlist_name.len() < 100 {
-          app.new_playlist_name.push(c);
-        }
+      Key::Char(c) if app.new_playlist_name.len() < 100 => {
+        app.new_playlist_name.push(c);
       }
       _ => {}
     }

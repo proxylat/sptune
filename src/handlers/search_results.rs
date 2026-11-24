@@ -12,14 +12,8 @@ use rspotify::model::Id;
 fn down_with_more(has_more: bool, items_len: usize, selected: Option<usize>) -> usize {
   match selected {
     Some(i) if i + 1 < items_len => i + 1,
-    Some(_) => {
-      if has_more {
-        items_len
-      } else {
-        0
-      }
-    }
-    None => 0,
+    Some(_) if has_more => items_len,
+    _ => 0,
   }
 }
 
@@ -334,6 +328,7 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
             .iter()
             .map(|track| track.id.as_ref().map(|id| id.uri()).unwrap_or_default())
             .collect::<Vec<String>>();
+          app.play_track_optimistic(tracks.items[index].clone());
           app.dispatch(IoEvent::StartPlayback(None, Some(track_uris), Some(index)));
         }
       }

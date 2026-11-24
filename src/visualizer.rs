@@ -18,15 +18,16 @@ use rustfft::{num_complex::Complex, FftPlanner};
 
 /// Number of bars rendered.
 pub const VIZ_BINS: usize = 24;
-/// FFT window: 2048 mono samples at 44.1kHz is ~46ms per chunk.
+/// FFT window: 2048 mono samples at 44.1kHz (~46ms window).
 const VIZ_WINDOW: usize = 2048;
+/// Hop size: 512 samples (~11.6ms) for ~86 FPS low-latency updates.
+const VIZ_HOP: usize = 512;
 const VIZ_RATE: f32 = 44100.0;
 /// Retry capture setup at most this often while the view stays open.
 const VIZ_RETRY: Duration = Duration::from_secs(5);
 
-// Render physics, ported from cliamp's classic peak / LED drivers:
-// exponential body smoothing (fast attack, slow decay) plus ballistic
-// peak caps (launch on rise, gravity fall, brief apex hold).
+// Render physics: exponential body smoothing (fast attack, slow decay)
+// plus ballistic peak caps (launch on rise, gravity fall, brief apex hold).
 const BODY_RISE: f32 = 34.0;
 const BODY_FALL: f32 = 10.0;
 const CAP_LAUNCH_BASE: f32 = 0.8;
@@ -44,14 +45,14 @@ const LED_PEAK_FALL: f32 = 0.55;
 /// Fallback physics step when no previous frame timestamp exists.
 const DEFAULT_DT: f32 = 1.0 / 30.0;
 
-/// Visualizer render style, cycled with the `v` key. Bands-only modes
-/// share the 24-bin FFT snapshot; scope/waveform modes (cliamp's Scope,
-/// Wave, Stereo) need raw time-domain samples the capture path doesn't
-/// deliver, so they are deliberately absent.
+/// Visualizer render style, cycled with the `v` key. All modes share the
+/// 24-bin FFT snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VizMode {
   Bars,
   Peak,
+  Mirror,
+  Wave,
   Bricks,
   Columns,
   Ascii,
@@ -65,6 +66,8 @@ impl VizMode {
     match self {
       VizMode::Bars => "Bars",
       VizMode::Peak => "Peak",
+      VizMode::Mirror => "Mirror",
+      VizMode::Wave => "Wave",
       VizMode::Bricks => "Bricks",
       VizMode::Columns => "Columns",
       VizMode::Ascii => "Ascii",
@@ -77,7 +80,9 @@ impl VizMode {
   pub fn cycle(self) -> VizMode {
     match self {
       VizMode::Bars => VizMode::Peak,
-      VizMode::Peak => VizMode::Bricks,
+      VizMode::Peak => VizMode::Mirror,
+      VizMode::Mirror => VizMode::Wave,
+      VizMode::Wave => VizMode::Bricks,
       VizMode::Bricks => VizMode::Columns,
       VizMode::Columns => VizMode::Ascii,
       VizMode::Ascii => VizMode::Led,
@@ -87,9 +92,12 @@ impl VizMode {
     }
   }
 
-  pub fn from_str(s: &str) -> VizMode {
+  #[cfg(test)]
+  pub fn parse(s: &str) -> VizMode {
     match s.to_ascii_lowercase().as_str() {
       "peak" => VizMode::Peak,
+      "mirror" => VizMode::Mirror,
+      "wave" => VizMode::Wave,
       "bricks" => VizMode::Bricks,
       "columns" => VizMode::Columns,
       "ascii" => VizMode::Ascii,
@@ -181,8 +189,8 @@ impl VizState {
   }
 
   /// Advance body smoothing, ballistic caps and LED physics by one frame.
-  /// Called from the renderer; dt comes from the wall clock so any tick
-  /// cadence animates correctly, clamped like cliamp's drivers.
+  /// Called from the renderer; dt comes from the wall clock and is clamped
+  /// so any tick cadence animates smoothly.
   pub fn tick(&mut self) {
     let now = Instant::now();
     let mut dt = self
@@ -276,8 +284,7 @@ impl VizState {
       self.mosaic_rows = rows;
       self.mosaic_tiles = tiles;
       self.mosaic.clear();
-      // Deterministic LCG (same constants as cliamp) so the wiring is
-      // stable for a given grid size.
+      // Deterministic LCG so the wiring is stable for a given grid size.
       let mut rng: u64 = 0xC1AB1A1015D5;
       let mut next = move || {
         rng = rng
@@ -371,6 +378,12 @@ impl VizState {
   }
 }
 
+impl Default for VizState {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl VizWorker {
   fn spawn() -> Option<Self> {
     #[cfg(target_os = "linux")]
@@ -391,20 +404,20 @@ impl VizWorker {
     };
     use libpulse_simple_binding::Simple;
 
-    let monitor = monitor_source()?;
     let spec = Spec {
       format: Format::S16le,
       rate: VIZ_RATE as u32,
       channels: 1,
     };
     let attr = BufferAttr {
-      maxlength: u32::MAX,
+      maxlength: (VIZ_HOP * 2 * 4) as u32,
       tlength: u32::MAX,
       prebuf: u32::MAX,
       minreq: u32::MAX,
-      fragsize: (VIZ_WINDOW * 2) as u32,
+      fragsize: (VIZ_HOP * 2) as u32,
     };
-    let simple = Simple::new(
+    let mut monitor = "@DEFAULT_MONITOR@".to_string();
+    let simple = match Simple::new(
       None,
       "sptune",
       Direction::Record,
@@ -413,8 +426,23 @@ impl VizWorker {
       &spec,
       None::<&ChanMap>,
       Some(&attr),
-    )
-    .ok()?;
+    ) {
+      Ok(s) => s,
+      Err(_) => {
+        monitor = monitor_source()?;
+        Simple::new(
+          None,
+          "sptune",
+          Direction::Record,
+          Some(&monitor),
+          "visualizer",
+          &spec,
+          None::<&ChanMap>,
+          Some(&attr),
+        )
+        .ok()?
+      }
+    };
     let stop = Arc::new(AtomicBool::new(false));
     let levels = Arc::new(Mutex::new([0.0; VIZ_BINS]));
     let thread = std::thread::Builder::new()
@@ -491,9 +519,11 @@ fn capture_loop(
   let hann: Vec<f32> = (0..VIZ_WINDOW)
     .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / VIZ_WINDOW as f32).cos()))
     .collect();
+  let mut samples = vec![0.0f32; VIZ_WINDOW];
   let mut buf = vec![Complex::new(0.0, 0.0); VIZ_WINDOW];
-  let mut raw = vec![0u8; VIZ_WINDOW * 2];
+  let mut raw = vec![0u8; VIZ_HOP * 2];
   let mut peaks = [0.0f32; VIZ_BINS];
+  let mut agc_peak = 0.06f32;
   let mut errs = 0u32;
   while !stop.load(Ordering::Relaxed) {
     if simple.read(&mut raw).is_err() {
@@ -507,11 +537,15 @@ fn capture_loop(
       continue;
     }
     errs = 0;
+    samples.copy_within(VIZ_HOP.., 0);
+    let dst = &mut samples[VIZ_WINDOW - VIZ_HOP..];
     for (i, s) in raw.as_chunks::<2>().0.iter().enumerate() {
-      let v = i16::from_le_bytes(*s) as f32 / 32768.0;
-      buf[i] = Complex::new(v * hann[i], 0.0);
+      dst[i] = i16::from_le_bytes(*s) as f32 / 32768.0;
     }
-    let snapshot = analyze(&mut buf, &fft, &mut peaks);
+    for i in 0..VIZ_WINDOW {
+      buf[i] = Complex::new(samples[i] * hann[i], 0.0);
+    }
+    let snapshot = analyze(&mut buf, &fft, &mut peaks, &mut agc_peak);
     if let Ok(mut l) = levels.lock() {
       *l = snapshot;
     }
@@ -529,34 +563,67 @@ fn analyze(
   buf: &mut [Complex<f32>],
   fft: &std::sync::Arc<dyn rustfft::Fft<f32>>,
   peaks: &mut [f32; VIZ_BINS],
+  agc_peak: &mut f32,
 ) -> [f32; VIZ_BINS] {
-  // Log-spaced bins, 30Hz..16kHz.
+  // Log-spaced bins, 30Hz..16kHz with perceptual treble tilt + rolling
+  // AGC peak so beats punch and quiet passages drop naturally while
+  // silence remains strictly 0.0.
   fft.process(buf);
+  let mut raw = [0.0f32; VIZ_BINS];
+  let mut frame_max = 0.0f32;
+  for (b, slot) in raw.iter_mut().enumerate() {
+    let lo_f = freq_bin(b);
+    let hi_f = freq_bin(b + 1);
+    let lo = lo_f.floor() as usize;
+    let hi = hi_f.floor() as usize;
+    let mag: f32 = if hi > lo {
+      let mut m = 0.0f32;
+      for c in &buf[lo..hi.min(VIZ_WINDOW / 2 + 1)] {
+        m = m.max(c.norm());
+      }
+      m
+    } else {
+      // Sub-bin bass bands (< 1 FFT bin wide) interpolate between adjacent
+      // FFT bins instead of slicing an empty `&buf[k..k]`.
+      let a = buf[lo].norm();
+      let c = buf[(lo + 1).min(VIZ_WINDOW / 2)].norm();
+      let frac = (0.5 * (lo_f + hi_f) - lo as f32).clamp(0.0, 1.0);
+      a + (c - a) * frac
+    };
+    // Gentle treble tilt (+160% at top bin) counters natural pink-noise rolloff.
+    let tilt = 1.0 + 1.6 * (b as f32 / VIZ_BINS as f32);
+    let v = (mag / (VIZ_WINDOW as f32 * 0.25)) * tilt;
+    *slot = v;
+    frame_max = frame_max.max(v);
+  }
+  *agc_peak = if frame_max > *agc_peak {
+    *agc_peak + (frame_max - *agc_peak) * 0.35
+  } else {
+    (*agc_peak * 0.992).max(0.06)
+  };
   let mut snapshot = [0.0f32; VIZ_BINS];
+  let ref_ceiling = (*agc_peak).max(0.06);
   for (b, level) in snapshot.iter_mut().enumerate() {
-    let lo = bin_edge(b).min(VIZ_WINDOW / 2);
-    let hi = bin_edge(b + 1).clamp(1, VIZ_WINDOW / 2 + 1);
-    // Hann-windowed full-scale sine peaks near N/4 (single-sided).
-    let mut mag: f32 = 0.0;
-    for c in &buf[lo..hi] {
-      mag = mag.max(c.norm());
-    }
-    let target = (mag / (VIZ_WINDOW as f32 * 0.25)).min(1.0);
+    let target = if raw[b] <= 2e-4 {
+      0.0
+    } else {
+      (raw[b] / ref_ceiling).powf(0.65).min(1.0)
+    };
     if target > peaks[b] {
       peaks[b] = target;
     } else {
-      peaks[b] = (peaks[b] - 0.02).max(target).max(0.0);
+      peaks[b] = (peaks[b] - 0.025).max(target).max(0.0);
     }
     *level = peaks[b];
   }
   snapshot
 }
 
-/// FFT-bin edge for log bin `b` (0..=VIZ_BINS).
+/// Fractional FFT bin index for log band `b` (0..=VIZ_BINS), clamped above DC.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn bin_edge(b: usize) -> usize {
+fn freq_bin(b: usize) -> f32 {
   (30.0f32 * (16000.0f32 / 30.0f32).powf(b as f32 / VIZ_BINS as f32) * VIZ_WINDOW as f32 / VIZ_RATE)
-    as usize
+    .clamp(1.0, (VIZ_WINDOW / 2) as f32)
 }
 
 /// WASAPI loopback reader: stereo f32 frames → mono → shared `analyze`.
@@ -577,6 +644,7 @@ fn capture_loop_windows(
     .collect();
   let mut buf = vec![Complex::new(0.0, 0.0); VIZ_WINDOW];
   let mut peaks = [0.0f32; VIZ_BINS];
+  let mut agc_peak = 0.06f32;
   // f32 stereo frames: 8 bytes each.
   let mut queue: VecDeque<u8> = VecDeque::with_capacity(VIZ_WINDOW * 8 * 4);
   while !stop.load(Ordering::Relaxed) {
@@ -600,7 +668,7 @@ fn capture_loop_windows(
       buf[i] = Complex::new(v * hann[i], 0.0);
     }
     queue.drain(..VIZ_WINDOW * 8);
-    let snapshot = analyze(&mut buf, &fft, &mut peaks);
+    let snapshot = analyze(&mut buf, &fft, &mut peaks, &mut agc_peak);
     if let Ok(mut l) = levels.lock() {
       *l = snapshot;
     }
@@ -642,8 +710,11 @@ fn monitor_source() -> Option<String> {
     }
   });
   loop {
-    ml.iterate(true);
-    if op.get_state() == OpState::Done {
+    match ml.iterate(true) {
+      IterateResult::Quit(_) | IterateResult::Err(_) => return None,
+      _ => {}
+    }
+    if op.get_state() != OpState::Running {
       break;
     }
   }
@@ -659,8 +730,11 @@ fn monitor_source() -> Option<String> {
     }
   });
   loop {
-    ml.iterate(true);
-    if op.get_state() == OpState::Done {
+    match ml.iterate(true) {
+      IterateResult::Quit(_) | IterateResult::Err(_) => return None,
+      _ => {}
+    }
+    if op.get_state() != OpState::Running {
       break;
     }
   }
@@ -687,7 +761,8 @@ mod tests {
       })
       .collect();
     let mut peaks = [0.0f32; VIZ_BINS];
-    let levels = analyze(&mut buf, &fft, &mut peaks);
+    let mut agc = 0.06f32;
+    let levels = analyze(&mut buf, &fft, &mut peaks, &mut agc);
     // Bin containing 440Hz: 24*ln(440/30)/ln(16000/30) ≈ 10.3 → bin 10.
     let hot = levels
       .iter()
@@ -700,12 +775,35 @@ mod tests {
   }
 
   #[test]
+  fn bass_60hz_has_no_dead_bins() {
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(VIZ_WINDOW);
+    let mut buf: Vec<Complex<f32>> = (0..VIZ_WINDOW)
+      .map(|i| {
+        let t = i as f32 / VIZ_RATE;
+        let v = (2.0 * PI * 60.0 * t).sin();
+        let hann = 0.5 * (1.0 - (2.0 * PI * i as f32 / VIZ_WINDOW as f32).cos());
+        Complex::new(v * hann, 0.0)
+      })
+      .collect();
+    let mut peaks = [0.0f32; VIZ_BINS];
+    let mut agc = 0.06f32;
+    let levels = analyze(&mut buf, &fft, &mut peaks, &mut agc);
+    assert!(
+      levels[..4].iter().all(|&l| l > 0.1),
+      "dead bass bin in 0..4: {:?}",
+      &levels[..6]
+    );
+  }
+
+  #[test]
   fn silence_stays_zero() {
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(VIZ_WINDOW);
     let mut buf = vec![Complex::new(0.0, 0.0); VIZ_WINDOW];
     let mut peaks = [0.0f32; VIZ_BINS];
-    let levels = analyze(&mut buf, &fft, &mut peaks);
+    let mut agc = 0.06f32;
+    let levels = analyze(&mut buf, &fft, &mut peaks, &mut agc);
     assert!(levels.iter().all(|&l| l == 0.0));
   }
 
@@ -713,22 +811,22 @@ mod tests {
   fn mode_cycle_covers_all_names() {
     let mut m = VizMode::Bars;
     let mut seen = vec![m.name()];
-    for _ in 0..7 {
+    for _ in 0..9 {
       m = m.cycle();
       seen.push(m.name());
     }
     assert_eq!(
       seen,
-      vec!["Bars", "Peak", "Bricks", "Columns", "Ascii", "LED", "Mosaic", "Off"]
+      vec!["Bars", "Peak", "Mirror", "Wave", "Bricks", "Columns", "Ascii", "LED", "Mosaic", "Off"]
     );
     assert_eq!(m.cycle(), VizMode::Bars);
   }
 
   #[test]
   fn mode_from_str_falls_back_to_bars() {
-    assert_eq!(VizMode::from_str("LED"), VizMode::Led);
-    assert_eq!(VizMode::from_str("mosaic"), VizMode::Mosaic);
-    assert_eq!(VizMode::from_str("nonsense"), VizMode::Bars);
+    assert_eq!(VizMode::parse("LED"), VizMode::Led);
+    assert_eq!(VizMode::parse("mosaic"), VizMode::Mosaic);
+    assert_eq!(VizMode::parse("nonsense"), VizMode::Bars);
   }
 
   #[test]

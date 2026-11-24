@@ -17,9 +17,55 @@ const APP_CONFIG_DIR: &str = "sptune";
 // v2: entries written before the added_at parse fix have no dates; bumping
 // the filename drops them so every playlist refetches with dates.
 const CACHE_FILE: &str = "playlist_cache_v2.json";
+const PLAYLISTS_DIR: &str = "playlists";
 const MAX_CACHED_PLAYLISTS: usize = 20;
 /// Entries older than this are evicted on load (ToS: no indefinite storage).
-const CACHE_TTL_SECS: u64 = 30 * 86400;
+const CACHE_TTL_SECS: u64 = 7 * 86400;
+
+/// Strip unused Spotify metadata fields (URLs, markets, redundant album
+/// artists, extra cover thumbnails) from a cached item to cut disk & heap size.
+fn slim_playlist_item(item: &mut PlaylistItem) {
+  item.added_by = None;
+  if let Some(rspotify::model::PlayableItem::Track(t)) = &mut item.item {
+    t.external_urls.clear();
+    t.external_ids.clear();
+    t.href = None;
+    t.preview_url = None;
+    t.restrictions = None;
+    for a in &mut t.artists {
+      a.external_urls.clear();
+      a.href = None;
+    }
+    t.album.artists.clear();
+    t.album.external_urls.clear();
+    t.album.href = None;
+    if t.album.images.len() > 1 {
+      if let Some(best) = t
+        .album
+        .images
+        .iter()
+        .max_by_key(|i| i.width.unwrap_or(0))
+        .cloned()
+      {
+        t.album.images = vec![best];
+      }
+    }
+  }
+}
+
+#[cfg(target_env = "gnu")]
+fn trim_heap() {
+  extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+  }
+  // Release large temporary JSON parse buffers back to the OS.
+  unsafe {
+    malloc_trim(0);
+  }
+}
+
+#[cfg(not(target_env = "gnu"))]
+fn trim_heap() {}
 
 /// Stable identity of a playlist item (track or episode uri).
 pub fn playlist_item_uri(item: &PlaylistItem) -> Option<String> {
@@ -32,7 +78,7 @@ pub fn playlist_item_uri(item: &PlaylistItem) -> Option<String> {
 
 /// Cached track list of a playlist, keyed by playlist id. Entries live 30
 /// days; the screen is served from cache and merged with a delta probe
-// ponytail: terms — only PlaylistItem/FullTrack metadata, no audio features; reconciled via snapshot_id tail probe (backend.rs:1787); SAVED_CHECK_TTL 300s (backend.rs:643) for ❤️
+// terms — only PlaylistItem/FullTrack metadata, no audio features; reconciled via snapshot_id tail probe (backend.rs:1787); SAVED_CHECK_TTL 300s (backend.rs:643) for ❤️
 /// (tail fetch) on open, so a changed playlist picks up new tracks only.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct CachedPlaylist {
@@ -83,6 +129,30 @@ impl PlaylistCache {
     self.loaded = false;
   }
 
+  fn playlist_dir(&self) -> PathBuf {
+    self
+      .path
+      .parent()
+      .map(|p| p.join(PLAYLISTS_DIR))
+      .unwrap_or_else(|| PathBuf::from(PLAYLISTS_DIR))
+  }
+
+  fn playlist_file(&self, playlist_id: &str) -> PathBuf {
+    let safe: String = playlist_id
+      .chars()
+      .map(|c| {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+          c
+        } else {
+          '_'
+        }
+      })
+      .collect();
+    self.playlist_dir().join(format!("{safe}.json"))
+  }
+
+  /// One-time migration from monolithic `playlist_cache_v2.json` to lazy
+  /// per-playlist files under `playlists/<id>.json`.
   pub fn ensure_loaded(&mut self) {
     if !CACHE_ENABLED.load(Ordering::Relaxed) {
       self.loaded = true;
@@ -94,10 +164,46 @@ impl PlaylistCache {
     if let Ok(contents) = fs::read_to_string(&self.path) {
       if let Ok(mut map) = serde_json::from_str::<HashMap<String, CachedPlaylist>>(&contents) {
         map.retain(|_, e| now_secs().saturating_sub(e.fetched_at) < CACHE_TTL_SECS);
-        self.map = map;
+        for (id, mut entry) in map {
+          for item in &mut entry.items {
+            slim_playlist_item(item);
+          }
+          if let Ok(json) = serde_json::to_string(&entry) {
+            Self::write_atomic(&self.playlist_file(&id), &json);
+          }
+        }
       }
+      let _ = fs::remove_file(&self.path);
+      drop(contents);
+      trim_heap();
     }
     self.loaded = true;
+  }
+
+  /// Lazily load a single playlist's cache file into memory on open.
+  pub fn ensure_playlist_loaded(&mut self, playlist_id: &str) {
+    if !CACHE_ENABLED.load(Ordering::Relaxed) {
+      return;
+    }
+    self.ensure_loaded();
+    if self.map.contains_key(playlist_id) {
+      return;
+    }
+    let file = self.playlist_file(playlist_id);
+    if let Ok(contents) = fs::read_to_string(&file) {
+      if let Ok(mut entry) = serde_json::from_str::<CachedPlaylist>(&contents) {
+        if now_secs().saturating_sub(entry.fetched_at) < CACHE_TTL_SECS {
+          for item in &mut entry.items {
+            slim_playlist_item(item);
+          }
+          self.map.insert(playlist_id.to_string(), entry);
+        } else {
+          let _ = fs::remove_file(&file);
+        }
+      }
+      drop(contents);
+      trim_heap();
+    }
   }
 
   pub fn lookup(&self, playlist_id: &str) -> Option<&CachedPlaylist> {
@@ -113,7 +219,7 @@ impl PlaylistCache {
   pub fn update(
     &mut self,
     playlist_id: &str,
-    items: Vec<PlaylistItem>,
+    mut items: Vec<PlaylistItem>,
     total: u32,
     offset: u32,
     append: bool,
@@ -121,8 +227,11 @@ impl PlaylistCache {
     if !CACHE_ENABLED.load(Ordering::Relaxed) {
       return;
     }
-    self.ensure_loaded();
-    // ponytail: cap playlists (LRU by fetched_at), prevents unbounded HashMap growth
+    for item in &mut items {
+      slim_playlist_item(item);
+    }
+    self.ensure_playlist_loaded(playlist_id);
+    // cap playlists in memory (LRU by fetched_at), prevents unbounded HashMap growth
     if !self.map.contains_key(playlist_id) && self.map.len() >= MAX_CACHED_PLAYLISTS {
       if let Some(oldest) = self
         .map
@@ -145,7 +254,7 @@ impl PlaylistCache {
       entry.items = items;
       entry.total = total;
     }
-    self.save();
+    self.save_playlist(playlist_id);
   }
 
   /// Record the playlist's snapshot id (changes on any edit; the open-path
@@ -154,10 +263,10 @@ impl PlaylistCache {
     if !CACHE_ENABLED.load(Ordering::Relaxed) {
       return;
     }
-    self.ensure_loaded();
+    self.ensure_playlist_loaded(playlist_id);
     if let Some(entry) = self.map.get_mut(playlist_id) {
       entry.snapshot = snapshot;
-      self.save();
+      self.save_playlist(playlist_id);
     }
   }
 
@@ -167,7 +276,7 @@ impl PlaylistCache {
     }
     self.ensure_loaded();
     self.map.remove(playlist_id);
-    self.save();
+    let _ = fs::remove_file(self.playlist_file(playlist_id));
   }
 
   /// Drop a single item (by uri) from a cached playlist and record the new
@@ -177,14 +286,14 @@ impl PlaylistCache {
     if !CACHE_ENABLED.load(Ordering::Relaxed) {
       return;
     }
-    self.ensure_loaded();
+    self.ensure_playlist_loaded(playlist_id);
     if let Some(entry) = self.map.get_mut(playlist_id) {
       entry.snapshot = snapshot;
       entry.total = entry.total.saturating_sub(1);
       entry
         .items
         .retain(|item| playlist_item_uri(item).as_deref() != Some(uri));
-      self.save();
+      self.save_playlist(playlist_id);
     }
   }
 
@@ -208,22 +317,21 @@ impl PlaylistCache {
     false
   }
 
-  /// Delete everything: drop the in-memory map and remove the file from disk.
+  /// Delete everything: drop the in-memory map and remove all per-playlist files.
   /// Not affected by the no-cache flag — a disabled cache can still be
   /// wiped when the user asks for it.
   pub fn clear(&mut self) {
     self.map.clear();
     self.loaded = true;
     let _ = fs::remove_file(&self.path);
+    let _ = fs::remove_dir_all(self.playlist_dir());
   }
 
-  fn save(&self) {
-    if let Ok(json) = serde_json::to_string(&self.map) {
-      // ponytail: async disk to not block Network thread; sync in tests for determinism
-      if cfg!(test) {
-        Self::write_atomic(&self.path, &json);
-        return;
-      }
+  fn save_playlist(&self, playlist_id: &str) {
+    let Some(entry) = self.map.get(playlist_id) else {
+      return;
+    };
+    if !cfg!(test) {
       let due = self
         .last_save
         .lock()
@@ -239,18 +347,56 @@ impl PlaylistCache {
       if !due {
         return;
       }
-      let path = self.path.clone();
+    }
+    if let Ok(json) = serde_json::to_string(entry) {
+      let file = self.playlist_file(playlist_id);
+      let dir = self.playlist_dir();
+      if cfg!(test) {
+        Self::write_atomic(&file, &json);
+        Self::prune_lru(&dir);
+        return;
+      }
       std::thread::spawn(move || {
-        Self::write_atomic(&path, &json);
+        Self::write_atomic(&file, &json);
+        Self::prune_lru(&dir);
       });
+    }
+  }
+
+  fn prune_lru(dir: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+      return;
+    };
+    let mut files: Vec<(SystemTime, PathBuf)> = entries
+      .filter_map(|e| e.ok())
+      .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+      .filter_map(|e| {
+        let mtime = e.metadata().ok()?.modified().ok()?;
+        Some((mtime, e.path()))
+      })
+      .collect();
+    if files.len() <= MAX_CACHED_PLAYLISTS {
+      return;
+    }
+    files.sort_by_key(|(t, _)| *t);
+    for (_, path) in files.iter().take(files.len() - MAX_CACHED_PLAYLISTS) {
+      let _ = fs::remove_file(path);
     }
   }
 
   /// Temp-file + rename so a kill mid-write can never leave a truncated
   /// cache behind (a partial file used to force a full refetch next launch).
   fn write_atomic(path: &std::path::Path, json: &str) {
+    if let Some(dir) = path.parent() {
+      let _ = fs::create_dir_all(dir);
+    }
     let tmp = path.with_extension("json.tmp");
     if fs::write(&tmp, json).is_ok() {
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+      }
       let _ = fs::rename(&tmp, path);
     }
   }
@@ -332,7 +478,7 @@ mod tests {
 
     let mut reloaded = PlaylistCache::new();
     reloaded.path = dir.join(CACHE_FILE);
-    reloaded.ensure_loaded();
+    reloaded.ensure_playlist_loaded("p1");
     let entry = reloaded.lookup("p1").unwrap();
     assert_eq!(entry.items.len(), 2);
 

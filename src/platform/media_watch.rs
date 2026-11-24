@@ -11,7 +11,7 @@ use crate::backend::IoEvent;
 
 /// True when the session belongs to Spotify (app name or id contains it).
 pub fn is_spotify_session(source_name: Option<&str>, source_id: &str) -> bool {
-  // ponytail: two small allocs on a rare path; keeps matching case-proof.
+  // two small allocs on a rare path; keeps matching case-proof.
   source_name
     .map(|n| n.to_lowercase().contains("spotify"))
     .unwrap_or(false)
@@ -179,7 +179,11 @@ async fn watch_mpris(io_tx: std::sync::mpsc::Sender<IoEvent>, conn: zbus::Connec
   let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await else {
     return;
   };
-  // ponytail: full rebuild per membership change (ListNames + proxies, all
+  let Ok(membership) = dbus.receive_name_owner_changed().await else {
+    return;
+  };
+  let mut membership = membership.map(spotify_membership_signal).boxed().fuse();
+  // full rebuild per membership change (ListNames + proxies, all
   // local, ~ms). Player churn is rare; no incremental bookkeeping.
   loop {
     let mut players: Vec<String> = Vec::new();
@@ -216,13 +220,25 @@ async fn watch_mpris(io_tx: std::sync::mpsc::Sender<IoEvent>, conn: zbus::Connec
           .boxed(),
       );
     }
-    let membership = dbus.receive_name_owner_changed().await;
-    let Ok(membership) = membership else {
-      return;
-    };
+    if events.is_empty() {
+      // No Spotify MPRIS player on D-Bus: sleep on NameOwnerChanged only so
+      // an empty SelectAll never spins in a tight loop.
+      loop {
+        match membership.next().await {
+          Some(Some(signal)) => {
+            if should_refresh_signal(&signal) {
+              let _ = io_tx.send(IoEvent::GetCurrentPlayback);
+            }
+            break;
+          }
+          Some(None) => {}
+          None => return,
+        }
+      }
+      continue;
+    }
     // Boxed: guarantees Unpin for select!, whatever the native stream types are.
     let mut events = events.boxed().fuse();
-    let mut membership = membership.map(spotify_membership_signal).boxed().fuse();
     // Player event -> refresh, stay armed. Spotify membership change (or a
     // dead watch set) -> refresh and rebuild.
     loop {
@@ -245,7 +261,7 @@ async fn watch_mpris(io_tx: std::sync::mpsc::Sender<IoEvent>, conn: zbus::Connec
           }
           // Unrelated player churn: stay armed.
           Some(None) => {}
-          None => break,
+          None => return,
         },
       }
     }

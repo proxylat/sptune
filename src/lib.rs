@@ -11,10 +11,9 @@ pub mod user_config;
 pub mod app;
 pub mod backend;
 pub mod client_creds;
-// NOTE: `cover_art` and `visualizer` are WIP modules whose third-party deps
-// (image, rustfft, cpal, libpulse) are not in Cargo.toml yet. They stay out
-// of the bench bindings until that branch lands with its manifest entries;
-// re-add the `pub mod` lines together with the deps.
+pub mod cover_art;
+pub mod metadata;
 pub mod platform;
 pub mod soloist_ws;
 pub mod tui;
+pub mod visualizer;

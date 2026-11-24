@@ -68,7 +68,7 @@ pub fn on_high_press_handler() -> usize {
 
 pub fn on_middle_press_handler<T>(selection_data: &[T]) -> usize {
   let mut index = selection_data.len() / 2;
-  if selection_data.len() % 2 == 0 {
+  if selection_data.len().is_multiple_of(2) {
     index -= 1;
   }
   index
@@ -113,6 +113,9 @@ pub fn handle_right_event(app: &mut App) {
           Some(ActiveBlock::RecentlyPlayed),
           Some(ActiveBlock::RecentlyPlayed),
         );
+      }
+      RouteId::Queue => {
+        app.set_current_route_state(Some(ActiveBlock::Queue), Some(ActiveBlock::Queue));
       }
       RouteId::Search => {
         app.set_current_route_state(

@@ -119,6 +119,10 @@ pub async fn run_setup(
 ) -> Result<()> {
   println!("\nSoloist is Spotify's official headless client for Linux — a real Spotify Connect device with local audio output (Premium required).");
   if !prompt_yes("Enable headless playback with Soloist? [y/N]: ")? {
+    // Persist the decline so fresh-install detection flips and the
+    // question does not repeat on every launch.
+    let defaults = crate::user_config::SoloistConfig::default();
+    user_config.save_soloist_config(false, &defaults.device_name, &defaults.binary_path)?;
     return Ok(());
   }
 

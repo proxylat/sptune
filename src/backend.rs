@@ -49,123 +49,6 @@ fn play_context_from_uri<'a>(uri: &'a str) -> Option<PlayContextId<'a>> {
 
 // TOTP/anon partner API removed for terms compliance — algorithmic playlists now via Web API only
 
-// ponytail: partner API removed — below kept as stub for callers, returns error
-#[cfg(test)]
-/// Map a partner-API `itemV2.data` track object into an internal
-/// [`FullTrack`] by reshaping it into the Web API shape rspotify expects. (removed)
-fn partner_track_from_value(data: &serde_json::Value) -> anyhow::Result<Option<FullTrack>> {
-  let uri = match data["uri"].as_str() {
-    Some(u) if u.starts_with("spotify:track:") => u.to_string(),
-    _ => return Ok(None),
-  };
-  let id = uri.trim_start_matches("spotify:track:").to_string();
-  let name = data["name"].as_str().unwrap_or("").to_string();
-  let explicit = data["contentRating"]["label"].as_str() == Some("EXPLICIT");
-  let is_playable = data["playability"]["playable"].as_bool().unwrap_or(false);
-  let duration_ms = data["trackDuration"]["totalMilliseconds"]
-    .as_u64()
-    .unwrap_or(0);
-  let disc_number = data["discNumber"].as_i64().unwrap_or(1) as i32;
-  let track_number = data["trackNumber"].as_u64().unwrap_or(1) as u32;
-
-  let artists: Vec<serde_json::Value> = data["artists"]["items"]
-    .as_array()
-    .map(|items| {
-      items
-        .iter()
-        .map(|a| {
-          let auri = a["uri"].as_str().unwrap_or("");
-          json!({
-            "external_urls": {},
-            "href": null,
-            "id": auri.trim_start_matches("spotify:artist:"),
-            "name": a["profile"]["name"].as_str().unwrap_or(""),
-            "type": "artist",
-            "uri": auri
-          })
-        })
-        .collect()
-    })
-    .unwrap_or_default();
-
-  let album = &data["albumOfTrack"];
-  let album_uri = album["uri"].as_str().unwrap_or("");
-  let album_id = album_uri.trim_start_matches("spotify:album:").to_string();
-  let album_artists: Vec<serde_json::Value> = album["artists"]["items"]
-    .as_array()
-    .map(|items| {
-      items
-        .iter()
-        .map(|a| {
-          let auri = a["uri"].as_str().unwrap_or("");
-          json!({
-            "external_urls": {},
-            "href": null,
-            "id": auri.trim_start_matches("spotify:artist:"),
-            "name": a["profile"]["name"].as_str().unwrap_or(""),
-            "type": "artist",
-            "uri": auri
-          })
-        })
-        .collect()
-    })
-    .unwrap_or_default();
-  let images: Vec<serde_json::Value> = album["coverArt"]["sources"]
-    .as_array()
-    .map(|sources| {
-      sources
-        .iter()
-        .filter_map(|s| {
-          s["url"].as_str().map(|url| {
-            json!({
-              "height": null,
-              "url": url,
-              "width": null
-            })
-          })
-        })
-        .collect()
-    })
-    .unwrap_or_default();
-
-  let track_json = json!({
-    "album": {
-      "album_type": null,
-      "artists": album_artists,
-      "available_markets": [],
-      "external_urls": {},
-      "href": null,
-      "id": album_id,
-      "images": images,
-      "name": album["name"].as_str().unwrap_or(""),
-      "release_date": album["date"]["isoString"].as_str(),
-      "release_date_precision": "day",
-      "type": "album",
-      "uri": album_uri
-    },
-    "artists": artists,
-    "available_markets": [],
-    "disc_number": disc_number,
-    "duration_ms": duration_ms,
-    "explicit": explicit,
-    "external_ids": {},
-    "external_urls": {},
-    "href": null,
-    "id": id,
-    "is_local": false,
-    "is_playable": is_playable,
-    "name": name,
-    "popularity": 0,
-    "preview_url": null,
-    "track_number": track_number,
-    "type": "track",
-    "uri": uri
-  });
-  serde_json::from_value(track_json)
-    .map(Some)
-    .map_err(|e| anyhow!("partner track mapping failed: {}", e))
-}
-
 /// Parse a track/episode URI into a [`PlayableId`].
 fn playable_from_uri<'a>(uri: &'a str) -> Option<PlayableId<'a>> {
   if uri.starts_with("spotify:track:") {
@@ -246,6 +129,7 @@ pub enum IoEvent {
   Shuffle(bool),
   Repeat(RepeatState),
   PausePlayback,
+  SetPlaybackState(bool, u64),
   ChangeVolume(u8),
   GetArtist(String, String),
   GetAlbumTracks(Box<SimplifiedAlbum>),
@@ -259,6 +143,7 @@ pub enum IoEvent {
   UserFollowPlaylist(String, String, Option<bool>),
   UserUnfollowPlaylist(String, String),
   GetLyrics,
+  GetCoverArt(String, String),
   GetTrackCredits(String),
   GetQueue,
   ToggleProcessSuspend,
@@ -304,7 +189,7 @@ pub enum IoEvent {
   RefreshPlaylistTracks(String),
   /// Startup-only restore: saved volume/shuffle/repeat apply only when
   /// nothing is already playing; last page/sort always restores.
-  AutoRestore(SavedState),
+  AutoRestore(Box<SavedState>),
 }
 
 pub fn get_spotify(
@@ -317,7 +202,7 @@ pub fn get_spotify(
     .unwrap_or_else(SystemTime::now);
 
   let creds = Credentials::new_pkce(&client_config.client_id);
-  // ponytail: Config::default would re-enable token_refreshing (library
+  // Config::default would re-enable token_refreshing (library
   // auto_reauth drops the PKCE refresh_token) and point at a relative
   // ".spotify_token_cache.json". sptune owns refresh, so disable the
   // library's and keep the real cache path so write-back persists.
@@ -349,9 +234,6 @@ pub struct Network<'a> {
   api_backoff_until: Option<Instant>,
   // Bare id of the now-playing track the last heart check ran for; the 5s
   // playback poll only re-checks when the song actually changed.
-  // When the last control reconcile ran. Rapid next/prev spam skips the
-  // confirm GET if one ran <500ms ago; the periodic poll is the backstop.
-  last_reconcile: Instant,
   last_heart_check: Option<String>,
   // Playlists probed by the once-per-launch background version check
   // (reconcile). In-memory only, so every sptune start re-checks.
@@ -395,7 +277,11 @@ pub struct SavedState {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub library_height: Option<u16>,
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub volume_ramp_bar: Option<bool>,
+  pub music_left_pct: Option<u16>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub music_lyrics_pct: Option<u16>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub music_cover_height: Option<u16>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub black_background: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -430,6 +316,12 @@ pub struct SavedState {
   pub spotify_trim_ws: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub spotify_mem_limit: Option<u32>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub show_process_suspend: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub desktop_notifications: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub playlist_sorts: Option<std::collections::HashMap<String, (String, bool)>>,
 }
 
 impl SavedState {
@@ -495,7 +387,9 @@ impl SavedState {
       sidebar_minimized: Some(app.sidebar_minimized),
       sidebar_width: app.sidebar_width_override,
       library_height: app.library_height_override,
-      volume_ramp_bar: Some(app.user_config.behavior.volume_ramp_bar),
+      music_left_pct: app.music_left_pct,
+      music_lyrics_pct: app.music_lyrics_pct,
+      music_cover_height: app.music_cover_height,
       black_background: Some(app.user_config.theme.background == Color::Rgb(0, 0, 0)),
       show_album_column: Some(app.user_config.behavior.show_album_column),
       show_artist_column: Some(app.user_config.behavior.show_artist_column),
@@ -505,6 +399,15 @@ impl SavedState {
       enable_remove_from_playlist: Some(app.user_config.behavior.enable_remove_from_playlist),
       max_display_length: Some(app.user_config.behavior.max_display_length),
       dev_view: Some(app.dev_view),
+      show_process_suspend: Some(app.show_process_suspend),
+      desktop_notifications: Some(app.desktop_notifications),
+      playlist_sorts: (!app.playlist_sorts.is_empty()).then(|| {
+        app
+          .playlist_sorts
+          .iter()
+          .map(|(k, (col, desc))| (k.clone(), (sort_column_name(*col).to_string(), *desc)))
+          .collect()
+      }),
       enable_animations: Some(app.user_config.behavior.enable_animations),
       playback_poll_secs: Some(app.user_config.behavior.playback_poll_secs),
       made_for_you_custom: Some(app.made_for_you_custom.clone()),
@@ -582,8 +485,14 @@ impl SavedState {
       if let Some(value) = &self.library_height {
         obj.insert("library_height".to_string(), serde_json::json!(value));
       }
-      if let Some(value) = &self.volume_ramp_bar {
-        obj.insert("volume_ramp_bar".to_string(), serde_json::json!(value));
+      if let Some(value) = &self.music_left_pct {
+        obj.insert("music_left_pct".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.music_lyrics_pct {
+        obj.insert("music_lyrics_pct".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.music_cover_height {
+        obj.insert("music_cover_height".to_string(), serde_json::json!(value));
       }
       if let Some(value) = &self.black_background {
         obj.insert("black_background".to_string(), serde_json::json!(value));
@@ -614,6 +523,18 @@ impl SavedState {
       }
       if let Some(value) = &self.dev_view {
         obj.insert("dev_view".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.show_process_suspend {
+        obj.insert("show_process_suspend".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.desktop_notifications {
+        obj.insert(
+          "desktop_notifications".to_string(),
+          serde_json::json!(value),
+        );
+      }
+      if let Some(value) = &self.playlist_sorts {
+        obj.insert("playlist_sorts".to_string(), serde_json::json!(value));
       }
       if let Some(value) = &self.enable_animations {
         obj.insert("enable_animations".to_string(), serde_json::json!(value));
@@ -658,7 +579,7 @@ fn sort_column_name(column: TrackSortColumn) -> &'static str {
   }
 }
 
-fn sort_column_from_name(name: &str) -> Option<TrackSortColumn> {
+pub fn sort_column_from_name(name: &str) -> Option<TrackSortColumn> {
   match name {
     "title" => Some(TrackSortColumn::Title),
     "artist" => Some(TrackSortColumn::Artist),
@@ -698,6 +619,22 @@ pub const API_MAX_LIMIT: u32 = 50;
 // Search is the exception: Spotify cut its limit cap to 10 (Feb 2026).
 const SEARCH_MAX_LIMIT: u32 = 10;
 
+fn item_uri(item: &rspotify::model::PlayableItem) -> Option<String> {
+  match item {
+    rspotify::model::PlayableItem::Track(t) => t.id.as_ref().map(|id| id.uri()),
+    rspotify::model::PlayableItem::Episode(e) => Some(e.id.uri()),
+    _ => None,
+  }
+}
+
+fn context_matches_uri(ctx: &rspotify::model::CurrentPlaybackContext, expected: &str) -> bool {
+  ctx
+    .item
+    .as_ref()
+    .and_then(item_uri)
+    .is_some_and(|uri| uri == expected)
+}
+
 /// Merge live Smart Shuffle state with the local flag. API-true sticks
 /// (Smart enabled on another client lights up here); a locally-enabled
 /// Smart survives while shuffle stays on; shuffle-off clears both, so the
@@ -725,6 +662,35 @@ fn apply_saved_flags(set: &mut HashSet<String>, ids: &[String], is_saved: &[bool
   changed
 }
 
+/// Download cover art off the sequential `Network` loop so the playbar
+/// thumbnail never stalls behind Web API calls.
+pub fn spawn_cover_fetch(app_arc: Arc<Mutex<App>>, item_id: String, url: String) {
+  tokio::spawn(async move {
+    let img = match crate::cover_art::load_cached(&url) {
+      Some(cached) => Ok(cached),
+      None => crate::cover_art::fetch(&url).await,
+    };
+    let is_artist = item_id.starts_with("artist:");
+    let mut app = app_arc.lock().await;
+    if let Ok(img) = img {
+      if is_artist {
+        app.artist_cover = Some((item_id, img));
+      } else {
+        app.cover_art = Some((item_id, img));
+        if let Ok(mut proto) = app.cover_protocol.lock() {
+          *proto = None;
+        }
+      }
+      app.ui_dirty = true;
+    }
+    if is_artist {
+      app.artist_cover_fetching = None;
+    } else {
+      app.cover_art_fetching = None;
+    }
+  });
+}
+
 impl<'a> Network<'a> {
   pub fn new(
     spotify: AuthCodePkceSpotify,
@@ -742,7 +708,6 @@ impl<'a> Network<'a> {
       tokens: API_BURST,
       last_refill: Instant::now(),
       api_backoff_until: None,
-      last_reconcile: Instant::now(),
       last_heart_check: None,
       probed_playlists: HashSet::new(),
     }
@@ -783,7 +748,7 @@ impl<'a> Network<'a> {
     // playlist open pays 200-500ms for no network work.
     let skip_pace = match &io_event {
       IoEvent::GetPlaylistItems(pid, 0) => {
-        self.playlist_cache.ensure_loaded();
+        self.playlist_cache.ensure_playlist_loaded(pid);
         self
           .playlist_cache
           .lookup(pid)
@@ -791,7 +756,7 @@ impl<'a> Network<'a> {
           .unwrap_or(false)
       }
       IoEvent::GetMadeForYouPlaylistItems(pid, 0) => {
-        self.playlist_cache.ensure_loaded();
+        self.playlist_cache.ensure_playlist_loaded(pid);
         self
           .playlist_cache
           .lookup(pid)
@@ -832,11 +797,30 @@ impl<'a> Network<'a> {
       | IoEvent::CleanCache
       // Latency-sensitive single user actions: same token cost, no bucket wait.
       | IoEvent::Repeat(_)
-      | IoEvent::Shuffle(_) => true,
+      | IoEvent::Shuffle(_)
+      | IoEvent::SetPlaybackState(_, _)
+      // Static CDN cover art never hits api.spotify.com rate limits.
+      | IoEvent::GetCoverArt(_, _) => true,
       _ => false,
     };
     if !skip_pace {
-      self.app.lock().await.log_request(text);
+      self.app.lock().await.log_request(text.clone());
+    } else if matches!(
+      &io_event,
+      IoEvent::GetPlaylistItems(_, 0)
+        | IoEvent::GetMadeForYouPlaylistItems(_, 0)
+        | IoEvent::GetCurrentSavedTracks(None)
+        | IoEvent::GetCurrentUserSavedAlbums(None)
+        | IoEvent::GetCurrentUserSavedShows(None)
+        | IoEvent::GetPlaylists
+        | IoEvent::GetUser
+    ) {
+      // Cache hit: no network work, but keep it visible in the dev log.
+      self
+        .app
+        .lock()
+        .await
+        .log_request(format!("{text} (cached)"));
     }
     if skip_pace {
       // keep token state fresh for the panel without sleeping
@@ -976,6 +960,9 @@ impl<'a> Network<'a> {
       IoEvent::PausePlayback => {
         self.pause_playback().await;
       }
+      IoEvent::SetPlaybackState(playing, gen) => {
+        self.set_playback_state(playing, gen).await;
+      }
       IoEvent::ChangeVolume(volume) => {
         self.change_volume(volume).await;
       }
@@ -1017,6 +1004,9 @@ impl<'a> Network<'a> {
       IoEvent::GetLyrics => {
         self.get_lyrics().await;
       }
+      IoEvent::GetCoverArt(item_id, url) => {
+        spawn_cover_fetch(Arc::clone(self.app), item_id, url);
+      }
       IoEvent::GetTrackCredits(track_id) => {
         self.get_track_credits(track_id).await;
       }
@@ -1039,7 +1029,7 @@ impl<'a> Network<'a> {
           None => {
             let mut app = self.app.lock().await;
             app.processes_suspended = false;
-            app.api_error = "Spotify process not found".to_string();
+            app.push_api_error("Spotify process not found".to_string());
           }
         }
       }
@@ -1191,7 +1181,7 @@ impl<'a> Network<'a> {
   }
 
   fn parse_retry_after(msg: &str) -> Option<u64> {
-    // ponytail: minimal Retry-After parsing from rspotify error string; full header parsing would need ClientError access
+    // minimal Retry-After parsing from rspotify error string; full header parsing would need ClientError access
     msg.find("Retry-After").and_then(|i| {
       msg[i..]
         .split(|c: char| !c.is_ascii_digit())
@@ -1204,17 +1194,25 @@ impl<'a> Network<'a> {
     let message = e.to_string();
     // Full OpenAPI codes: 401→refresh, 429→backoff with Retry-After, others surface via toast
     if message.contains("401") || message.contains("Unauthorized") {
-      // ponytail: immediate refresh on 401, don't wait for SystemTime tick
+      // Immediate self-healing refresh on 401; only surface an error screen
+      // if re-authorization is required.
       let mut app = self.app.lock().await;
       if !app.auth_reauth_required {
         app.dispatch(crate::backend::IoEvent::RefreshAuthentication);
+      } else {
+        app.handle_error(e);
       }
-      app.handle_error(e);
       return;
+    }
+    if (message.contains("404") || message.contains("Not Found"))
+      && self.client_config.device_id.take().is_some()
+    {
+      let mut app = self.app.lock().await;
+      app.dispatch(IoEvent::GetDevices);
     }
     if message.contains("429") || message.contains("Too Many Requests") {
       let secs = Self::parse_retry_after(&message).unwrap_or(30);
-      // ponytail: 200ms jitter avoids thundering herd after shared Retry-After window
+      // 200ms jitter avoids thundering herd after shared Retry-After window
       self.api_backoff_until =
         Some(Instant::now() + Duration::from_secs(secs) + Duration::from_millis(200));
     }
@@ -1227,7 +1225,7 @@ impl<'a> Network<'a> {
       .library_cache
       .get_typed::<PrivateUser>("profile")
       .and_then(|(users, _)| users.into_iter().next());
-    // ponytail: cached profile is served as-is on startup; refresh is explicit now
+    // cached profile is served as-is on startup; refresh is explicit now
     if cached.is_some() {
       self.app.lock().await.user = cached;
       return;
@@ -1240,12 +1238,17 @@ impl<'a> Network<'a> {
         let mut app = self.app.lock().await;
         app.user = Some(user);
       }
-      Err(e) => self.handle_error(anyhow!(e)).await,
+      Err(e) => {
+        let err = self
+          .error_with_probe(e, "https://api.spotify.com/v1/me")
+          .await;
+        self.handle_error(err).await;
+      }
     }
   }
 
   async fn refresh_user(&mut self) {
-    // ponytail: profile is a single object — clear the key and reuse the cold path
+    // profile is a single object — clear the key and reuse the cold path
     self.library_cache.remove("profile");
     self.get_user().await;
   }
@@ -1262,6 +1265,142 @@ impl<'a> Network<'a> {
     }
   }
 
+  async fn apply_playback_context(&mut self, mut c: rspotify::model::CurrentPlaybackContext) {
+    let mut app = self.app.lock().await;
+    // Keep optimistic play/pause and repeat states while user clicks are still
+    // in flight so a background poll never flips or jiggles them backwards.
+    if let Some(prev) = app.current_playback_context.as_ref() {
+      if app.play_toggle_pending > 0 {
+        c.is_playing = prev.is_playing;
+      }
+      if app.repeat_pending > 0 {
+        c.repeat_state = prev.repeat_state;
+      }
+    }
+    // OSC 7501: emit only on play/pause flips (polls run every few
+    // seconds; the toggle path already emitted the user's own presses).
+    let was_playing = app
+      .current_playback_context
+      .as_ref()
+      .is_some_and(|ctx| ctx.is_playing);
+    let prev_id = app
+      .current_playback_context
+      .as_ref()
+      .and_then(|ctx| ctx.item.as_ref())
+      .and_then(item_uri);
+    let next_id = c.item.as_ref().and_then(item_uri);
+    let remaining_gt_2s = match (c.item.as_ref(), c.progress.as_ref()) {
+      (Some(rspotify::model::PlayableItem::Track(t)), Some(p)) => {
+        t.duration.num_milliseconds() - p.num_milliseconds() > 2_000
+      }
+      (Some(rspotify::model::PlayableItem::Episode(e)), Some(p)) => {
+        e.duration.num_milliseconds() - p.num_milliseconds() > 2_000
+      }
+      _ => false,
+    };
+    if prev_id != next_id || remaining_gt_2s {
+      app.track_end_polls = 0;
+    }
+    app.current_playback_context = Some(c.clone());
+    if was_playing != c.is_playing {
+      crate::app::emit_program_status(c.is_playing, &crate::app::now_playing_title(Some(&c)));
+    }
+    app.playback_known = true;
+    // Sync the real Smart Shuffle flag (undocumented API field); the
+    // merge keeps a locally-enabled Smart while shuffle stays on.
+    app.smart_shuffle = merge_smart_shuffle(c.smart_shuffle, app.smart_shuffle, c.shuffle_state);
+    app.instant_since_last_current_playback_poll = Instant::now();
+    // Prime the playbar heart when the song changed (TTL-cached, silent).
+    let now_playing = c.item.as_ref().and_then(|item| match item {
+      rspotify::model::PlayableItem::Track(t) => t.id.as_ref().map(|id| id.to_string()),
+      _ => None,
+    });
+    if now_playing.as_deref() != self.last_heart_check.as_deref() {
+      self.last_heart_check = now_playing.clone();
+      // Song changed: repaint instantly instead of waiting for the tick.
+      app.ui_dirty = true;
+      if let Some(id) = now_playing {
+        app.dispatch(IoEvent::CurrentUserSavedTracksContains(vec![id]));
+      }
+    }
+    if prev_id != next_id {
+      app.track_meta = None;
+      if let Some(rspotify::model::PlayableItem::Track(t)) = c.item.as_ref() {
+        if let Some(key) = app.user_config.behavior.lastfm_api_key.clone() {
+          let artist_name = t
+            .artists
+            .first()
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+          let track_name = t.name.clone();
+          let app_arc = Arc::clone(self.app);
+          tokio::spawn(async move {
+            if let Some(meta) =
+              crate::metadata::fetch_track_meta(&artist_name, &track_name, Some(&key)).await
+            {
+              let mut app = app_arc.lock().await;
+              app.track_meta = Some(meta);
+              app.ui_dirty = true;
+            }
+          });
+        }
+      }
+      if app.desktop_notifications && c.is_playing {
+        if let Some(uri) = next_id.as_ref() {
+          if app.last_notified_uri.as_deref() != Some(uri.as_str()) {
+            app.last_notified_uri = Some(uri.clone());
+            let (summary, body, icon) = match c.item.as_ref() {
+              Some(rspotify::model::PlayableItem::Track(t)) => {
+                let artists = t
+                  .artists
+                  .iter()
+                  .map(|a| a.name.as_str())
+                  .collect::<Vec<_>>()
+                  .join(", ");
+                let icon = crate::cover_art::pick_url(&t.album.images).map(|u| {
+                  crate::cover_art::cache_file(&u)
+                    .to_string_lossy()
+                    .into_owned()
+                });
+                (
+                  t.name.clone(),
+                  format!("{artists} — {}", t.album.name),
+                  icon,
+                )
+              }
+              Some(rspotify::model::PlayableItem::Episode(e)) => {
+                let icon = crate::cover_art::pick_url(&e.images).map(|u| {
+                  crate::cover_art::cache_file(&u)
+                    .to_string_lossy()
+                    .into_owned()
+                });
+                (e.name.clone(), e.show.name.clone(), icon)
+              }
+              _ => (String::new(), String::new(), None),
+            };
+            if !summary.is_empty() {
+              crate::platform::notifications::spawn_track_notification(summary, body, icon);
+            }
+          }
+        }
+      }
+      let pending_cover = if app.get_current_route().active_block == ActiveBlock::MusicView {
+        app.refresh_music_view_data();
+        None
+      } else {
+        app.lyrics = None;
+        app.track_credits = None;
+        app.queue_next = None;
+        app.prepare_cover_art()
+      };
+      if let Some((cid, url)) = pending_cover {
+        spawn_cover_fetch(Arc::clone(self.app), cid, url);
+      }
+    } else if let Some((cid, url)) = app.prepare_cover_art() {
+      spawn_cover_fetch(Arc::clone(self.app), cid, url);
+    }
+  }
+
   async fn get_current_playback(&mut self) {
     let context = self
       .spotify
@@ -1273,36 +1412,7 @@ impl<'a> Network<'a> {
 
     match context {
       Ok(Some(c)) => {
-        let mut app = self.app.lock().await;
-        // OSC 7501: emit only on play/pause flips (polls run every few
-        // seconds; the toggle path already emitted the user's own presses).
-        let was_playing = app
-          .current_playback_context
-          .as_ref()
-          .is_some_and(|ctx| ctx.is_playing);
-        app.current_playback_context = Some(c.clone());
-        if was_playing != c.is_playing {
-          crate::app::emit_program_status(c.is_playing, &crate::app::now_playing_title(Some(&c)));
-        }
-        app.playback_known = true;
-        // Sync the real Smart Shuffle flag (undocumented API field); the
-        // merge keeps a locally-enabled Smart while shuffle stays on.
-        app.smart_shuffle =
-          merge_smart_shuffle(c.smart_shuffle, app.smart_shuffle, c.shuffle_state);
-        app.instant_since_last_current_playback_poll = Instant::now();
-        // Prime the playbar heart when the song changed (TTL-cached, silent).
-        let now_playing = c.item.as_ref().and_then(|item| match item {
-          rspotify::model::PlayableItem::Track(t) => t.id.as_ref().map(|id| id.to_string()),
-          _ => None,
-        });
-        if now_playing.as_deref() != self.last_heart_check.as_deref() {
-          self.last_heart_check = now_playing.clone();
-          // Song changed: repaint instantly instead of waiting for the tick.
-          app.ui_dirty = true;
-          if let Some(id) = now_playing {
-            app.dispatch(IoEvent::CurrentUserSavedTracksContains(vec![id]));
-          }
-        }
+        self.apply_playback_context(c).await;
       }
       Ok(None) => {
         let mut app = self.app.lock().await;
@@ -1315,7 +1425,11 @@ impl<'a> Network<'a> {
     }
 
     let mut app = self.app.lock().await;
-    app.seek_ms.take();
+    // Never wipe a live scrub preview or a newer in-flight seek; otherwise an
+    // earlier poll/seek response flickers the bar back to the old position.
+    if !app.scrubbing_playbar && app.seek_pending == 0 {
+      app.seek_ms.take();
+    }
     app.is_fetching_current_playback = false;
   }
 
@@ -1436,7 +1550,7 @@ impl<'a> Network<'a> {
           .map(|playlist| playlist.name)
           .unwrap_or_default();
         if public.is_empty() {
-          // ponytail: partner API removed — fallback to oEmbed (no auth) for name, else id
+          // partner API removed — fallback to oEmbed (no auth) for name, else id
           Self::oembed_playlist_name(playlist_id)
             .await
             .unwrap_or_default()
@@ -1457,7 +1571,7 @@ impl<'a> Network<'a> {
 
   async fn get_playlist_tracks(&mut self, playlist_id: String, playlist_offset: u32) {
     if playlist_offset == 0 {
-      self.playlist_cache.ensure_loaded();
+      self.playlist_cache.ensure_playlist_loaded(&playlist_id);
       if self.playlist_cache.lookup(&playlist_id).is_some()
         && self.serve_playlist_cache(&playlist_id).await
       {
@@ -1574,6 +1688,10 @@ impl<'a> Network<'a> {
         .await;
     }
     let mut app = self.app.lock().await;
+    if paint && playlist_offset == 0 {
+      app.active_playlist_id = Some(playlist_id.to_string());
+      app.apply_saved_sort(&format!("playlist:{playlist_id}"), true);
+    }
     self.playlist_cache.update(
       playlist_id,
       playlist_tracks.items.clone(),
@@ -1730,7 +1848,7 @@ impl<'a> Network<'a> {
   /// rewrites them clean. Nothing here ever refetches — full refetch is the
   /// refresh button's job alone.
   async fn serve_playlist_cache(&mut self, playlist_id: &str) -> bool {
-    self.playlist_cache.ensure_loaded();
+    self.playlist_cache.ensure_playlist_loaded(playlist_id);
     let Some(entry) = self.playlist_cache.lookup(playlist_id) else {
       return false;
     };
@@ -1748,10 +1866,12 @@ impl<'a> Network<'a> {
     };
     self.set_playlist_tracks_to_table(&page, false).await;
     let mut app = self.app.lock().await;
+    app.active_playlist_id = Some(playlist_id.to_string());
     app.playlist_tracks = Some(page);
     app.is_fetching_next_page = false;
     // Serving a cached list disarms any in-flight fill for a previous one.
     app.fill_target = None;
+    app.apply_saved_sort(&format!("playlist:{playlist_id}"), true);
     app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
     true
   }
@@ -1979,18 +2099,18 @@ impl<'a> Network<'a> {
   ) {
     let mut app = self.app.lock().await;
     if append {
-      app.track_table.tracks.extend(tracks.clone());
-      app.track_table_added_at.extend(added_at.clone());
-      app.track_table_raw_index.extend(raw_index.clone());
+      app.track_table.tracks.extend(tracks);
+      app.track_table_added_at.extend(added_at);
+      app.track_table_raw_index.extend(raw_index);
       // Defer re-sorting while a Date Added load is in flight; the reversal
       // materializes once the full playlist has arrived.
       if app.track_table_sort.is_some() && !app.date_added_pending {
         app.sort_tracks();
       }
     } else {
-      app.track_table.tracks = tracks.clone();
-      app.track_table_added_at = added_at.clone();
-      app.track_table_raw_index = raw_index.clone();
+      app.track_table.tracks = tracks;
+      app.track_table_added_at = added_at;
+      app.track_table_raw_index = raw_index;
       app.track_table_sort = None;
       // A fresh table must not highlight its first row until the user
       // moves the selection or clicks a row.
@@ -2013,7 +2133,7 @@ impl<'a> Network<'a> {
     made_for_you_offset: u32,
   ) {
     if made_for_you_offset == 0 {
-      self.playlist_cache.ensure_loaded();
+      self.playlist_cache.ensure_playlist_loaded(&playlist_id);
       if self.playlist_cache.lookup(&playlist_id).is_some()
         && self.serve_playlist_cache(&playlist_id).await
       {
@@ -2100,7 +2220,9 @@ impl<'a> Network<'a> {
             .map(|playlist| playlist.name)
             .unwrap_or_default();
           if paint {
+            app.active_playlist_id = Some(playlist_id.clone());
             app.playlist_view = Some((name, playlist_id.clone()));
+            app.apply_saved_sort(&format!("playlist:{playlist_id}"), true);
             // Opening any list disarms another list's background fill; Made
             // For You pages in via scroll, so nothing is armed here.
             app.fill_target = None;
@@ -2370,8 +2492,9 @@ impl<'a> Network<'a> {
     // demand (GetMoreSearchResults), so searching is instant.
     let mut app = self.app.lock().await;
     app.reset_search_results();
+    app.is_fetching_next_page = false;
     app.search_results.query = search_term;
-    // ponytail: new search auto-expands the Songs tab (fetch on demand)
+    // new search auto-expands the Songs tab (fetch on demand)
     app.load_search_block(&SearchResultBlock::SongSearch);
   }
 
@@ -2649,7 +2772,8 @@ impl<'a> Network<'a> {
             .iter()
             .map(|item| Some(item.added_at))
             .collect();
-          app.track_table_sort = None;
+          app.active_playlist_id = None;
+          app.apply_saved_sort("saved_tracks", false);
         }
 
         saved_tracks.items.iter().for_each(|item| {
@@ -2690,7 +2814,8 @@ impl<'a> Network<'a> {
     let mut app = self.app.lock().await;
     app.track_table.tracks = page.items.iter().map(|item| item.track.clone()).collect();
     app.track_table_added_at = page.items.iter().map(|item| Some(item.added_at)).collect();
-    app.track_table_sort = None;
+    app.active_playlist_id = None;
+    app.apply_saved_sort("saved_tracks", false);
     page.items.iter().for_each(|item| {
       if let Some(track_id) = &item.track.id {
         app.liked_song_ids_set.insert(track_id.to_string());
@@ -2838,6 +2963,9 @@ impl<'a> Network<'a> {
       (None, None)
     };
 
+    let expected_uri = uris
+      .as_ref()
+      .and_then(|list| list.get(offset.unwrap_or(0)).cloned());
     let offset = offset.map(|o| Offset::Position(ChronoDuration::milliseconds(o as i64)));
 
     let Some(device_id) = self.effective_device_id().await else {
@@ -2850,6 +2978,7 @@ impl<'a> Network<'a> {
       return;
     };
 
+    let is_resume = context_uri.is_none() && uris.is_none();
     let result = if let Some(context_uri) = context_uri {
       match play_context_from_uri(&context_uri) {
         Some(cid) => self
@@ -2880,9 +3009,13 @@ impl<'a> Network<'a> {
 
     match result {
       Ok(()) => {
-        let mut app = self.app.lock().await;
-        app.song_progress_ms = 0;
-        app.dispatch(IoEvent::GetCurrentPlayback);
+        if !is_resume {
+          {
+            let mut app = self.app.lock().await;
+            app.song_progress_ms = 0;
+          }
+          self.reconcile_started_track(expected_uri.as_deref()).await;
+        }
       }
       Err(e) => {
         self.handle_error(e).await;
@@ -2910,23 +3043,96 @@ impl<'a> Network<'a> {
       self.get_devices().await;
       return;
     };
-    let result = match play_context_from_uri(&context_uri) {
+    let expected_uri = track_uri.clone();
+    let mut result = match play_context_from_uri(&context_uri) {
       Some(cid) => self
         .spotify
-        .start_context_playback(cid, Some(&device_id), Some(Offset::Uri(track_uri)), None)
+        .start_context_playback(
+          cid,
+          Some(&device_id),
+          Some(Offset::Uri(track_uri.clone())),
+          None,
+        )
         .await
         .map_err(|e| anyhow!(e)),
       None => Err(anyhow!("Invalid context uri")),
     };
 
+    // If the cached device_id is stale (404), refresh devices and retry on the
+    // live active device; if context playback still 404s, play the track URI directly.
+    if let Err(ref e) = result {
+      let msg = e.to_string();
+      if msg.contains("404") || msg.contains("Not Found") {
+        self.client_config.device_id = None;
+        self.get_devices().await;
+        let retry_device = self.effective_device_id().await;
+        if let Some(cid) = play_context_from_uri(&context_uri) {
+          result = self
+            .spotify
+            .start_context_playback(
+              cid,
+              retry_device.as_deref(),
+              Some(Offset::Uri(track_uri.clone())),
+              None,
+            )
+            .await
+            .map_err(|err| anyhow!(err));
+        }
+        if let Err(ref e2) = result {
+          let m2 = e2.to_string();
+          if m2.contains("404") || m2.contains("Not Found") {
+            if let Some(pid) = playable_from_uri(&track_uri) {
+              result = self
+                .spotify
+                .start_uris_playback(vec![pid], retry_device.as_deref(), None, None)
+                .await
+                .map_err(|err| anyhow!(err));
+            }
+          }
+        }
+      }
+    }
+
     match result {
       Ok(()) => {
-        let mut app = self.app.lock().await;
-        app.song_progress_ms = 0;
-        app.dispatch(IoEvent::GetCurrentPlayback);
+        {
+          let mut app = self.app.lock().await;
+          app.song_progress_ms = 0;
+        }
+        self.reconcile_started_track(Some(&expected_uri)).await;
       }
       Err(e) => {
         self.handle_error(e).await;
+      }
+    }
+  }
+
+  /// Spotify's GET /me/player is eventually consistent right after PUT /play.
+  /// Poll briefly until the started track appears instead of overwriting our
+  /// optimistic playbar with the old track and waiting 5s for the next poll.
+  async fn reconcile_started_track(&mut self, expected_uri: Option<&str>) {
+    if self.app.lock().await.soloist_live {
+      return;
+    }
+    let delays_ms = [200u64, 250, 300, 400];
+    for (idx, delay) in delays_ms.iter().enumerate() {
+      tokio::time::sleep(Duration::from_millis(*delay)).await;
+      if let Ok(Some(ctx)) = self
+        .spotify
+        .current_playback(
+          None,
+          Some([AdditionalType::Episode, AdditionalType::Track].iter()),
+        )
+        .await
+      {
+        let matched = match expected_uri {
+          Some(uri) => context_matches_uri(&ctx, uri),
+          None => ctx.progress.is_some_and(|p| p.num_milliseconds() < 5_000),
+        };
+        if matched || idx + 1 == delays_ms.len() {
+          self.apply_playback_context(ctx).await;
+          return;
+        }
       }
     }
   }
@@ -2957,7 +3163,24 @@ impl<'a> Network<'a> {
   }
 
   async fn seek(&mut self, position_ms: u32) {
+    // Drop a superseded seek (e.g. press-down seek overtaken by a drag) before
+    // issuing a redundant HTTP call that would race the final position.
+    {
+      let mut app = self.app.lock().await;
+      if app
+        .seek_ms
+        .is_some_and(|target| target != position_ms as u128)
+      {
+        app.seek_pending = app.seek_pending.saturating_sub(1);
+        return;
+      }
+    }
+
     let Some(device_id) = self.effective_device_id().await else {
+      {
+        let mut app = self.app.lock().await;
+        app.seek_pending = app.seek_pending.saturating_sub(1);
+      }
       self
         .handle_error(anyhow!(
           "No device available — open Spotify on a device and retry (press `d` to select)"
@@ -2975,41 +3198,87 @@ impl<'a> Network<'a> {
       .await
     {
       Ok(()) => {
+        let superseded = {
+          let mut app = self.app.lock().await;
+          let stale = app.scrubbing_playbar
+            || app
+              .seek_ms
+              .is_some_and(|target| target != position_ms as u128);
+          if stale {
+            app.seek_pending = app.seek_pending.saturating_sub(1);
+          }
+          stale
+        };
+        if superseded {
+          return;
+        }
         self.wait_until_position_ms(position_ms).await;
-        self.get_current_playback().await;
+        let should_fetch = {
+          let mut app = self.app.lock().await;
+          app.seek_pending = app.seek_pending.saturating_sub(1);
+          !app.scrubbing_playbar && app.seek_pending == 0
+        };
+        if should_fetch {
+          self.get_current_playback().await;
+        }
       }
       Err(e) => {
+        {
+          let mut app = self.app.lock().await;
+          app.seek_pending = app.seek_pending.saturating_sub(1);
+        }
         self.handle_error(anyhow!(e)).await;
         // Reconcile: the optimistic seek failed, so refetch server truth.
-        // seek_ms is left intact — a newer queued seek keeps it and runs next.
+        // seek_ms is left intact if a newer seek is still pending.
         self.get_current_playback().await;
       }
     };
   }
 
-  /// Trailing-edge reconcile: skips the confirm GET when one ran <500ms
-  /// ago. Rapid next/prev spam converges on the last state anyway; the
-  /// periodic poll is the backstop.
-  async fn reconcile(&mut self) {
-    let now = Instant::now();
-    if now.duration_since(self.last_reconcile) < Duration::from_millis(500) {
+  /// Poll briefly after next/prev until Spotify reports the switched track
+  /// (or restarted progress), instead of a 0ms GET that returns the old track.
+  async fn reconcile_track_change(&mut self, prev_uri: Option<&str>) {
+    if self.app.lock().await.soloist_live {
       return;
     }
-    self.last_reconcile = now;
-    self.get_current_playback().await;
+    let delays_ms = [200u64, 250, 300, 400];
+    for (idx, delay) in delays_ms.iter().enumerate() {
+      tokio::time::sleep(Duration::from_millis(*delay)).await;
+      if let Ok(Some(ctx)) = self
+        .spotify
+        .current_playback(
+          None,
+          Some([AdditionalType::Episode, AdditionalType::Track].iter()),
+        )
+        .await
+      {
+        let next_uri = ctx.item.as_ref().and_then(item_uri);
+        let changed = match prev_uri {
+          Some(prev) => next_uri.as_deref() != Some(prev),
+          None => true,
+        };
+        let restarted = ctx.progress.is_some_and(|p| p.num_milliseconds() < 3_000);
+        if changed || restarted || idx + 1 == delays_ms.len() {
+          self.apply_playback_context(ctx).await;
+          return;
+        }
+      }
+    }
   }
 
   async fn next_track(&mut self) {
-    let device_id = self.client_config.device_id.clone().or_else(|| {
-      self.app.try_lock().ok().and_then(|a| {
-        a.current_playback_context
-          .as_ref()
-          .and_then(|c| c.device.id.clone())
-      })
-    });
+    let prev_uri = self
+      .app
+      .lock()
+      .await
+      .current_playback_context
+      .as_ref()
+      .and_then(|c| c.item.as_ref())
+      .and_then(item_uri);
+    let device_id = self.effective_device_id().await;
     match self.spotify.next_track(device_id.as_deref()).await {
       Ok(()) => {
-        self.reconcile().await;
+        self.reconcile_track_change(prev_uri.as_deref()).await;
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -3018,16 +3287,18 @@ impl<'a> Network<'a> {
   }
 
   async fn previous_track(&mut self) {
-    let device_id = self.client_config.device_id.clone().or_else(|| {
-      self.app.try_lock().ok().and_then(|a| {
-        a.current_playback_context
-          .as_ref()
-          .and_then(|c| c.device.id.clone())
-      })
-    });
+    let prev_uri = self
+      .app
+      .lock()
+      .await
+      .current_playback_context
+      .as_ref()
+      .and_then(|c| c.item.as_ref())
+      .and_then(item_uri);
+    let device_id = self.effective_device_id().await;
     match self.spotify.previous_track(device_id.as_deref()).await {
       Ok(()) => {
-        self.reconcile().await;
+        self.reconcile_track_change(prev_uri.as_deref()).await;
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -3036,13 +3307,7 @@ impl<'a> Network<'a> {
   }
 
   async fn shuffle(&mut self, shuffle_state: bool) {
-    let device_id = self.client_config.device_id.clone().or_else(|| {
-      self.app.try_lock().ok().and_then(|a| {
-        a.current_playback_context
-          .as_ref()
-          .and_then(|c| c.device.id.clone())
-      })
-    });
+    let device_id = self.effective_device_id().await;
     match self
       .spotify
       .shuffle(!shuffle_state, device_id.as_deref())
@@ -3070,23 +3335,82 @@ impl<'a> Network<'a> {
       RepeatState::Context => RepeatState::Track,
       RepeatState::Track => RepeatState::Off,
     };
+    // Coalesce rapid clicks: if a newer click is already queued, drop this
+    // intermediate request so older replies never jiggle the UI backwards.
+    {
+      let mut app = self.app.lock().await;
+      if app.repeat_pending > 1 {
+        app.repeat_pending = app.repeat_pending.saturating_sub(1);
+        return;
+      }
+    }
+    let device_id = self.effective_device_id().await;
     match self
       .spotify
-      .repeat(next_repeat_state, self.client_config.device_id.as_deref())
+      .repeat(next_repeat_state, device_id.as_deref())
       .await
     {
       Ok(()) => {
         let mut app = self.app.lock().await;
-        if let Some(current_playback_context) = &mut app.current_playback_context {
-          current_playback_context.repeat_state = next_repeat_state;
-        };
+        app.repeat_pending = app.repeat_pending.saturating_sub(1);
+        if app.repeat_pending == 0 {
+          if let Some(current_playback_context) = &mut app.current_playback_context {
+            current_playback_context.repeat_state = next_repeat_state;
+          }
+        }
         // Repaint instantly instead of waiting for the next 1 Hz tick.
         app.ui_dirty = true;
       }
       Err(e) => {
+        {
+          let mut app = self.app.lock().await;
+          app.repeat_pending = app.repeat_pending.saturating_sub(1);
+        }
         self.handle_error(anyhow!(e)).await;
+        self.get_current_playback().await;
       }
     };
+  }
+
+  async fn set_playback_state(&mut self, playing: bool, gen: u64) {
+    // Drop superseded clicks when the user toggles play/pause rapidly; only
+    // the latest desired state hits Spotify's API.
+    {
+      let mut app = self.app.lock().await;
+      if gen != app.play_toggle_gen {
+        app.play_toggle_pending = app.play_toggle_pending.saturating_sub(1);
+        return;
+      }
+    }
+    let device_id = self.effective_device_id().await;
+    let res = if playing {
+      self
+        .spotify
+        .resume_playback(device_id.as_deref(), None)
+        .await
+    } else {
+      self.spotify.pause_playback(device_id.as_deref()).await
+    };
+    match res {
+      Ok(()) => {
+        let mut app = self.app.lock().await;
+        app.play_toggle_pending = app.play_toggle_pending.saturating_sub(1);
+        app.ui_dirty = true;
+      }
+      Err(e) => {
+        {
+          let mut app = self.app.lock().await;
+          app.play_toggle_pending = app.play_toggle_pending.saturating_sub(1);
+        }
+        let msg = e.to_string();
+        // 403 Restriction violated happens when the device is already in the
+        // requested play/pause state — reconcile silently instead of erroring.
+        if !msg.contains("403") && !msg.contains("Restriction violated") {
+          self.handle_error(anyhow!(e)).await;
+        }
+        self.get_current_playback().await;
+      }
+    }
   }
 
   async fn pause_playback(&mut self) {
@@ -3211,6 +3535,7 @@ impl<'a> Network<'a> {
         if app.volume_preview == Some(volume_percent) {
           app.volume_preview.take();
         }
+        app.ui_dirty = true;
       }
       Err(e) => {
         self.handle_error(anyhow!(e)).await;
@@ -3243,45 +3568,78 @@ impl<'a> Network<'a> {
   async fn get_artist(&mut self, artist_id: String, input_artist_name: String) {
     let cloneable_artist_id = ArtistId::from_id_or_uri(&artist_id).unwrap();
     let artist_id = cloneable_artist_id.to_string();
-    // Spotify removed artist_top_tracks and artist_related_artists in Feb
-    // 2026 (related artists 403s); top tracks come from a track search on
-    // the artist name, and albums are fetched eagerly right after the
-    // profile opens (GetArtistAlbumsMore, dispatched by app.get_artist).
-    // Resolve the display name from the FullArtist fetch when the caller
-    // didn't supply one; fall back to "" on failure (rate limit / token expired).
+    // Fetch FullArtist and top-track search concurrently when the artist name is
+    // already known, cutting Artist page open latency in half.
+    let (full_artist, top_tracks) = if input_artist_name.is_empty() {
+      let full_artist = self.spotify.artist(cloneable_artist_id.clone()).await.ok();
+      let name = full_artist
+        .as_ref()
+        .map(|fa| fa.name.clone())
+        .unwrap_or_default();
+      let query = format!("artist:\"{}\"", name);
+      let top_tracks = self
+        .spotify
+        .search(
+          &query,
+          SearchType::Track,
+          Some(Market::FromToken),
+          None,
+          Some(10),
+          Some(0),
+        )
+        .await;
+      (full_artist, top_tracks)
+    } else {
+      let query = format!("artist:\"{}\"", input_artist_name);
+      let (fa, tt) = tokio::join!(
+        self.spotify.artist(cloneable_artist_id.clone()),
+        self.spotify.search(
+          &query,
+          SearchType::Track,
+          Some(Market::FromToken),
+          None,
+          Some(10),
+          Some(0),
+        )
+      );
+      (fa.ok(), tt)
+    };
     let artist_name = if input_artist_name.is_empty() {
-      match self.spotify.artist(cloneable_artist_id.clone()).await {
-        Ok(fa) => fa.name.clone(),
-        Err(_) => String::new(),
-      }
+      full_artist
+        .as_ref()
+        .map(|fa| fa.name.clone())
+        .unwrap_or_default()
     } else {
       input_artist_name
     };
-    let query = format!("artist:\"{}\"", artist_name);
-    // Spotify capped the search limit at 10 (Feb 2026); larger values 400.
-    let top_tracks = self
-      .spotify
-      .search(
-        &query,
-        SearchType::Track,
-        Some(Market::FromToken),
-        None,
-        Some(10),
-        Some(0),
-      )
-      .await;
+    let image_url = full_artist
+      .as_ref()
+      .and_then(|fa| crate::cover_art::pick_url(&fa.images));
+    let followers = None;
+    let genres = Vec::new();
     let (top_tracks, top_tracks_total) = match top_tracks {
       Ok(SearchResult::Tracks(page)) => (page.items, page.total as usize),
       _ => (vec![], 0),
     };
-    // Search returns relevance order, not most-played-first; per-track
-    // playcounts are blocked (api-partner token), and the per-track
-    // popularity field was removed by Spotify. Keep search order.
-    // Always offer "Load more": the search can under-match the real track
-    // count. A short page on the next fetch clears the flag.
     let top_tracks_has_more = true;
-    {
+    let cached_img = image_url.as_deref().and_then(crate::cover_art::load_cached);
+    let (meta_name, lastfm_key, meta_artist_id) = {
       let mut app = self.app.lock().await;
+      let is_following = Some(app.followed_artist_ids_set.contains(&artist_id));
+      let cover_req = if cached_img.is_none() {
+        image_url
+          .clone()
+          .map(|url| (format!("artist:{artist_id}"), url))
+      } else {
+        None
+      };
+      if let Some(img) = cached_img {
+        app.artist_cover = Some((format!("artist:{artist_id}"), img));
+        app.artist_cover_fetching = None;
+      }
+      let meta_name = artist_name.clone();
+      let meta_artist_id = artist_id.clone();
+      let lastfm_key = app.user_config.behavior.lastfm_api_key.clone();
       app.artist = Some(Artist {
         artist_id,
         artist_name,
@@ -3301,7 +3659,15 @@ impl<'a> Network<'a> {
         selected_top_track_index: 0,
         artist_hovered_block: ArtistBlock::TopTracks,
         artist_selected_block: ArtistBlock::TopTracks,
+        image_url,
+        is_following,
+        followers,
+        genres,
+        meta: None,
       });
+      if let Some((cid, url)) = cover_req {
+        app.ensure_cover_art_url(cid, url);
+      }
       // Prime the liked-heart column; TTL-cached, silent on throttle.
       let track_ids = app
         .artist
@@ -3316,7 +3682,22 @@ impl<'a> Network<'a> {
       if !track_ids.is_empty() {
         app.dispatch(IoEvent::CurrentUserSavedTracksContains(track_ids));
       }
-    }
+      (meta_name, lastfm_key, meta_artist_id)
+    };
+    let app_arc = Arc::clone(self.app);
+    tokio::spawn(async move {
+      if let Some(meta) =
+        crate::metadata::fetch_artist_meta(&meta_name, lastfm_key.as_deref()).await
+      {
+        let mut app = app_arc.lock().await;
+        if let Some(artist) = app.artist.as_mut() {
+          if artist.artist_id == meta_artist_id {
+            artist.meta = Some(meta);
+            app.ui_dirty = true;
+          }
+        }
+      }
+    });
   }
 
   async fn get_artist_albums_more(&mut self, artist_id: String, offset: u32) {
@@ -3868,6 +4249,11 @@ impl<'a> Network<'a> {
         let mut app = self.app.lock().await;
         artist_ids.iter().for_each(|id| {
           app.followed_artist_ids_set.remove(&id.to_owned());
+          if let Some(a) = app.artist.as_mut() {
+            if a.artist_id == *id {
+              a.is_following = Some(false);
+            }
+          }
         });
       }
       Err(e) => {
@@ -3890,6 +4276,11 @@ impl<'a> Network<'a> {
         let mut app = self.app.lock().await;
         artist_ids.iter().for_each(|id| {
           app.followed_artist_ids_set.insert(id.to_owned());
+          if let Some(a) = app.artist.as_mut() {
+            if a.artist_id == *id {
+              a.is_following = Some(true);
+            }
+          }
         });
       }
       Err(e) => {
@@ -3947,6 +4338,38 @@ impl<'a> Network<'a> {
       Ok(guard) => (*guard).as_ref().map(|t| t.access_token.clone()),
       Err(_) => None,
     }
+  }
+
+  // rspotify drops the response body, which carries Spotify's reason.
+  // Re-fire the same endpoint raw so the real message surfaces on failure paths.
+  async fn error_with_probe(&self, e: impl std::fmt::Debug, url: &str) -> anyhow::Error {
+    let mut msg = format!("{e:?}");
+    // Known failure: the counter records the repeat, no extra request.
+    if self.app.lock().await.has_api_error(&msg) {
+      return anyhow!(msg);
+    }
+    if let Some(token) = self.bearer_token().await {
+      match shared_http_client()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+      {
+        Ok(res) => {
+          let status = res.status();
+          let body: String = res
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(300)
+            .collect();
+          msg.push_str(&format!("\nraw probe: {status} {body}"));
+        }
+        Err(pe) => msg.push_str(&format!("\nraw probe failed: {pe}")),
+      }
+    }
+    anyhow!(msg)
   }
 
   /// Fetch synced lyrics from LRCLIB (no auth, LRC format). Exact match on
@@ -4091,26 +4514,36 @@ impl<'a> Network<'a> {
   async fn get_queue(&mut self) {
     let result = self.spotify.current_user_queue().await;
     let mut app = self.app.lock().await;
-    app.queue_next = match result {
-      Ok(queue) => queue.queue.first().map(|item| match item {
-        PlayableItem::Track(track) => {
-          let artists = track
-            .artists
-            .iter()
-            .map(|a| a.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-          if artists.is_empty() {
-            track.name.clone()
-          } else {
-            format!("{} - {}", track.name, artists)
+    match result {
+      Ok(queue) => {
+        app.queue_next = queue.queue.first().map(|item| match item {
+          PlayableItem::Track(track) => {
+            let artists = track
+              .artists
+              .iter()
+              .map(|a| a.name.as_str())
+              .collect::<Vec<_>>()
+              .join(", ");
+            if artists.is_empty() {
+              track.name.clone()
+            } else {
+              format!("{} - {}", track.name, artists)
+            }
           }
-        }
-        PlayableItem::Episode(episode) => episode.name.clone(),
-        _ => String::new(),
-      }),
-      Err(_) => None,
-    };
+          PlayableItem::Episode(episode) => episode.name.clone(),
+          _ => String::new(),
+        });
+        app.queue_items = queue.queue;
+        app.queue_selected_index = app
+          .queue_selected_index
+          .min(app.queue_items.len().saturating_sub(1));
+      }
+      Err(_) => {
+        app.queue_next = None;
+        app.queue_items.clear();
+        app.queue_selected_index = 0;
+      }
+    }
   }
 
   async fn get_current_user_playlists(&mut self) {
@@ -4132,7 +4565,10 @@ impl<'a> Network<'a> {
         }
         Err(e) => {
           if !self.serve_playlists_cache().await {
-            self.handle_error(anyhow!(e)).await;
+            let err = self
+              .error_with_probe(e, "https://api.spotify.com/v1/me/playlists?limit=1")
+              .await;
+            self.handle_error(err).await;
             return;
           }
         }
@@ -4390,7 +4826,7 @@ impl<'a> Network<'a> {
         }
         let (new_spotify, new_token_expiry) = get_spotify(new_token_info, &self.client_config);
         self.spotify = new_spotify;
-        // ponytail: the rebuilt client never auto-persists (library refresh
+        // the rebuilt client never auto-persists (library refresh
         // is disabled), so write the carried-over token explicitly — without
         // this the next launch re-reads the stale pre-refresh file.
         let _ = self.spotify.write_token_cache().await;
@@ -4904,7 +5340,10 @@ mod tests {
       total: 3,
     };
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
     rt.block_on(async {
       network.set_playlist_tracks_to_table(&page, false).await;
     });
@@ -4951,7 +5390,10 @@ mod tests {
       total: 3,
     };
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
     rt.block_on(async {
       network.set_playlist_tracks_to_table(&page, false).await;
     });
@@ -4967,7 +5409,11 @@ mod tests {
   fn opening_cached_playlist_dispatches_background_reconcile() {
     let app = Arc::new(Mutex::new(App::default()));
     let mut network = test_network(&app);
-    let dir = std::env::temp_dir().join(format!("sptune_bk_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+      "sptune_bk_{}_{:?}",
+      std::process::id(),
+      std::thread::current().id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     network
@@ -4988,7 +5434,10 @@ mod tests {
     let (tx, rx) = std::sync::mpsc::channel();
     app.try_lock().unwrap().io_tx = Some(tx);
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
     rt.block_on(async {
       network
         .get_playlist_tracks("spotify:playlist:test".to_string(), 0)
@@ -5061,7 +5510,11 @@ mod tests {
     // Open A, then B: A's late first page must not clobber B's table.
     let app = Arc::new(Mutex::new(App::default()));
     let mut network = test_network(&app);
-    let dir = std::env::temp_dir().join(format!("sptune_bk_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+      "sptune_bk_{}_{:?}",
+      std::process::id(),
+      std::thread::current().id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     network
@@ -5083,7 +5536,10 @@ mod tests {
       guard.playlist_tracks = Some(mock_items_page(mock_playlist_items(0..3), 3));
     }
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
     rt.block_on(async {
       network
         .apply_playlist_tracks(
@@ -5122,7 +5578,11 @@ mod tests {
     // own offset instead of appending a second copy.
     let app = Arc::new(Mutex::new(App::default()));
     let mut network = test_network(&app);
-    let dir = std::env::temp_dir().join(format!("sptune_bk_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+      "sptune_bk_{}_{:?}",
+      std::process::id(),
+      std::thread::current().id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     network
@@ -5143,7 +5603,10 @@ mod tests {
       guard.active_playlist_index = Some(0);
     }
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
     rt.block_on(async {
       network
         .apply_playlist_tracks(
@@ -5179,7 +5642,11 @@ mod tests {
   fn reconcile_probes_each_playlist_once_per_launch() {
     let app = Arc::new(Mutex::new(App::default()));
     let mut network = test_network(&app);
-    let dir = std::env::temp_dir().join(format!("sptune_bk_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+      "sptune_bk_{}_{:?}",
+      std::process::id(),
+      std::thread::current().id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     network
@@ -5201,7 +5668,10 @@ mod tests {
       .probed_playlists
       .insert("spotify:playlist:test".to_string());
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
     let changed = rt.block_on(async {
       network
         .reconcile_playlist_tracks("spotify:playlist:test")
@@ -5341,7 +5811,6 @@ mod tests {
     assert_eq!(saved.show_library, Some(false));
     assert_eq!(saved.show_playlists, Some(true));
     assert_eq!(saved.sidebar_minimized, Some(true));
-    assert_eq!(saved.volume_ramp_bar, Some(false));
     assert_eq!(saved.black_background, Some(true));
     assert_eq!(saved.restore_settings, Some(false));
   }
@@ -5367,55 +5836,5 @@ mod tests {
     );
     // Untagged trailing line and metadata tags are dropped.
     assert!(!parsed.iter().any(|(_, w)| w == "no tag line"));
-  }
-
-  #[test]
-  fn partner_track_json_maps_to_full_track() {
-    let data = json!({
-      "__typename": "Track",
-      "uri": "spotify:track:abc123",
-      "name": "Bohemian Rhapsody",
-      "contentRating": { "label": "EXPLICIT" },
-      "playability": { "playable": true },
-      "trackDuration": { "totalMilliseconds": 354000 },
-      "discNumber": 1,
-      "trackNumber": 5,
-      "albumOfTrack": {
-        "uri": "spotify:album:alb999",
-        "name": "A Night at the Opera",
-        "artists": { "items": [ { "uri": "spotify:artist:art1", "profile": { "name": "Queen" } } ] },
-        "coverArt": { "sources": [ { "url": "https://example.com/cover.jpg" } ] }
-      },
-      "artists": { "items": [ { "uri": "spotify:artist:art1", "profile": { "name": "Queen" } } ] }
-    });
-    let track = partner_track_from_value(&data).unwrap().expect("track");
-    assert_eq!(track.name, "Bohemian Rhapsody");
-    assert!(track.explicit);
-    assert_eq!(track.duration.num_milliseconds(), 354000);
-    assert_eq!(track.track_number, 5);
-    assert_eq!(track.album.name, "A Night at the Opera");
-    assert_eq!(track.artists.len(), 1);
-    assert_eq!(track.artists[0].name, "Queen");
-    assert_eq!(
-      track.id.as_ref().map(|id| id.to_string()).as_deref(),
-      Some("spotify:track:abc123")
-    );
-  }
-
-  #[test]
-  fn partner_track_json_skips_non_track_and_unplayable() {
-    let episode = json!({ "__typename": "Episode", "uri": "spotify:episode:e1", "name": "x" });
-    assert!(partner_track_from_value(&episode).unwrap().is_none());
-    let unplayable = json!({
-      "__typename": "Track",
-      "uri": "spotify:track:t1",
-      "name": "x",
-      "playability": { "playable": false },
-      "trackDuration": { "totalMilliseconds": 1000 },
-      "albumOfTrack": { "uri": "spotify:album:a1", "name": "a" },
-      "artists": { "items": [] }
-    });
-    let track = partner_track_from_value(&unplayable).unwrap().unwrap();
-    assert_eq!(track.is_playable, Some(false));
   }
 }

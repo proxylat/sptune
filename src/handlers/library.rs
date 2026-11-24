@@ -90,11 +90,13 @@ pub fn handler(key: Key, app: &mut App) {
           }
         }
         // Podcasts,
-        "Podcasts" => {
-          if app.get_current_route().id != RouteId::Podcasts {
-            app.dispatch(IoEvent::GetCurrentUserSavedShows(None));
-            app.push_navigation_stack(RouteId::Podcasts, ActiveBlock::Podcasts);
-          }
+        "Podcasts" if app.get_current_route().id != RouteId::Podcasts => {
+          app.dispatch(IoEvent::GetCurrentUserSavedShows(None));
+          app.push_navigation_stack(RouteId::Podcasts, ActiveBlock::Podcasts);
+        }
+        "Queue" if app.get_current_route().id != RouteId::Queue => {
+          app.dispatch(IoEvent::GetQueue);
+          app.push_navigation_stack(RouteId::Queue, ActiveBlock::Queue);
         }
         // This is required because Rust can't tell if this pattern in exhaustive
         _ => {}
