@@ -13,6 +13,7 @@ pub mod backend;
 pub mod client_creds;
 pub mod cover_art;
 pub mod metadata;
+pub mod mock;
 pub mod platform;
 pub mod soloist_ws;
 pub mod tui;

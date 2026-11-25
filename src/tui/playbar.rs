@@ -22,11 +22,7 @@ thread_local! {
 }
 
 fn draw_playbar_cover(f: &mut Frame, app: &App, thumb_rect: Rect) {
-  let is_kitty = app
-    .cover_picker
-    .as_ref()
-    .is_some_and(|p| p.protocol_type() == ratatui_image::picker::ProtocolType::Kitty);
-  if is_kitty {
+  if app.cover_caps.kitty {
     return;
   }
   let Some((id, img)) = &app.cover_art else {
@@ -206,12 +202,10 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
       // dead-centered on the first inner row, just above the music bar. The
       // song name shares this row, left of the buttons (truncated so it
       // never overlaps).
-      let controls = build_playbar_controls(current_playback_context.is_playing, app.smart_shuffle);
+      let controls = build_playbar_controls(current_playback_context.is_playing);
       let repeat_text = repeat_label(current_playback_context.repeat_state);
       let controls_row = layout::playbar_controls_row(layout_chunk);
       let controls_start = layout::playbar_controls_x(layout_chunk, &controls);
-      let smart_prefix_w: u16 = if app.smart_shuffle { 6 } else { 0 };
-      let controls_visual_start = controls_start.saturating_sub(smart_prefix_w);
       let mut song_row = layout::playbar_song_row(layout_chunk);
       song_row.x = song_row.x.saturating_add(cover_off);
       song_row.width = song_row.width.saturating_sub(cover_off);
@@ -220,7 +214,7 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
       artist_row.width = artist_row.width.saturating_sub(cover_off);
       // Room for the [+ / ✓] prefix plus the liked heart; both fixed-width.
       let name_right = if song_row.y == controls_row.y {
-        controls_visual_start
+        controls_start
       } else {
         song_row.x + song_row.width
       };
@@ -245,14 +239,8 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
         RepeatState::Track => accent_style.add_modifier(Modifier::BOLD),
       };
       let mut spans: Vec<Span> = vec![Span::raw(
-        " ".repeat(controls_visual_start.saturating_sub(controls_row.x) as usize),
+        " ".repeat(controls_start.saturating_sub(controls_row.x) as usize),
       )];
-      if app.smart_shuffle {
-        spans.push(Span::styled(
-          "Smart ",
-          accent_style.add_modifier(Modifier::BOLD),
-        ));
-      }
       for (kind, text) in controls {
         let style = match kind {
           PlaybarButton::Shuffle => {
@@ -379,7 +367,7 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
         .fg(theme.inactive)
         .add_modifier(Modifier::ITALIC);
       let artist_right = if artist_row.y == controls_row.y {
-        controls_visual_start
+        controls_start
       } else if let Some(bar) = bar_rect {
         bar.x.saturating_sub(PLAYBAR_TIME_LEN)
       } else {
@@ -418,8 +406,8 @@ pub fn draw_playbar(f: &mut Frame, app: &App, layout_chunk: Rect) {
         // Sub-cell eighth blocks (smaller █): 61 cells / 180s ≈ 2.7 eighths
         // per second, so every second shows its own step without extending
         // the bar; floor keeps the fill edges on clean cell boundaries.
-        let eighths = ((progress_ms.min(u128::from(duration_ms)) * bar_len as u128 * 8)
-          / u128::from(duration_ms)) as usize;
+        let denom = u128::from(duration_ms).max(1);
+        let eighths = ((progress_ms.min(denom) * bar_len as u128 * 8) / denom) as usize;
         let full = (eighths / 8).min(bar_len);
         let part = eighths % 8;
         let partial_glyph = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][part];

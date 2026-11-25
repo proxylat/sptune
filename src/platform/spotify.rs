@@ -41,6 +41,14 @@ pub fn build_args(cfg: &SpotifyConfig) -> Vec<String> {
   flags
 }
 
+/// Launch Spotify desktop only if it is not already running.
+pub fn launch_if_not_running(cfg: &SpotifyConfig) -> anyhow::Result<Option<std::process::Child>> {
+  if find_root_pid().is_some() {
+    return Ok(None);
+  }
+  launch(cfg).map(Some)
+}
+
 pub fn launch(cfg: &SpotifyConfig) -> anyhow::Result<std::process::Child> {
   let bin = resolve_binary(cfg).ok_or_else(|| anyhow::anyhow!("spotify binary not found"))?;
   let args = build_args(cfg);
@@ -68,7 +76,6 @@ pub fn launch(cfg: &SpotifyConfig) -> anyhow::Result<std::process::Child> {
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
   }
   let child = cmd.spawn()?;
-  SPAWNED_BY_SPTUNE.store(true, std::sync::atomic::Ordering::SeqCst);
   // The suspend/trim/mem-limit policy is enforced by the periodic sweeper
   // thread started in main (it also covers externally launched Spotify and
   // children that spawn seconds after the browser process).
@@ -206,27 +213,4 @@ pub fn resume_processes(root: u32) {
     crate::platform::windows::resume_children_of(root);
   }
   handled_registry().lock().unwrap().clear();
-}
-
-static SPAWNED_BY_SPTUNE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub fn was_spawned() -> bool {
-  SPAWNED_BY_SPTUNE.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-/// Terminate every Spotify process on the machine — used on sptune exit.
-/// Matches by exe/cmdline, not by tree walking, so nothing survives a
-/// missed parent link; works on suspended processes.
-pub fn kill_all_spotify() {
-  #[cfg(target_os = "linux")]
-  {
-    crate::platform::linux::kill_all();
-  }
-  #[cfg(windows)]
-  {
-    crate::platform::windows::kill_all();
-    return;
-  }
-  #[cfg(not(any(target_os = "linux", windows)))]
-  {}
 }

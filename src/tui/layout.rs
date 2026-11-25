@@ -27,7 +27,7 @@ pub const PLAYBAR_TIME_LEN: u16 = 6;
 // volume ramp bar, mouse interactions, theme preset, seek by typing,
 // resume last song, restore settings, clear cache, dev view, columns,
 // visualizer style
-pub const SETTINGS_ROW_COUNT: u16 = 34;
+pub const SETTINGS_ROW_COUNT: u16 = 43;
 
 // Prefix for list panel titles; clicking the title row refreshes the list.
 pub const REFRESH_GLYPH: &str = "♻ ";
@@ -59,16 +59,13 @@ pub fn playbar_content_top_y(playbar: Rect) -> u16 {
 // as the music bar. Shared by drawer and mouse hit-test.
 pub fn playbar_volume_rect(playbar: Rect) -> Rect {
   Rect::new(
-    playbar.x + playbar.width.saturating_sub(VOLUME_BAR_WIDTH + 1),
+    playbar.x + playbar.width.saturating_sub(VOLUME_BAR_WIDTH + 3),
     playbar_content_top_y(playbar) + 1,
     VOLUME_BAR_WIDTH,
     1,
   )
 }
 
-// Liked-heart cell next to the playbar [+ / ✓] prefix: glyph + space, always
-// 2 cols (blank for episodes) so the song name never shifts. Shared by the
-// drawer, the truncation math and the mouse hit-test.
 pub const PLAYBAR_HEART_WIDTH: u16 = 2;
 pub const PLAYBAR_COVER_COLS: u16 = 10;
 pub const PLAYBAR_COVER_GAP: u16 = 1;
@@ -275,6 +272,19 @@ pub fn gear_click_rect(app: &App, input_box: Rect) -> Rect {
     start,
     row_y,
     (glyph_x + 2).min(zone.x + zone.width) - start,
+    1,
+  )
+}
+
+pub fn minimize_click_rect(app: &App, input_box: Rect) -> Rect {
+  let zone = header_zones(app, input_box)[2];
+  let glyph_x = zone.x + zone.width.saturating_sub(3) - 1;
+  let start = glyph_x.saturating_sub(6).max(zone.x);
+  let row_y = input_box.y + (input_box.height.saturating_sub(1)) / 2;
+  Rect::new(
+    start,
+    row_y,
+    3.min((zone.x + zone.width).saturating_sub(start)),
     1,
   )
 }
@@ -861,7 +871,7 @@ pub fn playbar_processes_range(playbar: Rect, device_name: &str, suspended: bool
 pub fn playbar_controls_row(playbar: Rect) -> Rect {
   Rect::new(
     playbar.x + 1,
-    playbar.y + playbar.height.saturating_sub(3),
+    playbar_content_top_y(playbar),
     playbar.width.saturating_sub(2),
     1,
   )
@@ -882,13 +892,9 @@ pub fn playbar_controls_x(playbar: Rect, controls: &[(PlaybarButton, String)]) -
 
 // The five transport buttons with their glyphs, left to right: shuffle,
 // prev, play/pause, next, repeat. Every button is 2 cols (" <glyph>") + 1
-// trailing space = 15 cols total, keeping PlayPause dead-center. "Smart "
-// renders in the left margin and the repeat mode word in the right margin
-// so neither shifts the group.
-pub fn build_playbar_controls(
-  is_playing: bool,
-  _smart_shuffle: bool,
-) -> Vec<(PlaybarButton, String)> {
+// trailing space = 15 cols total, keeping PlayPause dead-center. The
+// repeat mode word renders in the right margin so the group never shifts.
+pub fn build_playbar_controls(is_playing: bool) -> Vec<(PlaybarButton, String)> {
   vec![
     (PlaybarButton::Shuffle, " ⇄".into()),
     (PlaybarButton::Prev, " «".into()),
@@ -1065,7 +1071,6 @@ mod tests {
       tick_rate_milliseconds: 250,
       enable_text_emphasis: false,
       seek_by_typing: false,
-      restore_settings: false,
       enforce_wide_search_bar: false,
       liked_icon: String::new(),
       shuffle_icon: String::new(),
@@ -1223,9 +1228,9 @@ mod tests {
   fn playbar_content_rows_are_vertically_centered() {
     let playbar = Rect::new(0, 20, 120, PLAYBAR_HEIGHT);
     assert_eq!(playbar_song_row(playbar).y, 22);
+    assert_eq!(playbar_controls_row(playbar).y, 22);
     assert_eq!(playbar_artist_row(playbar).y, 23);
     assert_eq!(playbar_volume_rect(playbar).y, 23);
-    assert_eq!(playbar_controls_row(playbar).y, 23);
     assert_eq!(playbar_bar_row(playbar).y, 24);
   }
 }

@@ -51,13 +51,6 @@ fn child_alive(pid: u32) -> bool {
   }
 }
 
-/// True when sptune spawned soloist and the child still looks alive. Used for
-/// the shutdown prompt — kill_spawned stays the unconditional path otherwise.
-pub fn is_spawned() -> bool {
-  let pid = CHILD_PID.load(Ordering::SeqCst);
-  pid != 0 && child_alive(pid)
-}
-
 fn resolve_binary(cfg: &SoloistConfig) -> Option<PathBuf> {
   if !cfg.binary_path.trim().is_empty() {
     let p = PathBuf::from(cfg.binary_path.trim());
@@ -78,6 +71,15 @@ pub fn binary_found(cfg: &SoloistConfig) -> bool {
 /// instant exit almost always means an expired build, and this runs before
 /// the TUI opens so the hint reaches the terminal.
 pub fn launch(cfg: &SoloistConfig, api_key: &str, data_dir: &Path) -> anyhow::Result<()> {
+  // Reuse an already-running soloist instance for this data_dir instead of
+  // spawning a duplicate that contends on `.lock` and `ws.port`.
+  if let Ok(pid_txt) = std::fs::read_to_string(data_dir.join("soloist.pid")) {
+    if let Ok(pid) = pid_txt.trim().parse::<u32>() {
+      if pid != 0 && child_alive(pid) {
+        return Ok(());
+      }
+    }
+  }
   let bin = resolve_binary(cfg).ok_or_else(|| {
     anyhow::anyhow!(
       "soloist binary not found — download it (per-user, do not redistribute) from {} and set soloist.binary_path or put it on PATH",
@@ -100,24 +102,25 @@ pub fn launch(cfg: &SoloistConfig, api_key: &str, data_dir: &Path) -> anyhow::Re
   ]);
   cmd.stdin(Stdio::null());
   cmd.stdout(Stdio::null());
-  cmd.stderr(Stdio::null());
-  let mut child = cmd.spawn()?;
-  std::thread::sleep(std::time::Duration::from_secs(1));
-  if let Ok(Some(status)) = child.try_wait() {
-    // Exit code 10 is the expired-build signal; other codes get a generic message.
-    if status.code() == Some(10) {
-      anyhow::bail!(
-        "soloist exited immediately ({}) — the build may have expired (90-day lifetime), download a newer one from {}",
-        status,
-        DOWNLOADS_URL
-      );
-    }
-    anyhow::bail!("soloist exited immediately ({})", status);
+  if let Ok(log_file) = std::fs::File::create(data_dir.join("soloist.log")) {
+    cmd.stderr(Stdio::from(log_file));
+  } else {
+    cmd.stderr(Stdio::null());
   }
+  let mut child = cmd.spawn()?;
   CHILD_PID.store(child.id(), Ordering::SeqCst);
   // Reap on natural exit so no zombie is left; kill_spawned still owns shutdown.
+  // Also surface an immediate exit (e.g. expired 90-day build, exit code 10)
+  // without blocking TUI startup for 1 second.
   std::thread::spawn(move || {
-    let _ = child.wait();
+    if let Ok(status) = child.wait() {
+      if status.code() == Some(10) {
+        eprintln!(
+          "soloist exited ({}) — the build may have expired (90-day lifetime), download a newer one from {}",
+          status, DOWNLOADS_URL
+        );
+      }
+    }
   });
   Ok(())
 }

@@ -14,7 +14,7 @@ use ratatui::{
   layout::Rect,
   style::{Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, Borders, Paragraph},
+  widgets::{Block, BorderType, Borders, Paragraph},
   Frame,
 };
 use rspotify::model::show::ResumePoint;
@@ -70,18 +70,11 @@ pub fn draw_artist_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
 pub fn draw_podcast_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
   let header = TableHeader {
     id: TableId::Podcast,
-    items: vec![
-      TableHeaderItem {
-        text: "Name",
-        width: get_percentage_width(layout_chunk.width, 2.0 / 5.0),
-        ..Default::default()
-      },
-      TableHeaderItem {
-        text: "Name",
-        width: get_percentage_width(layout_chunk.width, 2.0 / 5.0),
-        ..Default::default()
-      },
-    ],
+    items: vec![TableHeaderItem {
+      text: "Name",
+      width: get_percentage_width(layout_chunk.width, 4.0 / 5.0),
+      ..Default::default()
+    }],
   };
 
   let current_route = app.get_current_route();
@@ -91,29 +84,65 @@ pub fn draw_podcast_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
     current_route.hovered_block == ActiveBlock::Podcasts,
   );
 
-  if let Some(saved_shows) = app.library.saved_shows.get_results(None) {
-    let items = saved_shows
-      .items
-      .iter()
-      .map(|show_page| TableItem {
-        id: show_page.show.id.to_string(),
-        format: vec![show_page.show.name.to_owned()],
+  let title = format!("{}{}", REFRESH_GLYPH, "Podcasts");
+  let Some(saved_shows) = app.library.saved_shows.get_results(None) else {
+    let block = Block::default()
+      .borders(Borders::ALL)
+      .border_type(if app.user_config.terminal.unicode_borders {
+        BorderType::Rounded
+      } else {
+        BorderType::Plain
       })
-      .collect::<Vec<TableItem>>();
-
-    draw_table(
-      f,
-      app,
+      .title(title)
+      .border_style(get_color(highlight_state, app.user_config.theme));
+    f.render_widget(
+      Paragraph::new("Loading podcasts…")
+        .block(block)
+        .style(Style::default().fg(app.user_config.theme.inactive)),
       layout_chunk,
-      (&format!("{}{}", REFRESH_GLYPH, "Podcasts"), &header),
-      &items,
-      TableSelection {
-        selected: app.shows_list_index,
-        highlight: highlight_state,
-        offset: None,
-      },
-    )
+    );
+    return;
   };
+  if saved_shows.items.is_empty() {
+    let block = Block::default()
+      .borders(Borders::ALL)
+      .border_type(if app.user_config.terminal.unicode_borders {
+        BorderType::Rounded
+      } else {
+        BorderType::Plain
+      })
+      .title(title)
+      .border_style(get_color(highlight_state, app.user_config.theme));
+    f.render_widget(
+      Paragraph::new("No saved podcasts — follow shows in Spotify or search to add")
+        .block(block)
+        .style(Style::default().fg(app.user_config.theme.inactive)),
+      layout_chunk,
+    );
+    return;
+  }
+
+  let items = saved_shows
+    .items
+    .iter()
+    .map(|show_page| TableItem {
+      id: show_page.show.id.to_string(),
+      format: vec![show_page.show.name.to_owned()],
+    })
+    .collect::<Vec<TableItem>>();
+
+  draw_table(
+    f,
+    app,
+    layout_chunk,
+    (&title, &header),
+    &items,
+    TableSelection {
+      selected: app.shows_list_index,
+      highlight: highlight_state,
+      offset: None,
+    },
+  )
 }
 
 pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
@@ -224,8 +253,10 @@ pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
           selected_index: selected_album_simplified.selected_index,
         })
     }
-    AlbumTableContext::Full => match app.selected_album_full.clone() {
-      Some(selected_album) => Some(AlbumUi {
+    AlbumTableContext::Full => app
+      .selected_album_full
+      .as_ref()
+      .map(|selected_album| AlbumUi {
         items: selected_album
           .album
           .tracks
@@ -269,8 +300,6 @@ pub fn draw_album_table(f: &mut Frame, app: &App, layout_chunk: Rect) {
         ),
         selected_index: app.saved_album_tracks_index,
       }),
-      None => None,
-    },
   };
 
   if let Some(album_ui) = album_ui {
@@ -919,17 +948,7 @@ pub struct PlayGroup {
 pub fn group_consecutive_plays(items: &[PlayHistory]) -> Vec<PlayGroup> {
   let mut groups: Vec<PlayGroup> = Vec::with_capacity(items.len());
   for (i, item) in items.iter().enumerate() {
-    let key = item.track.id.clone().map(|id| id.to_string());
-    let continues = key.as_ref().is_some_and(|k| {
-      i > 0
-        && items[i - 1]
-          .track
-          .id
-          .clone()
-          .map(|id| id.to_string())
-          .as_ref()
-          == Some(k)
-    });
+    let continues = i > 0 && item.track.id.is_some() && item.track.id == items[i - 1].track.id;
     if continues {
       if let Some(last) = groups.last_mut() {
         last.count += 1;

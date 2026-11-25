@@ -9,7 +9,7 @@
 use crate::app::App;
 use crate::backend::IoEvent;
 use anyhow::anyhow;
-use futures::{Sink, SinkExt, StreamExt};
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use rspotify::model::{
   Actions, AlbumId, ArtistId, Context, CurrentPlaybackContext, CurrentlyPlayingType, Device,
   DeviceType, FullTrack, Image, PlayableItem, RepeatState, SimplifiedAlbum, SimplifiedArtist,
@@ -17,12 +17,115 @@ use rspotify::model::{
 };
 use serde::Deserialize;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+
+/// Direct local playback commands sent over Soloist's loopback WebSocket
+/// (`ws://127.0.0.1:{port}`), bypassing Spotify Cloud Web API + Connect relay
+/// (~1–5ms vs ~400–1500ms).
+#[derive(Debug, Clone)]
+pub enum SoloistCmd {
+  Play(Option<String>),
+  Pause,
+  Next,
+  Prev,
+  Seek(u32),
+  Volume(u8),
+  Shuffle(bool),
+  Repeat(RepeatState),
+  AddToQueue(String),
+  Activate,
+}
+
+impl SoloistCmd {
+  pub fn to_json_frames(&self) -> Vec<String> {
+    match self {
+      SoloistCmd::Play(None) => {
+        vec![serde_json::json!({"type": "command", "command": "play"}).to_string()]
+      }
+      SoloistCmd::Play(Some(uri)) => {
+        vec![serde_json::json!({"type": "command", "command": "play", "uri": uri}).to_string()]
+      }
+      SoloistCmd::Pause => {
+        vec![serde_json::json!({"type": "command", "command": "pause"}).to_string()]
+      }
+      SoloistCmd::Next => {
+        vec![serde_json::json!({"type": "command", "command": "next"}).to_string()]
+      }
+      SoloistCmd::Prev => {
+        vec![serde_json::json!({"type": "command", "command": "prev"}).to_string()]
+      }
+      SoloistCmd::Seek(ms) => {
+        vec![
+          serde_json::json!({"type": "command", "command": "seek", "position_ms": ms}).to_string(),
+        ]
+      }
+      SoloistCmd::Volume(pct) => {
+        vec![
+          serde_json::json!({"type": "command", "command": "set_volume", "volume": pct})
+            .to_string(),
+        ]
+      }
+      SoloistCmd::Shuffle(enabled) => {
+        vec![
+          serde_json::json!({"type": "command", "command": "set_shuffle", "enabled": enabled})
+            .to_string(),
+        ]
+      }
+      SoloistCmd::Repeat(state) => match state {
+        RepeatState::Off => vec![
+          serde_json::json!({"type": "command", "command": "set_repeat_track", "enabled": false})
+            .to_string(),
+          serde_json::json!({"type": "command", "command": "set_repeat_context", "enabled": false})
+            .to_string(),
+        ],
+        RepeatState::Context => vec![
+          serde_json::json!({"type": "command", "command": "set_repeat_track", "enabled": false})
+            .to_string(),
+          serde_json::json!({"type": "command", "command": "set_repeat_context", "enabled": true})
+            .to_string(),
+        ],
+        RepeatState::Track => vec![
+          serde_json::json!({"type": "command", "command": "set_repeat_track", "enabled": true})
+            .to_string(),
+        ],
+      },
+      SoloistCmd::AddToQueue(uri) => {
+        vec![
+          serde_json::json!({"type": "command", "command": "add_to_queue", "uri": uri}).to_string(),
+        ]
+      }
+      SoloistCmd::Activate => {
+        vec![serde_json::json!({"type": "command", "command": "activate"}).to_string()]
+      }
+    }
+  }
+}
+
+type AckTx = tokio::sync::oneshot::Sender<bool>;
+type AckRx = tokio::sync::oneshot::Receiver<bool>;
+type QueuedCmd = (SoloistCmd, Option<AckTx>);
+
+static SOLOIST_CMD_TX: StdMutex<Option<mpsc::UnboundedSender<QueuedCmd>>> = StdMutex::new(None);
+
+/// Send a local WS command to the active Soloist connection and return an ack
+/// receiver (`true` on `command_result`, `false` on `error`/disconnect).
+/// Returns `None` if not connected so callers fall back to Spotify Web API.
+pub fn try_send_ack(cmd: SoloistCmd) -> Option<AckRx> {
+  let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+  if let Ok(guard) = SOLOIST_CMD_TX.lock() {
+    if let Some(tx) = guard.as_ref() {
+      if tx.send((cmd, Some(ack_tx))).is_ok() {
+        return Some(ack_rx);
+      }
+    }
+  }
+  None
+}
 
 // --- Soloist protocol structs (liberal: every struct defaulted) ---
 
@@ -147,15 +250,15 @@ pub async fn watch(
   }
 }
 
-/// Poll `<data_dir>/ws.port` every 250ms up to 15s; parse trimmed content as u16.
+/// Poll `<data_dir>/ws.port` every 25ms up to 10s; parse trimmed content as u16.
 async fn wait_for_port(data_dir: &Path) -> Option<u16> {
-  for _ in 0..60 {
-    if let Ok(content) = tokio::fs::read_to_string(data_dir.join("ws.port")).await {
+  for _ in 0..400 {
+    if let Ok(content) = std::fs::read_to_string(data_dir.join("ws.port")) {
       if let Ok(port) = content.trim().parse::<u16>() {
         return Some(port);
       }
     }
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::time::sleep(Duration::from_millis(25)).await;
   }
   None
 }
@@ -166,18 +269,63 @@ async fn run_connection(
   device_name: &str,
 ) {
   let (mut sink, mut stream) = ws.split();
+  let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<QueuedCmd>();
+  if let Ok(mut g) = SOLOIST_CMD_TX.lock() {
+    *g = Some(cmd_tx);
+  }
   // Open with a full snapshot; every later delta just re-asks.
   send_get_state(&mut sink).await;
   let mut live = false;
   let mut last_heart: Option<String> = None;
+  let mut pending_acks: std::collections::VecDeque<AckTx> = std::collections::VecDeque::new();
   // One-shot: a fresh soloist sits logged out until the user claims it
   // once from the official Spotify app, so nudge for that instead of
   // polling for a device that can't appear yet. Resets once logged in.
   let mut login_warned = false;
-  while let Some(msg) = stream.next().await {
-    let msg = match msg {
-      Ok(msg) => msg,
-      Err(_) => break,
+  let mut was_logged_in = false;
+  enum WsEvent {
+    Incoming(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
+    Cmd(QueuedCmd),
+  }
+  loop {
+    let ev = std::future::poll_fn(|cx| {
+      if let std::task::Poll::Ready(Some(cmd)) = cmd_rx.poll_recv(cx) {
+        return std::task::Poll::Ready(WsEvent::Cmd(cmd));
+      }
+      match std::pin::Pin::new(&mut stream).poll_next(cx) {
+        std::task::Poll::Ready(msg) => std::task::Poll::Ready(WsEvent::Incoming(msg)),
+        std::task::Poll::Pending => std::task::Poll::Pending,
+      }
+    })
+    .await;
+    let msg = match ev {
+      WsEvent::Cmd((cmd, ack)) => {
+        let frames = cmd.to_json_frames();
+        let mut send_ok = true;
+        for frame in &frames {
+          if sink
+            .send(Message::Text(frame.clone().into()))
+            .await
+            .is_err()
+          {
+            send_ok = false;
+            break;
+          }
+        }
+        if !send_ok {
+          if let Some(tx) = ack {
+            let _ = tx.send(false);
+          }
+          break;
+        }
+        if let Some(tx) = ack {
+          // Track one ack per command (the final frame settles it).
+          pending_acks.push_back(tx);
+        }
+        continue;
+      }
+      WsEvent::Incoming(Some(Ok(msg))) => msg,
+      WsEvent::Incoming(Some(Err(_))) | WsEvent::Incoming(None) => break,
     };
     let Message::Text(text) = msg else { continue };
     let text: &str = &text;
@@ -203,7 +351,7 @@ async fn run_connection(
         if let Some(ctx) = guard.current_playback_context.as_mut() {
           ctx.progress = Some(chrono::Duration::milliseconds(sync.position.position_ms));
           guard.instant_since_last_current_playback_poll = Instant::now();
-          guard.ui_dirty = true;
+          guard.mark_dirty();
         }
       }
       Some("auth_state") => {
@@ -211,27 +359,66 @@ async fn run_connection(
           continue;
         };
         if !auth.logged_in {
+          was_logged_in = false;
           set_live(app, &mut live, false).await;
           if !login_warned {
             login_warned = true;
-            app.lock().await.handle_error(anyhow!(
-              "soloist '{}' is waiting to be paired — open the official Spotify app on the same machine and select the '{}' device once; it stays paired after that. If it never appears there, the Soloist API key may be wrong or expired — re-enter it with `sptune --setup-soloist` (get the key at https://developer.spotify.com/dashboard/soloist)",
-              device_name,
-              device_name
-            ));
+            #[cfg(target_os = "linux")]
+            let missing_avahi = !Path::new("/run/avahi-daemon/socket").exists();
+            #[cfg(not(target_os = "linux"))]
+            let missing_avahi = false;
+            let msg = if missing_avahi {
+              format!(
+                "soloist '{}' cannot be discovered for pairing because avahi-daemon (mDNS) is not running — run `sudo systemctl enable --now avahi-daemon`, then select '{}' once in the official Spotify app",
+                device_name, device_name
+              )
+            } else {
+              format!(
+                "soloist '{}' is waiting to be paired — open the official Spotify app on the same machine and select the '{}' device once; it stays paired after that. If it never appears there, the Soloist API key may be wrong or expired — re-enter it with `sptune --setup-soloist` (get the key at https://developer.spotify.com/dashboard/soloist)",
+                device_name, device_name
+              )
+            };
+            app.lock().await.handle_error(anyhow!(msg));
           }
         } else {
           login_warned = false;
+          if !was_logged_in {
+            was_logged_in = true;
+            app
+              .lock()
+              .await
+              .dispatch(IoEvent::TransferPlaybackToDeviceName(
+                device_name.to_string(),
+              ));
+            send_get_state(&mut sink).await;
+          }
         }
       }
-      // Nothing to merge: queue/command acks/errors carry no playback state.
-      Some("queue_changed") | Some("command_result") | Some("error") => {}
+      Some("command_result") => {
+        if let Some(tx) = pending_acks.pop_front() {
+          let ok = value
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+          let _ = tx.send(ok);
+        }
+      }
+      Some("error") => {
+        if let Some(tx) = pending_acks.pop_front() {
+          let _ = tx.send(false);
+        }
+      }
+      // Nothing to merge: queue changes carry no playback state.
+      Some("queue_changed") => {}
       // Deltas we deliberately don't merge (track/volume/device/context/
       // options changes, unknown): re-query the snapshot instead.
       _ => {
         send_get_state(&mut sink).await;
       }
     }
+  }
+  if let Ok(mut g) = SOLOIST_CMD_TX.lock() {
+    *g = None;
   }
 }
 
@@ -263,7 +450,7 @@ async fn handle_playback_state(
   guard.current_playback_context = Some(ctx);
   guard.playback_known = true;
   guard.instant_since_last_current_playback_poll = Instant::now();
-  guard.ui_dirty = true;
+  guard.mark_dirty();
   if !*live {
     *live = true;
     guard.soloist_live = true;
@@ -436,5 +623,44 @@ fn build_context(state: &PlaybackState, device_name: &str) -> CurrentPlaybackCon
     item: Some(PlayableItem::Track(track)),
     currently_playing_type: CurrentlyPlayingType::Track,
     actions: Actions { disallows: vec![] },
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn soloist_cmd_serializes_expected_frames() {
+    assert_eq!(
+      SoloistCmd::Play(None).to_json_frames(),
+      vec![r#"{"command":"play","type":"command"}"#]
+    );
+    assert_eq!(
+      SoloistCmd::Pause.to_json_frames(),
+      vec![r#"{"command":"pause","type":"command"}"#]
+    );
+    assert_eq!(
+      SoloistCmd::Seek(42_000).to_json_frames(),
+      vec![r#"{"command":"seek","position_ms":42000,"type":"command"}"#]
+    );
+    assert_eq!(
+      SoloistCmd::Volume(75).to_json_frames(),
+      vec![r#"{"command":"set_volume","type":"command","volume":75}"#]
+    );
+    assert_eq!(
+      SoloistCmd::Shuffle(true).to_json_frames(),
+      vec![r#"{"command":"set_shuffle","enabled":true,"type":"command"}"#]
+    );
+    assert_eq!(
+      SoloistCmd::Repeat(RepeatState::Off).to_json_frames().len(),
+      2
+    );
+    assert_eq!(
+      SoloistCmd::Repeat(RepeatState::Track)
+        .to_json_frames()
+        .len(),
+      1
+    );
   }
 }

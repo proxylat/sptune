@@ -5,8 +5,8 @@ use super::layout::{
 };
 use super::tables::{song_row_cells, track_index_cell};
 use super::widgets::{
-  draw_scrollbar, draw_selectable_list, draw_table, load_more_label, ColumnId, ListSelection,
-  TableHeader, TableHeaderItem, TableId, TableItem, TableSelection,
+  draw_selectable_list, draw_table, load_more_label, ColumnId, ListSelection, TableHeader,
+  TableHeaderItem, TableId, TableItem, TableSelection,
 };
 use crate::app::{App, SearchResultBlock};
 use ratatui::{layout::Rect, style::Modifier, Frame};
@@ -149,21 +149,6 @@ pub fn draw_search_results(f: &mut Frame, app: &App, layout_chunk: Rect) {
           highlight: get_search_results_highlight_state(app, expanded.clone()),
           offset: None,
         },
-      );
-      let selected = app.search_results.selected_tracks_index.unwrap_or(0);
-      let count = items.len();
-      let viewport = list_rect.height.saturating_sub(5) as usize;
-      draw_scrollbar(
-        f,
-        app,
-        list_rect,
-        count,
-        viewport,
-        selected
-          .checked_sub(viewport)
-          .map(|o| o + 1)
-          .unwrap_or(0)
-          .min(count.saturating_sub(viewport)),
       );
     }
     _ => {

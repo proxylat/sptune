@@ -1,10 +1,12 @@
 mod args;
+mod backup;
 mod format;
 mod handle;
 mod runner;
 
 pub use self::args::{
-  clean_cache_subcommand, list_subcommand, play_subcommand, playback_subcommand, search_subcommand,
+  backup_subcommand, clean_cache_subcommand, list_subcommand, play_subcommand, playback_subcommand,
+  search_subcommand,
 };
 pub use handle::handle_matches;
 use runner::CliApp;

@@ -5,14 +5,18 @@ use rspotify::{
   clients::{BaseClient, OAuthClient},
   model::{Id, Market, PlayableItem, PlaylistId},
 };
-use std::{collections::HashSet, path::PathBuf, time::Duration};
+use std::{
+  collections::HashSet,
+  path::{Path, PathBuf},
+  time::Duration,
+};
 
 const HEADER: &str = "Track URI,Track Name,Album Name,Artist Name(s),Release Date,Duration (ms),Explicit,Added By,Added At";
 
 /// One exported playlist item, in both its CSV (flat strings) and JSON
 /// (typed values) shapes. Built by [`track_fields_row`].
 struct BackupRow {
-  csv: [String; 10],
+  csv: [String; 9],
   json: serde_json::Value,
 }
 
@@ -235,7 +239,7 @@ impl<'a> CliApp<'a> {
 
   fn write_playlist(
     &self,
-    dir: &PathBuf,
+    dir: &Path,
     name: &str,
     rows: &[BackupRow],
     write_json: bool,
@@ -272,21 +276,6 @@ impl<'a> CliApp<'a> {
 }
 
 fn track_fields_row(f: TrackFields) -> BackupRow {
-  let csv = [
-    f.uri.clone(),
-    f.name,
-    f.album,
-    f.artists.clone(),
-    f.release_date.clone(),
-    f.duration_ms.to_string(),
-    if f.explicit {
-      "True".to_string()
-    } else {
-      "False".to_string()
-    },
-    f.added_by.clone(),
-    f.added_at.clone(),
-  ];
   let json = serde_json::json!({
     "uri": f.uri,
     "name": f.name,
@@ -298,6 +287,21 @@ fn track_fields_row(f: TrackFields) -> BackupRow {
     "added_by": f.added_by,
     "added_at": f.added_at,
   });
+  let csv = [
+    f.uri,
+    f.name,
+    f.album,
+    f.artists,
+    f.release_date,
+    f.duration_ms.to_string(),
+    if f.explicit {
+      "True".to_string()
+    } else {
+      "False".to_string()
+    },
+    f.added_by,
+    f.added_at,
+  ];
   BackupRow { csv, json }
 }
 

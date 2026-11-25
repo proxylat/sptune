@@ -98,7 +98,7 @@ pub fn draw_help_menu(f: &mut Frame, app: &App) {
 pub(super) fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'a>> {
   let black_theme = app.user_config.theme.background == Color::Rgb(0, 0, 0);
   let on_off = |on: bool| if on { "on" } else { "off" };
-  // 33 rows: 7 headers + 25 toggles + Shortcuts link, matching mouse.rs ROW_TO_TOGGLE
+  // 43 rows: 8 headers + 7 blanks + 27 toggles + Shortcuts link, matching mouse.rs ROW_TO_TOGGLE
   let header_style = Style::default()
     .fg(app.user_config.theme.text)
     .add_modifier(Modifier::BOLD);
@@ -117,14 +117,16 @@ pub(super) fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'
     || "Custom".to_string(),
     |i| theme_presets()[i].0.to_string(),
   );
-  let mut rows: Vec<ListItem<'a>> = Vec::with_capacity(33);
-  rows.push(mk_header("─ Appearence/Layout ─", header_style));
+  let mut rows: Vec<ListItem<'a>> = Vec::with_capacity(43);
+  rows.push(mk_header("─ Appearance ─", header_style));
   rows.push(mk_row(format!("Black theme: {}", on_off(black_theme))));
   rows.push(mk_row(format!("Theme: {} (P)", theme_name)));
   rows.push(mk_row(format!(
     "Animations: {}",
     on_off(app.user_config.behavior.enable_animations)
   )));
+  rows.push(ListItem::new(Span::raw("".to_string())));
+  rows.push(mk_header("─ Layout & Columns ─", header_style));
   rows.push(mk_row(format!(
     "Library block: {}",
     on_off(app.show_library)
@@ -157,10 +159,36 @@ pub(super) fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'
       app.user_config.behavior.max_display_length.to_string()
     }
   )));
+  rows.push(ListItem::new(Span::raw("".to_string())));
+  rows.push(mk_header("─ Playback & Audio ─", header_style));
   rows.push(mk_row(format!(
-    "Suspend/Resume Process: {}",
-    on_off(app.show_process_suspend)
+    "Volume step: {}%",
+    app.user_config.behavior.volume_increment
   )));
+  rows.push(mk_row(format!(
+    "Timestamp by typing: {}",
+    on_off(app.user_config.behavior.seek_by_typing)
+  )));
+  rows.push(mk_row(format!(
+    "Playback poll: {}s",
+    app.user_config.behavior.playback_poll_secs
+  )));
+  rows.push(mk_row(format!(
+    "Desktop notifications: {}",
+    on_off(app.desktop_notifications)
+  )));
+  rows.push(ListItem::new(Span::raw("".to_string())));
+  rows.push(mk_header("─ Soloist ─", header_style));
+  rows.push(mk_row(format!(
+    "Soloist headless audio: {}",
+    on_off(app.user_config.soloist.enabled)
+  )));
+  rows.push(mk_row(format!(
+    "Keep Soloist running on exit: {}",
+    on_off(app.user_config.soloist.keep_running)
+  )));
+  rows.push(ListItem::new(Span::raw("".to_string())));
+  rows.push(mk_header("─ Controls & Tools ─", header_style));
   rows.push(mk_row(format!(
     "Mouse interactions: {} (m)",
     on_off(app.user_config.behavior.enable_mouse)
@@ -173,27 +201,13 @@ pub(super) fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'
     "Remove from playlist: {}",
     on_off(app.user_config.behavior.enable_remove_from_playlist)
   )));
+  rows.push(mk_row(format!(
+    "Suspend/Resume Process: {}",
+    on_off(app.show_process_suspend)
+  )));
   rows.push(mk_row(format!("Requests View: {}", on_off(app.dev_view))));
   rows.push(ListItem::new(Span::raw("".to_string())));
-  rows.push(mk_header("─ Playback ─", header_style));
-  rows.push(mk_row(format!(
-    "Timestamp by typing: {}",
-    on_off(app.user_config.behavior.seek_by_typing)
-  )));
-  rows.push(mk_row(format!(
-    "Restore settings on start: {}",
-    on_off(app.user_config.behavior.restore_settings)
-  )));
-  rows.push(mk_row(format!(
-    "Playback poll: {}s",
-    app.user_config.behavior.playback_poll_secs
-  )));
-  rows.push(mk_row(format!(
-    "Desktop notifications: {}",
-    on_off(app.desktop_notifications)
-  )));
-  rows.push(ListItem::new(Span::raw("".to_string())));
-  rows.push(mk_header("─ Spotify in launch ─", header_style));
+  rows.push(mk_header("─ Spotify Desktop ─", header_style));
   rows.push(mk_row(format!(
     "Auto launch with sptune: {}",
     on_off(app.user_config.spotify.auto_launch)
@@ -233,4 +247,16 @@ pub(super) fn settings_rows_text<'a>(app: &App, style: &Style) -> Vec<ListItem<'
     None => "Clear cache".to_string(),
   }));
   rows
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn settings_rows_match_layout_count() {
+    let app = App::default();
+    let rows = settings_rows_text(&app, &Style::default());
+    assert_eq!(rows.len(), crate::tui::layout::SETTINGS_ROW_COUNT as usize);
+  }
 }

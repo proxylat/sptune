@@ -78,6 +78,24 @@ pub enum Event<I> {
   Input(I),
   /// An tick event occurred.
   Tick,
+  /// A background task mutated UI state and wants an immediate repaint.
+  Redraw,
+}
+
+/// Coalesced wakeup handle that nudges `Events::next()` out of its 250ms tick
+/// sleep in <1ms whenever a background task updates `App`.
+#[derive(Clone)]
+pub struct UiWake {
+  tx: mpsc::Sender<Event<InputEvent>>,
+  pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl UiWake {
+  pub fn wake(&self) {
+    if !self.pending.swap(true, std::sync::atomic::Ordering::AcqRel) {
+      let _ = self.tx.send(Event::Redraw);
+    }
+  }
 }
 
 /// An input event: keyboard or mouse.
@@ -91,7 +109,8 @@ pub enum InputEvent {
 pub struct Events {
   rx: mpsc::Receiver<Event<InputEvent>>,
   // Need to be kept around to prevent disposing the sender side.
-  _tx: mpsc::Sender<Event<InputEvent>>,
+  tx: mpsc::Sender<Event<InputEvent>>,
+  wake_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
   fast_tick: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -197,9 +216,23 @@ impl Events {
 
     Events {
       rx,
-      _tx: tx,
+      tx,
+      wake_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
       fast_tick,
     }
+  }
+
+  pub fn wake_handle(&self) -> UiWake {
+    UiWake {
+      tx: self.tx.clone(),
+      pending: std::sync::Arc::clone(&self.wake_pending),
+    }
+  }
+
+  pub fn clear_wake(&self) {
+    self
+      .wake_pending
+      .store(false, std::sync::atomic::Ordering::Release);
   }
 
   /// Attempts to read an event.

@@ -8,11 +8,11 @@ use crate::event::Key;
 use crate::tui::layout;
 use crate::tui::layout::{
   build_playbar_controls, build_playbar_title, gear_click_rect, get_main_layout_margin,
-  playbar_artist_row, playbar_controls_x, playbar_progress_rect, playbar_song_row,
-  playbar_text_click_range, playbar_volume_rect, search_box_rect, song_table_columns,
-  song_table_viewport, sort_column_for, track_table_with_date, PlaybarButton, SongColumnFlags,
-  HEADER_HEIGHT, PLAYBAR_HEART_WIDTH, PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN, VOLUME_BAR_LEN,
-  VOLUME_LABEL_LEN,
+  minimize_click_rect, playbar_artist_row, playbar_controls_x, playbar_progress_rect,
+  playbar_song_row, playbar_text_click_range, playbar_volume_rect, search_box_rect,
+  song_table_columns, song_table_viewport, sort_column_for, track_table_with_date, PlaybarButton,
+  SongColumnFlags, HEADER_HEIGHT, PLAYBAR_HEART_WIDTH, PLAYBAR_HEIGHT, PLAYBAR_TIME_LEN,
+  VOLUME_BAR_LEN, VOLUME_LABEL_LEN,
 };
 use crate::tui::ColumnId;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -590,6 +590,15 @@ fn handle_left_click(x: u16, y: u16, app: &mut App) -> bool {
         app.set_current_route_state(Some(ActiveBlock::Input), Some(ActiveBlock::Input));
         return false;
       }
+      let min_box = minimize_click_rect(app, input_box);
+      if x >= min_box.x && x < min_box.x + min_box.width && y == min_box.y {
+        if !crate::platform::window::minimize_to_tray() {
+          app.handle_error(anyhow::anyhow!(
+            "Run `sptune --window` so minimize-to-tray only hides sptune instead of your whole terminal"
+          ));
+        }
+        return false;
+      }
       let gear_box = gear_click_rect(app, input_box);
       if x >= gear_box.x && x < gear_box.x + gear_box.width && y == gear_box.y {
         app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
@@ -641,14 +650,14 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
     return;
   }
   let viewport = settings.height.saturating_sub(2) as usize;
-  let total = 36usize;
+  let total = crate::tui::layout::SETTINGS_ROW_COUNT as usize;
   let offset = (app.help_scroll_offset as usize).min(total.saturating_sub(viewport.min(total)));
   let vis_row = (y - settings.y - 1) as usize;
   let row = vis_row + offset;
 
-  // Row -> toggle_setting index map for the categorized layout (35 rows):
+  // Row -> toggle_setting index map for the categorized layout (43 rows):
   // headers and the Shortcuts link are None.
-  const SHORTCUTS_ROW: usize = 31;
+  const SHORTCUTS_ROW: usize = 39;
   if row == SHORTCUTS_ROW {
     app.help_show_shortcuts = true;
     app.help_scroll_offset = 0;
@@ -658,42 +667,50 @@ fn handle_settings_click(x: u16, y: u16, app: &mut App) {
     app.calculate_help_menu_offset();
     return;
   }
-  const ROW_TO_TOGGLE: [Option<usize>; 35] = [
-    None,     // 0  ─ Appearence/Layout ─
+  const ROW_TO_TOGGLE: [Option<usize>; 43] = [
+    None,     // 0  ─ Appearance ─
     Some(0),  // 1  Black theme
     Some(5),  // 2  Theme
     Some(16), // 3  Animations
-    Some(1),  // 4  Library block
-    Some(2),  // 5  Playlists block
-    Some(9),  // 6  Column Album
-    Some(10), // 7  Column Artist
-    Some(11), // 8  Column Length
-    Some(12), // 9  Column Date Added
-    Some(15), // 10 Max name length
-    Some(23), // 11 Suspend/Resume Process
-    Some(4),  // 12 Mouse interactions
-    Some(13), // 13 Add to playlist
-    Some(14), // 14 Remove from playlist
-    Some(8),  // 15 Requests View
-    None,     // 16 blank
-    None,     // 17 ─ Playback ─
-    Some(6),  // 18 Timestamp by typing
-    Some(7),  // 19 Restore settings
-    Some(24), // 20 Playback poll
-    Some(25), // 21 Desktop notifications
-    None,     // 22 blank
-    None,     // 23 ─ Spotify in launch ─
-    Some(18), // 24 Auto launch with sptune
-    Some(19), // 25 Enable Chromium flags
-    Some(20), // 26 Auto suspend child processes
-    Some(21), // 27 Auto trim WorkingSet
-    Some(22), // 28 Memory limit per child process
-    None,     // 29 blank
-    None,     // 30 ─ Navigation ─
-    None,     // 31 Shortcuts →
-    None,     // 32 blank
-    None,     // 33 ─ Danger Zone ─
-    Some(17), // 34 Clear cache (always last)
+    None,     // 4  blank
+    None,     // 5  ─ Layout & Columns ─
+    Some(1),  // 6  Library block
+    Some(2),  // 7  Playlists block
+    Some(9),  // 8  Column Album
+    Some(10), // 9  Column Artist
+    Some(11), // 10 Column Length
+    Some(12), // 11 Column Date Added
+    Some(15), // 12 Max name length
+    None,     // 13 blank
+    None,     // 14 ─ Playback & Audio ─
+    Some(27), // 15 Volume step
+    Some(6),  // 16 Timestamp by typing
+    Some(24), // 17 Playback poll
+    Some(25), // 18 Desktop notifications
+    None,     // 19 blank
+    None,     // 20 ─ Soloist ─
+    Some(28), // 21 Soloist headless audio
+    Some(26), // 22 Keep Soloist running on exit
+    None,     // 23 blank
+    None,     // 24 ─ Controls & Tools ─
+    Some(4),  // 25 Mouse interactions
+    Some(13), // 26 Add to playlist
+    Some(14), // 27 Remove from playlist
+    Some(23), // 28 Suspend/Resume Process
+    Some(8),  // 29 Requests View
+    None,     // 30 blank
+    None,     // 31 ─ Spotify Desktop ─
+    Some(18), // 32 Auto launch with sptune
+    Some(19), // 33 Enable Chromium flags
+    Some(20), // 34 Auto suspend child processes
+    Some(21), // 35 Auto trim WorkingSet
+    Some(22), // 36 Memory limit per child process
+    None,     // 37 blank
+    None,     // 38 ─ Navigation ─
+    None,     // 39 Shortcuts →
+    None,     // 40 blank
+    None,     // 41 ─ Danger Zone ─
+    Some(17), // 42 Clear cache (always last)
   ];
   if let Some(Some(toggle)) = ROW_TO_TOGGLE.get(row).copied() {
     app.toggle_setting(toggle);
@@ -1494,7 +1511,7 @@ fn handle_playbar_click(x: u16, y: u16, playbar: Rect, app: &mut App) {
 
   // Transport buttons (shuffle, prev, play/pause, next, repeat)
   // dead-centered on the first content row, just above the music bar.
-  let controls = build_playbar_controls(current_playback_context.is_playing, app.smart_shuffle);
+  let controls = build_playbar_controls(current_playback_context.is_playing);
   if y == crate::tui::layout::playbar_controls_row(playbar).y {
     let mut btn_x = playbar_controls_x(playbar, &controls);
     for (kind, text) in &controls {
@@ -2744,13 +2761,13 @@ mod tests {
 
   #[test]
   fn click_dev_view_row_toggles_request_log() {
-    // help_full_rect = (2,2,196,46); Requests View row 15 sits at y=18.
+    // help_full_rect = (2,2,196,46); Requests View row 29 sits at y=32.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.dev_view);
-    handle_mouse(click_event(10, 18), &mut app);
+    handle_mouse(click_event(10, 32), &mut app);
     assert!(app.dev_view);
-    handle_mouse(click_event(10, 18), &mut app);
+    handle_mouse(click_event(10, 32), &mut app);
     assert!(!app.dev_view);
   }
 
@@ -3720,25 +3737,25 @@ mod tests {
 
   #[test]
   fn click_playlists_row_toggles_show_playlists() {
-    // help_full_rect (2,2,196,46); Playlists block row 5 at y=8.
+    // help_full_rect (2,2,196,46); Playlists block row 7 at y=10.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(app.show_playlists);
-    handle_mouse(click_event(10, 8), &mut app);
+    handle_mouse(click_event(10, 10), &mut app);
     assert!(!app.show_playlists);
-    handle_mouse(click_event(10, 8), &mut app);
+    handle_mouse(click_event(10, 10), &mut app);
     assert!(app.show_playlists);
   }
 
   #[test]
   fn click_mouse_settings_row_toggles_enable_mouse() {
-    // help_full_rect (2,2,196,46); Mouse interactions row 12 at y=15.
+    // help_full_rect (2,2,196,46); Mouse interactions row 25 at y=28.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(app.user_config.behavior.enable_mouse);
-    handle_mouse(click_event(100, 15), &mut app);
+    handle_mouse(click_event(100, 28), &mut app);
     assert!(!app.user_config.behavior.enable_mouse);
-    handle_mouse(click_event(100, 15), &mut app);
+    handle_mouse(click_event(100, 28), &mut app);
     assert!(app.user_config.behavior.enable_mouse);
   }
 
@@ -3766,34 +3783,22 @@ mod tests {
 
   #[test]
   fn click_seek_by_typing_row_toggles_setting() {
-    // help_full_rect (2,2,196,46); Seek by typing row 18 at y=21.
+    // help_full_rect (2,2,196,46); Seek by typing row 16 at y=19.
     let mut app = playback_app();
     app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     assert!(!app.user_config.behavior.seek_by_typing);
-    handle_mouse(click_event(10, 21), &mut app);
+    handle_mouse(click_event(10, 19), &mut app);
     assert!(app.user_config.behavior.seek_by_typing);
-    handle_mouse(click_event(10, 21), &mut app);
+    handle_mouse(click_event(10, 19), &mut app);
     assert!(!app.user_config.behavior.seek_by_typing);
-  }
-
-  #[test]
-  fn click_restore_settings_row_toggles_setting() {
-    // help_full_rect (2,2,196,46); Restore settings row 19 at y=22.
-    let mut app = playback_app();
-    app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
-    assert!(!app.user_config.behavior.restore_settings);
-    handle_mouse(click_event(10, 22), &mut app);
-    assert!(app.user_config.behavior.restore_settings);
-    handle_mouse(click_event(10, 22), &mut app);
-    assert!(!app.user_config.behavior.restore_settings);
   }
 
   #[test]
   fn click_volume_box_changes_volume() {
     let mut app = playback_app();
-    // volume rect = (174, 46, 24, 1) on the music bar row; bar_x = 174+2 = 176
-    // ("♪ " prefix 2 wide), bar spans 17 chars (176..194); clicking 190 → 82%.
-    handle_mouse(click_event(190, 46), &mut app);
+    // volume rect = (172, 46, 24, 1) on the artist row; bar_x = 172+2 = 174
+    // ("♪ " prefix 2 wide), bar spans 17 chars (174..192); clicking 188 → 82%.
+    handle_mouse(click_event(188, 46), &mut app);
     assert!(app.is_loading);
     assert_eq!(app.volume_preview, Some(82));
   }
@@ -3831,18 +3836,18 @@ mod tests {
   fn drag_on_volume_previews_then_commits() {
     let mut app = playback_app();
     // Press on the volume bar applies instantly and sets optimistic preview.
-    handle_mouse(click_event(190, 46), &mut app);
+    handle_mouse(click_event(188, 46), &mut app);
     assert!(app.is_loading);
     assert_eq!(app.volume_preview, Some(82));
     app.is_loading = false;
-    // Drag over the 17-cell bar (bar_x = 176): preview only, no dispatch.
-    handle_mouse(drag_event(180, 46), &mut app);
+    // Drag over the 17-cell bar (bar_x = 174): preview only, no dispatch.
+    handle_mouse(drag_event(178, 46), &mut app);
     assert_eq!(app.volume_preview, Some(23));
-    handle_mouse(drag_event(187, 46), &mut app);
+    handle_mouse(drag_event(185, 46), &mut app);
     assert_eq!(app.volume_preview, Some(64));
     assert!(!app.is_loading);
     // Release dispatches the final volume once and keeps preview until API replies.
-    handle_mouse(up_event(187, 46), &mut app);
+    handle_mouse(up_event(185, 46), &mut app);
     assert!(app.is_loading);
     assert_eq!(app.volume_preview, Some(64));
   }
@@ -3870,13 +3875,13 @@ mod tests {
   fn jitter_drag_to_same_volume_commits_nothing() {
     let mut app = playback_app();
     // Press dispatches the volume once.
-    handle_mouse(click_event(190, 46), &mut app);
+    handle_mouse(click_event(188, 46), &mut app);
     assert!(app.is_loading);
     app.is_loading = false;
     // A 1px tremor: Drag tick lands on the same cell, so the preview
     // equals the pressed value — release must not re-dispatch.
-    handle_mouse(drag_event(190, 46), &mut app);
-    handle_mouse(up_event(190, 46), &mut app);
+    handle_mouse(drag_event(188, 46), &mut app);
+    handle_mouse(up_event(188, 46), &mut app);
     assert!(!app.is_loading);
     assert_eq!(app.volume_preview, Some(82));
   }
@@ -3903,7 +3908,7 @@ mod tests {
     let mut app = playback_app();
     app.io_tx = Some(tx);
     let ctx = app.current_playback_context.as_ref().unwrap();
-    let controls = build_playbar_controls(ctx.is_playing, false);
+    let controls = build_playbar_controls(ctx.is_playing);
     let (_, playbar, _) = main_layout(&app).unwrap();
     let mut btn_x = playbar_controls_x(playbar, &controls);
     let mut prev_x = None;
@@ -3941,7 +3946,7 @@ mod tests {
     // stay correct no matter the glyph widths. Click the play/pause glyph's
     // midpoint: it dispatches (is_loading turns on).
     let ctx = app.current_playback_context.as_ref().unwrap();
-    let controls = build_playbar_controls(ctx.is_playing, false);
+    let controls = build_playbar_controls(ctx.is_playing);
     let (_, playbar, _) = main_layout(&app).unwrap();
     let mut btn_x = playbar_controls_x(playbar, &controls);
     let mut play_x = None;

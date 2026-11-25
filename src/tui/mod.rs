@@ -124,7 +124,7 @@ pub fn draw_input_and_help_box(f: &mut Frame, app: &App, layout_chunk: Rect) {
   );
 
   f.render_widget(
-    Paragraph::new(LOGO_TEXT.clone()).style(Style::default().fg(app.user_config.theme.banner)),
+    &*LOGO_TEXT,
     Rect::new(
       chunks[0].x + 1,
       chunks[0].y,
@@ -186,13 +186,12 @@ pub fn draw_input_and_help_box(f: &mut Frame, app: &App, layout_chunk: Rect) {
     );
   }
 
-  // Settings hint: a bare gear pinned near the right of the header row,
-  // inset a few cells so it never clips at the terminal edge. The right 40%
-  // is still the click zone that opens the settings menu.
+  // Minimize-to-tray [_] and Settings gear pinned near the right of the
+  // header row, inset a few cells so they never clip at the terminal edge.
   let gear_style = Style::default().fg(app.user_config.theme.active);
   f.render_widget(
     Paragraph::new(Line::from(vec![Span::styled(
-      "⚙\u{FE0F}",
+      "[_]  ⚙\u{FE0F}",
       gear_style.add_modifier(Modifier::BOLD),
     )]))
     .alignment(Alignment::Right),

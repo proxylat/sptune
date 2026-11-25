@@ -412,8 +412,7 @@ pub struct App {
   pub cover_art_fetching: Option<String>,
   pub artist_cover: Option<(String, image::DynamicImage)>,
   pub artist_cover_fetching: Option<String>,
-  pub cover_picker: Option<ratatui_image::picker::Picker>,
-  pub cover_protocol: std::sync::Mutex<Option<(String, ratatui_image::protocol::StatefulProtocol)>>,
+  pub cover_caps: crate::cover_art::CoverCaps,
   pub track_credits: Option<Vec<String>>,
   pub track_meta: Option<crate::metadata::TrackMeta>,
   pub queue_next: Option<String>,
@@ -449,7 +448,6 @@ pub struct App {
   pub hovered_library_index: Option<usize>,
   pub hovered_playlist_index: Option<usize>,
   pub hovered_list_index: Option<usize>,
-  pub smart_shuffle: bool,
   pub followed_artist_ids_set: HashSet<String>,
   pub saved_album_ids_set: HashSet<String>,
   pub saved_show_ids_set: HashSet<String>,
@@ -536,6 +534,7 @@ pub struct App {
   pub help_show_shortcuts: bool,
   pub is_loading: bool,
   pub ui_dirty: bool,
+  pub ui_wake: Option<crate::event::UiWake>,
   pub io_tx: Option<Sender<IoEvent>>,
   pub is_fetching_current_playback: bool,
   /// True once the first live playback response has landed. Gates the
@@ -586,6 +585,7 @@ pub struct App {
   pub processes_suspended: bool,
   pub show_process_suspend: bool,
   pub desktop_notifications: bool,
+  pub mock_mode: bool,
   pub last_notified_uri: Option<String>,
   pub visualizer: crate::visualizer::VizState,
   // Last track URI from the previous session (Resume Last Listening).
@@ -601,8 +601,7 @@ impl Default for App {
       cover_art_fetching: None,
       artist_cover: None,
       artist_cover_fetching: None,
-      cover_picker: None,
-      cover_protocol: std::sync::Mutex::new(None),
+      cover_caps: crate::cover_art::CoverCaps::halfblocks(),
       track_credits: None,
       track_meta: None,
       queue_next: None,
@@ -701,7 +700,7 @@ impl Default for App {
       selected_show_full: None,
       user: None,
       instant_since_last_current_playback_poll: Instant::now(),
-      clipboard: Clipboard::new().ok(),
+      clipboard: None,
       help_docs_size: 0,
       help_menu_page: 0,
       help_menu_max_lines: 0,
@@ -711,6 +710,7 @@ impl Default for App {
       // Set by the network thread after add/remove/unlike mutations; the UI
       // loop repaints on the next iteration without waiting for input.
       ui_dirty: false,
+      ui_wake: None,
       io_tx: None,
       is_fetching_current_playback: false,
       playback_known: false,
@@ -739,7 +739,6 @@ impl Default for App {
       hovered_library_index: None,
       hovered_playlist_index: None,
       hovered_list_index: None,
-      smart_shuffle: false,
       hidden_library_sections: vec![],
       config_theme: Theme::default(),
       theme_preset_index: None,
@@ -747,6 +746,7 @@ impl Default for App {
       processes_suspended: false,
       show_process_suspend: false,
       desktop_notifications: true,
+      mock_mode: false,
       last_notified_uri: None,
       visualizer: crate::visualizer::VizState::new(),
       saved_last_track: None,
@@ -980,6 +980,13 @@ impl App {
       | IoEvent::GetAlbumTracksMore(_, offset)
       | IoEvent::GetArtistTopTracksMore(_, _, offset) => *offset > 0,
       _ => false,
+    }
+  }
+
+  pub fn mark_dirty(&mut self) {
+    self.ui_dirty = true;
+    if let Some(wake) = &self.ui_wake {
+      wake.wake();
     }
   }
 
@@ -1220,9 +1227,6 @@ impl App {
       }
       if let Some(img) = crate::cover_art::load_cached(&url) {
         self.cover_art = Some((item_id, img));
-        if let Ok(mut proto) = self.cover_protocol.lock() {
-          *proto = None;
-        }
         self.ui_dirty = true;
         return None;
       }
@@ -1450,7 +1454,7 @@ impl App {
 
   pub fn previous_track(&mut self) {
     if self.song_progress_ms >= 3_000 {
-      self.dispatch(IoEvent::Seek(0));
+      self.seek_to(0);
     } else {
       self.dispatch(IoEvent::PreviousTrack);
     }
@@ -1620,39 +1624,38 @@ impl App {
     }
   }
 
-  pub fn copy_song_url(&mut self) {
-    let clipboard = match &mut self.clipboard {
-      Some(ctx) => ctx,
-      None => return,
-    };
-
-    if let Some(CurrentPlaybackContext {
-      item: Some(item), ..
-    }) = &self.current_playback_context
-    {
-      match item {
-        PlayableItem::Track(track) => {
-          if let Err(e) = clipboard.set_text(format!(
-            "https://open.spotify.com/track/{}",
-            track
-              .id
-              .clone()
-              .map(|id| id.to_string())
-              .unwrap_or_default()
-          )) {
-            self.handle_error(anyhow!("failed to set clipboard content: {}", e));
-          }
-        }
-        PlayableItem::Episode(episode) => {
-          if let Err(e) = clipboard.set_text(format!(
-            "https://open.spotify.com/episode/{}",
-            episode.id.to_owned()
-          )) {
-            self.handle_error(anyhow!("failed to set clipboard content: {}", e));
-          }
-        }
-        _ => {}
+  fn copy_text(&mut self, text: String) {
+    if self.clipboard.is_none() {
+      self.clipboard = Clipboard::new().ok();
+    }
+    if let Some(clipboard) = self.clipboard.as_mut() {
+      if let Err(e) = clipboard.set_text(text) {
+        self.handle_error(anyhow!("failed to set clipboard content: {}", e));
       }
+    }
+  }
+
+  pub fn copy_song_url(&mut self) {
+    let url = match &self.current_playback_context {
+      Some(CurrentPlaybackContext {
+        item: Some(PlayableItem::Track(track)),
+        ..
+      }) => Some(format!(
+        "https://open.spotify.com/track/{}",
+        track
+          .id
+          .as_ref()
+          .map(|id| id.to_string())
+          .unwrap_or_default()
+      )),
+      Some(CurrentPlaybackContext {
+        item: Some(PlayableItem::Episode(episode)),
+        ..
+      }) => Some(format!("https://open.spotify.com/episode/{}", episode.id)),
+      _ => None,
+    };
+    if let Some(url) = url {
+      self.copy_text(url);
     }
   }
 
@@ -1661,23 +1664,13 @@ impl App {
       return;
     }
     let text = self.api_errors_text();
-    let clipboard = match &mut self.clipboard {
-      Some(ctx) => ctx,
-      None => return,
-    };
-    if let Err(e) = clipboard.set_text(text) {
-      self.handle_error(anyhow!("failed to set clipboard content: {}", e));
-    }
+    self.copy_text(text);
   }
 
   pub fn copy_request_log(&mut self) {
     if self.request_log.is_empty() {
       return;
     }
-    let clipboard = match &mut self.clipboard {
-      Some(ctx) => ctx,
-      None => return,
-    };
     let text = self
       .request_log
       .iter()
@@ -1690,45 +1683,31 @@ impl App {
       })
       .collect::<Vec<String>>()
       .join("\n");
-    if let Err(e) = clipboard.set_text(text) {
-      self.handle_error(anyhow!("failed to set clipboard content: {}", e));
-    }
+    self.copy_text(text);
   }
 
   pub fn copy_album_url(&mut self) {
-    let clipboard = match &mut self.clipboard {
-      Some(ctx) => ctx,
-      None => return,
+    let url = match &self.current_playback_context {
+      Some(CurrentPlaybackContext {
+        item: Some(PlayableItem::Track(track)),
+        ..
+      }) => Some(format!(
+        "https://open.spotify.com/album/{}",
+        track
+          .album
+          .id
+          .as_ref()
+          .map(|id| id.to_string())
+          .unwrap_or_default()
+      )),
+      Some(CurrentPlaybackContext {
+        item: Some(PlayableItem::Episode(episode)),
+        ..
+      }) => Some(format!("https://open.spotify.com/show/{}", episode.show.id)),
+      _ => None,
     };
-
-    if let Some(CurrentPlaybackContext {
-      item: Some(item), ..
-    }) = &self.current_playback_context
-    {
-      match item {
-        PlayableItem::Track(track) => {
-          if let Err(e) = clipboard.set_text(format!(
-            "https://open.spotify.com/album/{}",
-            track
-              .album
-              .id
-              .clone()
-              .map(|id| id.to_string())
-              .unwrap_or_default()
-          )) {
-            self.handle_error(anyhow!("failed to set clipboard content: {}", e));
-          }
-        }
-        PlayableItem::Episode(episode) => {
-          if let Err(e) = clipboard.set_text(format!(
-            "https://open.spotify.com/show/{}",
-            episode.show.id.to_owned()
-          )) {
-            self.handle_error(anyhow!("failed to set clipboard content: {}", e));
-          }
-        }
-        _ => {}
-      }
+    if let Some(url) = url {
+      self.copy_text(url);
     }
   }
 
@@ -1821,15 +1800,11 @@ impl App {
   }
 
   pub fn shuffle(&mut self) {
-    // Plain toggle. The local Smart step is gone (its recommendations
-    // endpoint is dead); `Smart ⇄` only reflects real external Smart
-    // Shuffle, synced from the API on every playback poll. The flip is
-    // optimistic so the icon paints on the next tick; the backend confirms
-    // on Ok and the next poll corrects on Err.
+    // Plain toggle. The flip is optimistic so the icon paints on the next
+    // tick; the backend confirms on Ok and the next poll corrects on Err.
     if let Some(live) = &mut self.current_playback_context {
       let was_shuffle = live.shuffle_state;
       live.shuffle_state = !was_shuffle;
-      self.smart_shuffle = false;
       self.dispatch(IoEvent::Shuffle(was_shuffle));
     }
   }
@@ -2841,9 +2816,7 @@ impl App {
       6 => {
         self.user_config.behavior.seek_by_typing = !self.user_config.behavior.seek_by_typing;
       }
-      7 => {
-        self.user_config.behavior.restore_settings = !self.user_config.behavior.restore_settings;
-      }
+      7 => {}
       8 => {
         self.dev_view = !self.dev_view;
       }
@@ -2926,6 +2899,24 @@ impl App {
       }
       25 => {
         self.desktop_notifications = !self.desktop_notifications;
+      }
+      26 => {
+        self.user_config.soloist.keep_running = !self.user_config.soloist.keep_running;
+      }
+      27 => {
+        self.user_config.behavior.volume_increment =
+          match self.user_config.behavior.volume_increment {
+            1 => 2,
+            2 => 5,
+            5 => 10,
+            _ => 1,
+          };
+      }
+      28 => {
+        self.user_config.soloist.enabled = !self.user_config.soloist.enabled;
+        if !self.user_config.soloist.enabled && !self.user_config.soloist.keep_running {
+          crate::platform::soloist::kill_spawned();
+        }
       }
       _ => {}
     }
@@ -3198,7 +3189,7 @@ mod tests {
   }
 
   #[test]
-  fn shuffle_toggles_without_smart_step() {
+  fn shuffle_toggles() {
     use crate::backend::IoEvent;
     let (tx, rx) = std::sync::mpsc::channel();
     let mut app = App {
@@ -3210,14 +3201,12 @@ mod tests {
     // First press: off -> on, plain Shuffle event.
     app.shuffle();
     assert!(app.current_playback_context.as_ref().unwrap().shuffle_state);
-    assert!(!app.smart_shuffle);
     let dispatched: Vec<IoEvent> = rx.try_iter().collect();
     assert_eq!(dispatched, vec![IoEvent::Shuffle(false)]);
 
-    // Second press: on -> off. No Smart detour, no recommendations fetch.
+    // Second press: on -> off.
     app.shuffle();
     assert!(!app.current_playback_context.as_ref().unwrap().shuffle_state);
-    assert!(!app.smart_shuffle);
     let dispatched: Vec<IoEvent> = rx.try_iter().collect();
     assert_eq!(dispatched, vec![IoEvent::Shuffle(true)]);
   }
@@ -3498,6 +3487,26 @@ mod tests {
       app.toggle_setting(24);
       assert_eq!(app.user_config.behavior.playback_poll_secs, expected);
     }
+  }
+
+  #[test]
+  fn gear_toggle_27_cycles_volume_increment() {
+    let mut app = App::default();
+    app.user_config.behavior.volume_increment = 5;
+    for expected in [10, 1, 2, 5] {
+      app.toggle_setting(27);
+      assert_eq!(app.user_config.behavior.volume_increment, expected);
+    }
+  }
+
+  #[test]
+  fn gear_toggle_28_flips_soloist_enabled() {
+    let mut app = App::default();
+    assert!(!app.user_config.soloist.enabled);
+    app.toggle_setting(28);
+    assert!(app.user_config.soloist.enabled);
+    app.toggle_setting(28);
+    assert!(!app.user_config.soloist.enabled);
   }
 
   #[test]

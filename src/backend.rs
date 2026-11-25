@@ -162,6 +162,7 @@ pub enum IoEvent {
   UserArtistFollowCheck(Vec<String>),
   GetAlbum(String),
   TransferPlaybackToDevice(String),
+  CacheDeviceId(String),
   TransferPlaybackToDeviceName(String),
   SoloistWsWatch {
     data_dir: PathBuf,
@@ -190,6 +191,28 @@ pub enum IoEvent {
   /// Startup-only restore: saved volume/shuffle/repeat apply only when
   /// nothing is already playing; last page/sort always restores.
   AutoRestore(Box<SavedState>),
+}
+
+impl IoEvent {
+  /// Interactive playback controls that must preempt background browsing/sync.
+  pub fn is_priority_control(&self) -> bool {
+    matches!(
+      self,
+      IoEvent::StartPlayback(..)
+        | IoEvent::StartPlaybackAt(..)
+        | IoEvent::PausePlayback
+        | IoEvent::SetPlaybackState(..)
+        | IoEvent::NextTrack
+        | IoEvent::PreviousTrack
+        | IoEvent::Seek(..)
+        | IoEvent::ChangeVolume(..)
+        | IoEvent::Shuffle(..)
+        | IoEvent::Repeat(..)
+        | IoEvent::AddItemToQueue(..)
+        | IoEvent::TransferPlaybackToDevice(..)
+        | IoEvent::CacheDeviceId(..)
+    )
+  }
 }
 
 pub fn get_spotify(
@@ -265,7 +288,13 @@ pub struct SavedState {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub seek_by_typing: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub restore_settings: Option<bool>,
+  pub visualizer_mode: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub soloist_enabled: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub soloist_keep_running: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub volume_increment: Option<u8>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub show_library: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -377,7 +406,10 @@ impl SavedState {
       track_sort,
       last_page,
       seek_by_typing: Some(app.user_config.behavior.seek_by_typing),
-      restore_settings: Some(app.user_config.behavior.restore_settings),
+      visualizer_mode: Some(app.visualizer.mode.name().to_string()),
+      soloist_enabled: Some(app.user_config.soloist.enabled),
+      soloist_keep_running: Some(app.user_config.soloist.keep_running),
+      volume_increment: Some(app.user_config.behavior.volume_increment),
       mouse_enabled: Some(app.user_config.behavior.enable_mouse),
       theme_preset: app
         .theme_preset_index
@@ -467,8 +499,17 @@ impl SavedState {
       if let Some(value) = &self.seek_by_typing {
         obj.insert("seek_by_typing".to_string(), serde_json::json!(value));
       }
-      if let Some(value) = &self.restore_settings {
-        obj.insert("restore_settings".to_string(), serde_json::json!(value));
+      if let Some(value) = &self.visualizer_mode {
+        obj.insert("visualizer_mode".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.soloist_enabled {
+        obj.insert("soloist_enabled".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.soloist_keep_running {
+        obj.insert("soloist_keep_running".to_string(), serde_json::json!(value));
+      }
+      if let Some(value) = &self.volume_increment {
+        obj.insert("volume_increment".to_string(), serde_json::json!(value));
       }
       if let Some(value) = &self.show_library {
         obj.insert("show_library".to_string(), serde_json::json!(value));
@@ -604,7 +645,7 @@ const SAVED_CHECK_TTL: Duration = Duration::from_secs(300);
 // (oEmbed, lyrics, credits) so repeat requests skip TCP+TLS handshakes.
 static SHARED_HTTP: OnceLock<reqwest::Client> = OnceLock::new();
 
-pub(crate) fn shared_http_client() -> reqwest::Client {
+pub fn shared_http_client() -> reqwest::Client {
   SHARED_HTTP
     .get_or_init(|| {
       reqwest::Client::builder()
@@ -633,14 +674,6 @@ fn context_matches_uri(ctx: &rspotify::model::CurrentPlaybackContext, expected: 
     .as_ref()
     .and_then(item_uri)
     .is_some_and(|uri| uri == expected)
-}
-
-/// Merge live Smart Shuffle state with the local flag. API-true sticks
-/// (Smart enabled on another client lights up here); a locally-enabled
-/// Smart survives while shuffle stays on; shuffle-off clears both, so the
-/// label can never claim Smart for shuffle that is actually off.
-fn merge_smart_shuffle(api_smart: bool, local_smart: bool, shuffle_on: bool) -> bool {
-  api_smart || (local_smart && shuffle_on)
 }
 
 /// Merge a `library_contains` answer into the heart set. Returns true when
@@ -677,9 +710,6 @@ pub fn spawn_cover_fetch(app_arc: Arc<Mutex<App>>, item_id: String, url: String)
         app.artist_cover = Some((item_id, img));
       } else {
         app.cover_art = Some((item_id, img));
-        if let Ok(mut proto) = app.cover_protocol.lock() {
-          *proto = None;
-        }
       }
       app.ui_dirty = true;
     }
@@ -735,6 +765,19 @@ impl<'a> Network<'a> {
     } else {
       self.tokens -= 1.0;
     }
+  }
+
+  async fn send_soloist_or_fallback(&self, cmd: crate::soloist_ws::SoloistCmd) -> bool {
+    if !self.app.lock().await.soloist_live {
+      return false;
+    }
+    let Some(rx) = crate::soloist_ws::try_send_ack(cmd) else {
+      return false;
+    };
+    matches!(
+      tokio::time::timeout(Duration::from_millis(1500), rx).await,
+      Ok(Ok(true))
+    )
   }
 
   pub async fn handle_network_event(&mut self, io_event: IoEvent) {
@@ -795,12 +838,14 @@ impl<'a> Network<'a> {
       | IoEvent::SetArtistsToTable(_)
       | IoEvent::UpdateSearchLimits(_, _)
       | IoEvent::CleanCache
-      // Latency-sensitive single user actions: same token cost, no bucket wait.
-      | IoEvent::Repeat(_)
-      | IoEvent::Shuffle(_)
-      | IoEvent::SetPlaybackState(_, _)
-      // Static CDN cover art never hits api.spotify.com rate limits.
-      | IoEvent::GetCoverArt(_, _) => true,
+      // Non-Spotify / background events never hit api.spotify.com rate limits.
+      | IoEvent::GetCoverArt(_, _)
+      | IoEvent::GetLyrics
+      | IoEvent::GetTrackCredits(_)
+      | IoEvent::SoloistWsWatch { .. }
+      | IoEvent::ToggleProcessSuspend
+      | IoEvent::TransferPlaybackToDeviceName(_) => true,
+      ev if ev.is_priority_control() => true,
       _ => false,
     };
     if !skip_pace {
@@ -833,11 +878,28 @@ impl<'a> Network<'a> {
       self.pace().await;
     }
     // Expose rate limiter state for the dev panel.
-    {
+    let is_mock = {
       let mut app = self.app.lock().await;
       app.api_tokens = self.tokens;
       app.api_tokens_updated = Some(Instant::now());
       app.api_backoff_until = self.api_backoff_until;
+      app.mock_mode
+    };
+    if is_mock
+      && matches!(
+        io_event,
+        IoEvent::GetUser
+          | IoEvent::RefreshUser
+          | IoEvent::GetPlaylists
+          | IoEvent::GetCurrentSavedTracks(_)
+          | IoEvent::GetCurrentUserSavedAlbums(_)
+          | IoEvent::GetCurrentUserSavedShows(_)
+          | IoEvent::GetFollowedArtists(_)
+          | IoEvent::GetRecentlyPlayed
+          | IoEvent::ReconcilePlaylistTracks(_)
+      )
+    {
+      return;
     }
     match io_event {
       IoEvent::RefreshAuthentication => {
@@ -876,6 +938,15 @@ impl<'a> Network<'a> {
           .await;
       }
       IoEvent::GetPlaylistItems(playlist_id, playlist_offset) => {
+        if is_mock {
+          if let Some(tracks) = crate::mock::tracks_for_playlist(&playlist_id) {
+            let count = tracks.len();
+            self
+              .set_tracks_to_table(tracks, vec![None; count], (0..count).collect(), false)
+              .await;
+            return;
+          }
+        }
         self.get_playlist_tracks(playlist_id, playlist_offset).await;
       }
       IoEvent::LoadAllPlaylistItems(playlist_id) => {
@@ -915,15 +986,18 @@ impl<'a> Network<'a> {
         if !known {
           self.get_current_playback().await;
         }
-        let idle = {
+        let (has_device, no_item) = {
           let app = self.app.lock().await;
-          app
-            .current_playback_context
-            .as_ref()
-            .and_then(|c| c.item.as_ref())
-            .is_none()
+          (
+            app.current_playback_context.is_some(),
+            app
+              .current_playback_context
+              .as_ref()
+              .and_then(|c| c.item.as_ref())
+              .is_none(),
+          )
         };
-        if idle {
+        if has_device && no_item {
           if let Some(volume) = saved.volume {
             self.change_volume(volume).await;
           }
@@ -946,25 +1020,89 @@ impl<'a> Network<'a> {
         app.large_search_limit = self.large_search_limit;
       }
       IoEvent::Seek(position_ms) => {
-        self.seek(position_ms).await;
+        if self
+          .send_soloist_or_fallback(crate::soloist_ws::SoloistCmd::Seek(position_ms))
+          .await
+        {
+          let mut app = self.app.lock().await;
+          app.seek_pending = app.seek_pending.saturating_sub(1);
+          if app.seek_pending == 0 {
+            app.seek_ms = None;
+          }
+          app.mark_dirty();
+        } else {
+          self.seek(position_ms).await;
+        }
       }
       IoEvent::NextTrack => {
-        self.next_track().await;
+        if !self
+          .send_soloist_or_fallback(crate::soloist_ws::SoloistCmd::Next)
+          .await
+        {
+          self.next_track().await;
+        }
       }
       IoEvent::PreviousTrack => {
-        self.previous_track().await;
+        if !self
+          .send_soloist_or_fallback(crate::soloist_ws::SoloistCmd::Prev)
+          .await
+        {
+          self.previous_track().await;
+        }
       }
       IoEvent::Repeat(repeat_state) => {
-        self.repeat(repeat_state).await;
+        let next = match repeat_state {
+          RepeatState::Off => RepeatState::Context,
+          RepeatState::Context => RepeatState::Track,
+          RepeatState::Track => RepeatState::Off,
+        };
+        if self
+          .send_soloist_or_fallback(crate::soloist_ws::SoloistCmd::Repeat(next))
+          .await
+        {
+          let mut app = self.app.lock().await;
+          app.repeat_pending = app.repeat_pending.saturating_sub(1);
+          app.mark_dirty();
+        } else {
+          self.repeat(repeat_state).await;
+        }
       }
       IoEvent::PausePlayback => {
-        self.pause_playback().await;
+        if !self
+          .send_soloist_or_fallback(crate::soloist_ws::SoloistCmd::Pause)
+          .await
+        {
+          self.pause_playback().await;
+        }
       }
       IoEvent::SetPlaybackState(playing, gen) => {
-        self.set_playback_state(playing, gen).await;
+        let cmd = if playing {
+          crate::soloist_ws::SoloistCmd::Play(None)
+        } else {
+          crate::soloist_ws::SoloistCmd::Pause
+        };
+        if self.send_soloist_or_fallback(cmd).await {
+          let mut app = self.app.lock().await;
+          if app.play_toggle_gen == gen {
+            app.mark_dirty();
+          }
+        } else {
+          self.set_playback_state(playing, gen).await;
+        }
       }
       IoEvent::ChangeVolume(volume) => {
-        self.change_volume(volume).await;
+        if self
+          .send_soloist_or_fallback(crate::soloist_ws::SoloistCmd::Volume(volume))
+          .await
+        {
+          let mut app = self.app.lock().await;
+          if app.volume_preview == Some(volume) {
+            app.volume_preview = None;
+          }
+          app.mark_dirty();
+        } else {
+          self.change_volume(volume).await;
+        }
       }
       IoEvent::GetArtist(artist_id, input_artist_name) => {
         self.get_artist(artist_id, input_artist_name).await;
@@ -1071,6 +1209,10 @@ impl<'a> Network<'a> {
       IoEvent::TransferPlaybackToDevice(device_id) => {
         self.transfert_playback_to_device(device_id).await;
       }
+      IoEvent::CacheDeviceId(device_id) => {
+        let _ = self.client_config.set_device_id(device_id);
+        self.get_current_playback().await;
+      }
       IoEvent::TransferPlaybackToDeviceName(name) => {
         // Background, never inline: the network loop is sequential and this
         // polls up to 10x3s — inline it stalls every queued event, so a
@@ -1079,22 +1221,24 @@ impl<'a> Network<'a> {
         let spotify = self.spotify.clone();
         let app = std::sync::Arc::clone(self.app);
         tokio::spawn(async move {
-          for _ in 0..10 {
+          for attempt in 0..15 {
             if let Ok(devices) = spotify.device().await {
               if let Some(d) = devices.iter().find(|d| d.name.eq_ignore_ascii_case(&name)) {
-                match d.id.clone() {
-                  Some(id) => {
-                    app
-                      .lock()
-                      .await
-                      .dispatch(IoEvent::TransferPlaybackToDevice(id));
-                  }
-                  None => { /* nameless device: nothing to transfer to */ }
+                if let Some(id) = d.id.clone() {
+                  // Already active: only cache device_id; PUT /me/player
+                  // on an active Connect speaker forces a stream re-buffer.
+                  let ev = if d.is_active {
+                    IoEvent::CacheDeviceId(id)
+                  } else {
+                    IoEvent::TransferPlaybackToDevice(id)
+                  };
+                  app.lock().await.dispatch(ev);
                 }
                 return;
               }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let wait_secs = if attempt < 5 { 1 } else { 2 };
+            tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
           }
           app.lock().await.handle_error(anyhow!(
             "device '{}' not found — on first soloist run, pair it once from the Spotify desktop or mobile app (after that it persists)",
@@ -1115,7 +1259,14 @@ impl<'a> Network<'a> {
         self.get_album_for_track(track_id).await;
       }
       IoEvent::Shuffle(shuffle_state) => {
-        self.shuffle(shuffle_state).await;
+        if self
+          .send_soloist_or_fallback(crate::soloist_ws::SoloistCmd::Shuffle(!shuffle_state))
+          .await
+        {
+          self.app.lock().await.mark_dirty();
+        } else {
+          self.shuffle(shuffle_state).await;
+        }
       }
       IoEvent::CurrentUserSavedTracksContains(track_ids) => {
         self.current_user_saved_tracks_contains(track_ids).await;
@@ -1142,7 +1293,12 @@ impl<'a> Network<'a> {
         self.get_current_show_episodes(show_id, offset).await;
       }
       IoEvent::AddItemToQueue(item) => {
-        self.add_item_to_queue(item).await;
+        if !self
+          .send_soloist_or_fallback(crate::soloist_ws::SoloistCmd::AddToQueue(item.clone()))
+          .await
+        {
+          self.add_item_to_queue(item).await;
+        }
       }
       IoEvent::AddTrackToPlaylist(uri, playlist_id) => {
         self.add_track_to_playlist(uri, playlist_id).await;
@@ -1255,6 +1411,19 @@ impl<'a> Network<'a> {
 
   async fn get_devices(&mut self) {
     if let Ok(result) = self.spotify.device().await {
+      if result.len() == 1 {
+        let only_id = result[0].id.clone();
+        {
+          let mut app = self.app.lock().await;
+          app.devices = Some(result);
+          app.selected_device_index = Some(0);
+        }
+        if let Some(id) = only_id {
+          let _ = self.spotify.transfer_playback(&id, Some(false)).await;
+          self.client_config.device_id = Some(id);
+        }
+        return;
+      }
       let mut app = self.app.lock().await;
       app.push_navigation_stack(RouteId::SelectedDevice, ActiveBlock::SelectDevice);
       if !result.is_empty() {
@@ -1306,9 +1475,6 @@ impl<'a> Network<'a> {
       crate::app::emit_program_status(c.is_playing, &crate::app::now_playing_title(Some(&c)));
     }
     app.playback_known = true;
-    // Sync the real Smart Shuffle flag (undocumented API field); the
-    // merge keeps a locally-enabled Smart while shuffle stays on.
-    app.smart_shuffle = merge_smart_shuffle(c.smart_shuffle, app.smart_shuffle, c.shuffle_state);
     app.instant_since_last_current_playback_poll = Instant::now();
     // Prime the playbar heart when the song changed (TTL-cached, silent).
     let now_playing = c.item.as_ref().and_then(|item| match item {
@@ -1345,42 +1511,44 @@ impl<'a> Network<'a> {
           });
         }
       }
-      if app.desktop_notifications && c.is_playing {
-        if let Some(uri) = next_id.as_ref() {
-          if app.last_notified_uri.as_deref() != Some(uri.as_str()) {
-            app.last_notified_uri = Some(uri.clone());
-            let (summary, body, icon) = match c.item.as_ref() {
-              Some(rspotify::model::PlayableItem::Track(t)) => {
-                let artists = t
-                  .artists
-                  .iter()
-                  .map(|a| a.name.as_str())
-                  .collect::<Vec<_>>()
-                  .join(", ");
-                let icon = crate::cover_art::pick_url(&t.album.images).map(|u| {
-                  crate::cover_art::cache_file(&u)
-                    .to_string_lossy()
-                    .into_owned()
-                });
-                (
-                  t.name.clone(),
-                  format!("{artists} — {}", t.album.name),
-                  icon,
-                )
-              }
-              Some(rspotify::model::PlayableItem::Episode(e)) => {
-                let icon = crate::cover_art::pick_url(&e.images).map(|u| {
-                  crate::cover_art::cache_file(&u)
-                    .to_string_lossy()
-                    .into_owned()
-                });
-                (e.name.clone(), e.show.name.clone(), icon)
-              }
-              _ => (String::new(), String::new(), None),
-            };
-            if !summary.is_empty() {
-              crate::platform::notifications::spawn_track_notification(summary, body, icon);
+      if let Some(uri) = next_id.as_ref() {
+        let prev = app.last_notified_uri.replace(uri.clone());
+        if prev.is_some()
+          && prev.as_deref() != Some(uri.as_str())
+          && app.desktop_notifications
+          && c.is_playing
+        {
+          let (summary, body, icon) = match c.item.as_ref() {
+            Some(rspotify::model::PlayableItem::Track(t)) => {
+              let artists = t
+                .artists
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+              let icon = crate::cover_art::pick_url(&t.album.images).map(|u| {
+                crate::cover_art::cache_file(&u)
+                  .to_string_lossy()
+                  .into_owned()
+              });
+              (
+                t.name.clone(),
+                format!("{artists} — {}", t.album.name),
+                icon,
+              )
             }
+            Some(rspotify::model::PlayableItem::Episode(e)) => {
+              let icon = crate::cover_art::pick_url(&e.images).map(|u| {
+                crate::cover_art::cache_file(&u)
+                  .to_string_lossy()
+                  .into_owned()
+              });
+              (e.name.clone(), e.show.name.clone(), icon)
+            }
+            _ => (String::new(), String::new(), None),
+          };
+          if !summary.is_empty() {
+            crate::platform::notifications::spawn_track_notification(summary, body, icon);
           }
         }
       }
@@ -2207,18 +2375,24 @@ impl<'a> Network<'a> {
 
         let cache_items = made_for_you_tracks.items.clone();
         let cache_total = made_for_you_tracks.total;
+        let fetched_name = if made_for_you_offset == 0 {
+          Some(
+            self
+              .spotify
+              .playlist(
+                PlaylistId::from_id_or_uri(&playlist_id).unwrap(),
+                None,
+                Some(Market::FromToken),
+              )
+              .await
+              .map(|playlist| playlist.name)
+              .unwrap_or_default(),
+          )
+        } else {
+          None
+        };
         let mut app = self.app.lock().await;
-        if made_for_you_offset == 0 {
-          let name = self
-            .spotify
-            .playlist(
-              PlaylistId::from_id_or_uri(&playlist_id).unwrap(),
-              None,
-              Some(Market::FromToken),
-            )
-            .await
-            .map(|playlist| playlist.name)
-            .unwrap_or_default();
+        if let Some(name) = fetched_name {
           if paint {
             app.active_playlist_id = Some(playlist_id.clone());
             app.playlist_view = Some((name, playlist_id.clone()));
@@ -2276,7 +2450,6 @@ impl<'a> Network<'a> {
       .await
     {
       Ok(saved_shows) => {
-        // not to show a blank page
         if !saved_shows.items.is_empty() {
           match offset {
             Some(off) if off > 0 => {
@@ -2299,9 +2472,10 @@ impl<'a> Network<'a> {
                 .put("saved_shows", &saved_shows.items, saved_shows.total);
             }
           }
-          let mut app = self.app.lock().await;
-          app.library.saved_shows.add_pages(saved_shows);
         }
+        let mut app = self.app.lock().await;
+        app.library.saved_shows.add_pages(saved_shows);
+        app.mark_dirty();
       }
       Err(e) => {
         if offset.is_none() && self.serve_saved_shows_cache().await {
@@ -2910,18 +3084,15 @@ impl<'a> Network<'a> {
       return Some(id);
     }
     let from_app = {
-      if let Ok(app) = self.app.try_lock() {
-        if let Some(id) = app
-          .current_playback_context
-          .as_ref()
-          .and_then(|c| c.device.id.clone())
-        {
-          Some(id)
-        } else if let Some(devs) = app.devices.as_ref() {
-          devs.iter().find_map(|d| d.id.clone())
-        } else {
-          None
-        }
+      let app = self.app.lock().await;
+      if let Some(id) = app
+        .current_playback_context
+        .as_ref()
+        .and_then(|c| c.device.id.clone())
+      {
+        Some(id)
+      } else if let Some(devs) = app.devices.as_ref() {
+        devs.iter().find_map(|d| d.id.clone())
       } else {
         None
       }
@@ -2930,10 +3101,21 @@ impl<'a> Network<'a> {
       let _ = self.client_config.set_device_id(id.clone());
       return Some(id);
     }
+    let soloist_name = self.app.try_lock().ok().and_then(|a| {
+      a.user_config
+        .soloist
+        .enabled
+        .then(|| a.user_config.soloist.device_name.clone())
+    });
     if let Ok(devs) = self.spotify.device().await {
       let picked = devs
         .iter()
         .find(|d| d.is_active)
+        .or_else(|| {
+          soloist_name
+            .as_deref()
+            .and_then(|n| devs.iter().find(|d| d.name.eq_ignore_ascii_case(n)))
+        })
         .or(devs.first())
         .and_then(|d| d.id.clone());
       if let Some(ref id) = picked {
@@ -3212,6 +3394,16 @@ impl<'a> Network<'a> {
         if superseded {
           return;
         }
+        let soloist_live = self.app.lock().await.soloist_live;
+        if soloist_live {
+          let mut app = self.app.lock().await;
+          app.seek_pending = app.seek_pending.saturating_sub(1);
+          if app.seek_pending == 0 {
+            app.seek_ms = None;
+          }
+          app.mark_dirty();
+          return;
+        }
         self.wait_until_position_ms(position_ms).await;
         let should_fetch = {
           let mut app = self.app.lock().await;
@@ -3308,11 +3500,21 @@ impl<'a> Network<'a> {
 
   async fn shuffle(&mut self, shuffle_state: bool) {
     let device_id = self.effective_device_id().await;
-    match self
+    let mut res = self
       .spotify
       .shuffle(!shuffle_state, device_id.as_deref())
-      .await
-    {
+      .await;
+    if let Err(ref e) = res {
+      let msg = e.to_string();
+      if msg.contains("502") || msg.contains("503") || msg.contains("504") {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        res = self
+          .spotify
+          .shuffle(!shuffle_state, device_id.as_deref())
+          .await;
+      }
+    }
+    match res {
       Ok(()) => {
         // Update the UI eagerly (otherwise the UI will wait until the next 5 second interval
         // due to polling playback context)
@@ -3591,7 +3793,7 @@ impl<'a> Network<'a> {
       (full_artist, top_tracks)
     } else {
       let query = format!("artist:\"{}\"", input_artist_name);
-      let (fa, tt) = tokio::join!(
+      let (fa, tt) = futures::future::join(
         self.spotify.artist(cloneable_artist_id.clone()),
         self.spotify.search(
           &query,
@@ -3600,8 +3802,9 @@ impl<'a> Network<'a> {
           None,
           Some(10),
           Some(0),
-        )
-      );
+        ),
+      )
+      .await;
       (fa.ok(), tt)
     };
     let artist_name = if input_artist_name.is_empty() {
@@ -4483,8 +4686,7 @@ impl<'a> Network<'a> {
       .header("Authorization", format!("Bearer {token}"))
       .send()
       .await;
-    let mut app = self.app.lock().await;
-    app.track_credits = match response {
+    let credits = match response {
       Ok(res) => match res.json::<serde_json::Value>().await {
         Ok(json) => json
           .pointer("/roleCredits")
@@ -4509,6 +4711,9 @@ impl<'a> Network<'a> {
       },
       Err(_) => None,
     };
+    let mut app = self.app.lock().await;
+    app.track_credits = credits;
+    app.mark_dirty();
   }
 
   async fn get_queue(&mut self) {
@@ -5751,18 +5956,6 @@ mod tests {
   }
 
   #[test]
-  fn merge_smart_shuffle_cases() {
-    // API-true sticks even with no local flag (Smart enabled elsewhere).
-    assert!(merge_smart_shuffle(true, false, true));
-    // Local Smart survives while shuffle stays on.
-    assert!(merge_smart_shuffle(false, true, true));
-    // Shuffle-off clears both: no stale Smart label.
-    assert!(!merge_smart_shuffle(false, true, false));
-    assert!(!merge_smart_shuffle(false, false, false));
-    assert!(!merge_smart_shuffle(false, false, true));
-  }
-
-  #[test]
   fn saved_tracks_page_is_a_partial_subset() {
     let page = mock_saved_tracks_page(0);
     assert_eq!(page.total, 20);
@@ -5805,6 +5998,8 @@ mod tests {
       app_guard.show_library = false;
       app_guard.sidebar_minimized = true;
       app_guard.user_config.theme.background = Color::Rgb(0, 0, 0);
+      app_guard.user_config.soloist.enabled = false;
+      app_guard.user_config.behavior.volume_increment = 10;
       SavedState::snapshot_from_app(&app_guard).save();
     });
     let saved = SavedState::load().expect("state file should exist");
@@ -5812,7 +6007,8 @@ mod tests {
     assert_eq!(saved.show_playlists, Some(true));
     assert_eq!(saved.sidebar_minimized, Some(true));
     assert_eq!(saved.black_background, Some(true));
-    assert_eq!(saved.restore_settings, Some(false));
+    assert_eq!(saved.soloist_enabled, Some(false));
+    assert_eq!(saved.volume_increment, Some(10));
   }
 
   #[test]
@@ -5836,5 +6032,60 @@ mod tests {
     );
     // Untagged trailing line and metadata tags are dropped.
     assert!(!parsed.iter().any(|(_, w)| w == "no tag line"));
+  }
+
+  #[test]
+  fn playback_payload_without_external_ids_parses_track() {
+    let payload = r#"{
+      "device": {
+        "id": "dev-1", "is_active": true, "is_private_session": false,
+        "is_restricted": false, "name": "sptune", "type": "Speaker",
+        "volume_percent": 60
+      },
+      "repeat_state": "off",
+      "shuffle_state": false,
+      "context": null,
+      "timestamp": 0,
+      "progress_ms": 12000,
+      "is_playing": true,
+      "item": {
+        "album": {
+          "album_type": "album",
+          "artists": [{"external_urls": {}, "href": null, "id": null, "name": "Artist"}],
+          "available_markets": [],
+          "copyrights": [],
+          "external_urls": {},
+          "genres": [],
+          "href": null,
+          "id": null,
+          "images": [],
+          "name": "Album",
+          "release_date": "2024-01-01",
+          "release_date_precision": "day",
+          "restrictions": null,
+          "type": "album",
+          "uri": "spotify:album:abc"
+        },
+        "artists": [{"external_urls": {}, "href": null, "id": null, "name": "Artist"}],
+        "available_markets": [],
+        "disc_number": 1,
+        "duration_ms": 180000,
+        "explicit": false,
+        "external_urls": {},
+        "href": null,
+        "id": null,
+        "is_local": false,
+        "name": "Track",
+        "popularity": 0,
+        "preview_url": null,
+        "track_number": 1,
+        "type": "track",
+        "uri": "spotify:track:xyz"
+      },
+      "currently_playing_type": "track",
+      "actions": {"disallows": {}}
+    }"#;
+    let ctx: rspotify::model::CurrentPlaybackContext = serde_json::from_str(payload).unwrap();
+    assert!(matches!(ctx.item, Some(PlayableItem::Track(t)) if t.name == "Track"));
   }
 }

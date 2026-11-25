@@ -1,18 +1,12 @@
-mod app;
-mod backend;
 mod cli;
-mod client_creds;
-mod cover_art;
 mod handlers;
-mod metadata;
-mod platform;
 mod redirect_uri;
 mod soloist_setup;
-mod soloist_ws;
-mod tui;
-mod visualizer;
 
-use sptune::{event, lcg, library_cache, playlist_cache, user_config};
+use sptune::{
+  app, backend, client_creds, cover_art, event, lcg, library_cache, mock, platform, playlist_cache,
+  tui, user_config, visualizer,
+};
 
 use crate::app::RouteId;
 use crate::event::Key;
@@ -182,15 +176,6 @@ fn close_application(alt_screen: bool, enable_mouse: bool) -> Result<()> {
 
 /// Shutdown question for the soloist child. True = keep it running as an
 /// independent speaker; anything but y/yes (Enter, EOF, Ctrl-C) = kill.
-fn prompt_keep_soloist() -> bool {
-  use std::io::Write as _;
-  print!("Soloist is still playing. Keep it running after sptune exits? [y/N] ");
-  let _ = std::io::stdout().flush();
-  let mut line = String::new();
-  std::io::stdin().read_line(&mut line).is_ok()
-    && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-}
-
 fn panic_hook(info: &PanicHookInfo<'_>) {
   let location = info.location().map(|l| l.to_string()).unwrap_or_default();
 
@@ -204,15 +189,21 @@ fn panic_hook(info: &PanicHookInfo<'_>) {
 
   eprintln!("thread '<unnamed>' panicked at '{}' ({})", msg, location);
   eprintln!("{:?}", Backtrace::capture());
-  // Panic = sptune is going down: take Spotify with it only if sptune launched it.
-  if crate::platform::spotify::was_spawned() {
-    crate::platform::spotify::kill_all_spotify();
+  // Panic = sptune is going down: resume any suspended Spotify helpers and leave Spotify running.
+  if let Some(root) = crate::platform::spotify::find_root_pid() {
+    crate::platform::spotify::resume_processes(root);
   }
   crate::platform::soloist::kill_spawned();
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+  let rt = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()?;
+  rt.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
   let startup_at = std::time::Instant::now();
   panic::set_hook(Box::new(|info| {
     panic_hook(info);
@@ -263,12 +254,25 @@ of the app. Beware that this comes at a CPU cost!",
         .help("Run without reading or writing the on-disk caches")
         .action(clap::ArgAction::SetTrue),
     )
+    .arg(
+      Arg::new("mock")
+        .long("mock")
+        .help("Launch offline showcase mode with fake playlists and tracks (for screenshots)")
+        .action(clap::ArgAction::SetTrue),
+    )
     // Control spotify from the command line
     .subcommand(cli::playback_subcommand())
     .subcommand(cli::play_subcommand())
     .subcommand(cli::list_subcommand())
     .subcommand(cli::search_subcommand())
     .subcommand(cli::clean_cache_subcommand())
+    .subcommand(cli::backup_subcommand())
+    .arg(
+      Arg::new("window")
+        .long("window")
+        .action(clap::ArgAction::SetTrue)
+        .help("Launch sptune in its own dedicated terminal window (enables independent minimize-to-tray)"),
+    )
     .arg(
       Arg::new("mini-popup")
         .long("mini-popup")
@@ -278,6 +282,48 @@ of the app. Beware that this comes at a CPU cost!",
 
   let matches = clap_app.clone().get_matches();
 
+  if matches.get_flag("window") && std::env::var_os("SPTUNE_OWN_WINDOW").is_none_or(|v| v != "1") {
+    let exe = std::env::current_exe()?;
+    let args: Vec<String> = std::env::args()
+      .skip(1)
+      .filter(|a| a != "--window")
+      .collect();
+    for term in [
+      "ghostty",
+      "kitty",
+      "alacritty",
+      "xfce4-terminal",
+      "x-terminal-emulator",
+    ] {
+      let mut cmd = std::process::Command::new(term);
+      cmd.env("SPTUNE_OWN_WINDOW", "1");
+      match term {
+        "ghostty" => {
+          cmd.args(["--title=sptune", "-e"]);
+          cmd.arg(&exe).args(&args);
+        }
+        "kitty" | "alacritty" => {
+          cmd.args(["--title", "sptune", "-e"]);
+          cmd.arg(&exe).args(&args);
+        }
+        _ => {
+          cmd.arg("-e");
+          cmd.arg(&exe).args(&args);
+        }
+      }
+      if cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+      {
+        return Ok(());
+      }
+    }
+    return Err(anyhow!("no supported terminal emulator found for --window"));
+  }
+
   if matches.get_flag("mini-popup") {
     crate::platform::tray::toggle_integrated_popover(None);
     return Ok(());
@@ -286,6 +332,8 @@ of the app. Beware that this comes at a CPU cost!",
   if matches.get_flag("no-cache") {
     crate::library_cache::CACHE_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
   }
+
+  let is_mock = matches.get_flag("mock");
 
   // Shell completions don't need any spotify work
   if let Some(s) = matches.get_one::<String>("completions") {
@@ -381,7 +429,7 @@ of the app. Beware that this comes at a CPU cost!",
   let mut restored_sidebar_width = None;
   let mut restored_library_height = None;
   let mut restored_dev_view = None;
-  let mut saved_state = SavedState::load();
+  let mut saved_state = if is_mock { None } else { SavedState::load() };
   if let Some(saved) = saved_state.as_ref() {
     if let Some(enabled) = saved.mouse_enabled {
       user_config.behavior.enable_mouse = enabled;
@@ -414,9 +462,6 @@ of the app. Beware that this comes at a CPU cost!",
     }
     if let Some(show_date) = saved.show_date_added_column {
       user_config.behavior.show_date_added_column = show_date;
-    }
-    if let Some(restore_settings) = saved.restore_settings {
-      user_config.behavior.restore_settings = restore_settings;
     }
     if let Some(enable) = saved.enable_add_to_playlist {
       user_config.behavior.enable_add_to_playlist = enable;
@@ -456,6 +501,15 @@ of the app. Beware that this comes at a CPU cost!",
     if let Some(v) = saved.spotify_mem_limit {
       user_config.spotify.memory_limit_mb = v;
     }
+    if let Some(v) = saved.soloist_enabled {
+      user_config.soloist.enabled = v;
+    }
+    if let Some(v) = saved.soloist_keep_running {
+      user_config.soloist.keep_running = v;
+    }
+    if let Some(v) = saved.volume_increment {
+      user_config.behavior.volume_increment = v.clamp(1, 25);
+    }
   }
 
   // Initialise app state
@@ -489,6 +543,9 @@ of the app. Beware that this comes at a CPU cost!",
     app_guard.music_left_pct = saved.music_left_pct;
     app_guard.music_lyrics_pct = saved.music_lyrics_pct;
     app_guard.music_cover_height = saved.music_cover_height;
+    if let Some(mode) = saved.visualizer_mode.as_deref() {
+      app_guard.visualizer.mode = crate::visualizer::VizMode::parse(mode);
+    }
     if let Some(show) = saved.show_process_suspend {
       app_guard.show_process_suspend = show;
     }
@@ -509,13 +566,16 @@ of the app. Beware that this comes at a CPU cost!",
       app_guard.saved_last_track = Some(uri);
     }
   }
+  if is_mock {
+    mock::populate_mock_app(&mut app_guard);
+  }
   app_guard.clamp_library_selection();
   let should_auto_launch = app_guard.user_config.spotify.auto_launch;
   let spotify_cfg = app_guard.user_config.spotify.clone();
   let soloist_cfg = app_guard.user_config.soloist.clone();
   drop(app_guard);
   if should_auto_launch {
-    let _ = crate::platform::spotify::launch(&spotify_cfg);
+    let _ = crate::platform::spotify::launch_if_not_running(&spotify_cfg);
   }
   if soloist_cfg.enabled {
     let api_key = std::env::var("SOLOIST_API_KEY")
@@ -617,12 +677,11 @@ of the app. Beware that this comes at a CPU cost!",
     }
     let _ = sync_io_tx.send(IoEvent::GetCurrentPlayback);
     if let Some(saved) = saved_state {
-      if user_config.behavior.restore_settings
-        && (saved.volume.is_some()
-          || saved.shuffle.is_some()
-          || saved.repeat.is_some()
-          || saved.track_sort.is_some()
-          || saved.last_page.is_some())
+      if saved.volume.is_some()
+        || saved.shuffle.is_some()
+        || saved.repeat.is_some()
+        || saved.track_sort.is_some()
+        || saved.last_page.is_some()
       {
         let _ = sync_io_tx.send(IoEvent::AutoRestore(Box::new(saved)));
       }
@@ -639,25 +698,57 @@ fn start_tokio(io_rx: std::sync::mpsc::Receiver<IoEvent>, network: &mut Network)
     .enable_all()
     .build()
     .expect("failed to build network runtime");
-  // Pre-warm the shared HTTP pool on the network runtime while UI starts.
-  rt.spawn(async {
-    let _ = crate::backend::shared_http_client()
-      .get("https://api.spotify.com/v1/")
-      .send()
+  let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::unbounded_channel::<IoEvent>();
+  let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel::<IoEvent>();
+  // Pump std::sync::mpsc into two Tokio priority channels so the Tokio
+  // current_thread runtime NEVER parks on a blocking recv() (which previously
+  // froze soloist_ws::watch, cover fetches, and device transfers whenever
+  // io_rx went idle).
+  std::thread::Builder::new()
+    .name("sptune-io-pump".into())
+    .spawn(move || {
+      while let Ok(ev) = io_rx.recv() {
+        let tx = if ev.is_priority_control() {
+          &ctrl_tx
+        } else {
+          &bg_tx
+        };
+        if tx.send(ev).is_err() {
+          break;
+        }
+      }
+    })
+    .expect("failed to spawn io pump");
+
+  rt.block_on(async move {
+    loop {
+      let ev = std::future::poll_fn(|cx| {
+        if let std::task::Poll::Ready(Some(ev)) = ctrl_rx.poll_recv(cx) {
+          return std::task::Poll::Ready(Some(ev));
+        }
+        match bg_rx.poll_recv(cx) {
+          std::task::Poll::Ready(Some(ev)) => std::task::Poll::Ready(Some(ev)),
+          std::task::Poll::Ready(None) => match ctrl_rx.poll_recv(cx) {
+            std::task::Poll::Ready(ev) => std::task::Poll::Ready(ev),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+          },
+          std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+      })
       .await;
+      let Some(io_event) = ev else { break };
+      use futures::FutureExt as _;
+      let _ = std::panic::AssertUnwindSafe(network.handle_network_event(io_event))
+        .catch_unwind()
+        .await;
+    }
   });
-  while let Ok(io_event) = io_rx.recv() {
-    // catch one handler panic so the thread (and the channel) survives;
-    // a panicking handler is skipped and the next event is processed.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-      rt.block_on(network.handle_network_event(io_event));
-    }));
-  }
 }
 
 async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> {
   // Terminal initialization
   let mut stdout = stdout();
+  crate::platform::window::init();
   if user_config.terminal.alt_screen {
     execute!(stdout, EnterAlternateScreen)?;
   }
@@ -666,9 +757,7 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
   }
   enable_raw_mode()?;
   {
-    let picker = ratatui_image::picker::Picker::from_query_stdio()
-      .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
-    app.lock().await.cover_picker = Some(picker);
+    app.lock().await.cover_caps = cover_art::CoverCaps::detect();
   }
 
   let mut backend = CrosstermBackend::new(stdout);
@@ -691,6 +780,7 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     user_config.behavior.tick_rate_milliseconds,
     user_config.terminal.mouse_y_offset,
   );
+  app.lock().await.ui_wake = Some(events.wake_handle());
 
   // play music on, if not send them to the device selection view
 
@@ -698,6 +788,11 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
   let mut last_refresh_attempt = SystemTime::UNIX_EPOCH;
   let mut last_active_block: Option<ActiveBlock> = None;
   let mut kitty_placed: Option<(String, Rect)> = None;
+  let mut last_window_title = if user_config.behavior.set_window_title {
+    "sptune".to_string()
+  } else {
+    String::new()
+  };
   let is_tmux = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
 
   loop {
@@ -714,6 +809,7 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     while let Ok(tail) = events.try_next() {
       batch.push(tail);
     }
+    events.clear_wake();
 
     let mut app = app.lock().await;
     let mut needs_redraw = is_first_render;
@@ -809,11 +905,16 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
             }
           }
         }
+        event::Event::Redraw => {
+          needs_redraw = true;
+        }
         event::Event::Tick => {
           if app.update_on_tick() {
             needs_redraw = true;
           }
-          if app.get_current_route().active_block == ActiveBlock::MusicView {
+          if app.get_current_route().active_block == ActiveBlock::MusicView
+            && app.visualizer.mode != visualizer::VizMode::Off
+          {
             app.visualizer.poll();
             app.visualizer.tick();
             if app.visualizer.mode == visualizer::VizMode::Mosaic {
@@ -878,6 +979,17 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
       terminal.clear()?;
     }
     last_active_block = Some(active_block);
+
+    if app.user_config.behavior.set_window_title {
+      let title = desired_window_title(&app);
+      if title != last_window_title {
+        execute!(terminal.backend_mut(), SetTitle(&title))?;
+        last_window_title = title;
+      }
+    } else if !last_window_title.is_empty() {
+      execute!(terminal.backend_mut(), SetTitle("sptune"))?;
+      last_window_title.clear();
+    }
 
     terminal.draw(|f| {
       // Paint the theme background so "black theme" is actually black
@@ -971,24 +1083,17 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
     }
   }
 
+  crate::platform::tray::shutdown_popover();
   crate::platform::tray_ipc::cleanup();
-  // Only close Spotify desktop on exit if sptune itself launched it.
-  if crate::platform::spotify::was_spawned() {
-    crate::platform::spotify::kill_all_spotify();
+  if crate::platform::window::was_hidden() {
+    crate::platform::window::restore_from_tray();
   }
-  // Soloist is our own child, so ask first: restore the terminal so the
-  // question is visible (close_application is idempotent — the final
-  // teardown below repeats it harmlessly). Anything but y/yes kills it,
-  // preserving the old die-with-parent default on Enter/EOF.
-  if crate::platform::soloist::is_spawned() {
-    close_application(
-      user_config.terminal.alt_screen,
-      user_config.terminal.enable_mouse,
-    )?;
-    if !prompt_keep_soloist() {
-      crate::platform::soloist::kill_spawned();
-    }
-  } else {
+  // Leave Spotify running on exit; resume any helper processes sptune suspended.
+  if let Some(root) = crate::platform::spotify::find_root_pid() {
+    crate::platform::spotify::resume_processes(root);
+  }
+  let keep_soloist = app.lock().await.user_config.soloist.keep_running;
+  if !keep_soloist {
     crate::platform::soloist::kill_spawned();
   }
 
@@ -1010,7 +1115,9 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
   // the session.
   {
     let guard = app.lock().await;
-    SavedState::snapshot_from_app(&guard).save();
+    if !guard.mock_mode {
+      SavedState::snapshot_from_app(&guard).save();
+    }
   }
 
   close_application(
@@ -1033,10 +1140,8 @@ fn sync_kitty_cover<W: io::Write>(
   is_tmux: bool,
   placed: &mut Option<(String, Rect)>,
 ) -> Result<()> {
-  let Some(picker) = app.cover_picker.as_ref() else {
-    return Ok(());
-  };
-  if picker.protocol_type() != ratatui_image::picker::ProtocolType::Kitty {
+  let caps = app.cover_caps;
+  if !caps.kitty {
     return Ok(());
   }
   let route = app.get_current_route();
@@ -1074,7 +1179,7 @@ fn sync_kitty_cover<W: io::Write>(
   let next = match (want_id, target_inner, src_cover) {
     (Some(want), Some(inner), Some((have, img))) if &want == have => {
       let target =
-        tui::music_view::fit_cover_rect(inner, (img.width(), img.height()), picker.font_size());
+        tui::music_view::fit_cover_rect(inner, (img.width(), img.height()), caps.font_size);
       (target.width > 0 && target.height > 0).then_some((want, img, target))
     }
     _ => None,
@@ -1082,13 +1187,8 @@ fn sync_kitty_cover<W: io::Write>(
   match next {
     Some((id, img, target)) => {
       if placed.as_ref() != Some(&(id.clone(), target)) {
-        let seq = cover_art::kitty_place_seq(
-          img,
-          target.width,
-          target.height,
-          picker.font_size(),
-          is_tmux,
-        )?;
+        let seq =
+          cover_art::kitty_place_seq(img, target.width, target.height, caps.font_size, is_tmux)?;
         write!(w, "{}", cover_art::kitty_delete_seq(is_tmux))?;
         execute!(w, MoveTo(target.x, target.y))?;
         w.write_all(seq.as_bytes())?;
@@ -1123,7 +1223,7 @@ fn sync_kitty_cover<W: io::Write>(
     ) {
       (Some(want), Some(inner), Some((have, img))) if &want == have => {
         let target =
-          tui::music_view::fit_cover_rect(inner, (img.width(), img.height()), picker.font_size());
+          tui::music_view::fit_cover_rect(inner, (img.width(), img.height()), caps.font_size);
         (target.width > 0 && target.height > 0).then_some((want, img, target))
       }
       _ => None,
@@ -1140,7 +1240,7 @@ fn sync_kitty_cover<W: io::Write>(
             img,
             target.width,
             target.height,
-            picker.font_size(),
+            caps.font_size,
             is_tmux,
           )?;
           write!(
@@ -1167,4 +1267,34 @@ fn sync_kitty_cover<W: io::Write>(
     }
   }
   Ok(())
+}
+
+fn desired_window_title(app: &App) -> String {
+  match app
+    .current_playback_context
+    .as_ref()
+    .and_then(|c| c.item.as_ref())
+  {
+    Some(rspotify::model::PlayableItem::Track(t)) => {
+      let artists = t
+        .artists
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+      if artists.is_empty() {
+        format!("{} • sptune", t.name)
+      } else {
+        format!("{} — {} • sptune", t.name, artists)
+      }
+    }
+    Some(rspotify::model::PlayableItem::Episode(e)) => {
+      if e.show.name.is_empty() {
+        format!("{} • sptune", e.name)
+      } else {
+        format!("{} — {} • sptune", e.name, e.show.name)
+      }
+    }
+    _ => "sptune".to_string(),
+  }
 }

@@ -335,7 +335,6 @@ pub struct BehaviorConfigString {
   pub tick_rate_milliseconds: Option<u64>,
   pub enable_text_emphasis: Option<bool>,
   pub seek_by_typing: Option<bool>,
-  pub restore_settings: Option<bool>,
   pub enforce_wide_search_bar: Option<bool>,
   pub liked_icon: Option<String>,
   pub shuffle_icon: Option<String>,
@@ -365,7 +364,6 @@ pub struct BehaviorConfig {
   pub tick_rate_milliseconds: u64,
   pub enable_text_emphasis: bool,
   pub seek_by_typing: bool,
-  pub restore_settings: bool,
   pub enforce_wide_search_bar: bool,
   pub liked_icon: String,
   pub shuffle_icon: String,
@@ -430,6 +428,7 @@ pub struct SoloistConfigString {
   pub enabled: Option<bool>,
   pub device_name: Option<String>,
   pub binary_path: Option<String>,
+  pub keep_running: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -437,6 +436,7 @@ pub struct SoloistConfig {
   pub enabled: bool,
   pub device_name: String,
   pub binary_path: String,
+  pub keep_running: bool,
 }
 
 impl Default for SoloistConfig {
@@ -445,6 +445,7 @@ impl Default for SoloistConfig {
       enabled: false,
       device_name: "sptune".to_string(),
       binary_path: String::new(),
+      keep_running: false,
     }
   }
 }
@@ -565,7 +566,6 @@ impl UserConfig {
         tick_rate_milliseconds: 250,
         enable_text_emphasis: true,
         seek_by_typing: false,
-        restore_settings: false,
         enforce_wide_search_bar: false,
         liked_icon: "♥".to_string(),
         shuffle_icon: "🔀".to_string(),
@@ -754,10 +754,6 @@ impl UserConfig {
 
     if let Some(seek_by_typing) = behavior_config.seek_by_typing {
       self.behavior.seek_by_typing = seek_by_typing;
-    }
-
-    if let Some(restore_settings) = behavior_config.restore_settings {
-      self.behavior.restore_settings = restore_settings;
     }
 
     if let Some(wide_search_bar) = behavior_config.enforce_wide_search_bar {
@@ -980,6 +976,9 @@ impl UserConfig {
     if let Some(v) = s.binary_path {
       self.soloist.binary_path = v;
     }
+    if let Some(v) = s.keep_running {
+      self.soloist.keep_running = v;
+    }
   }
 
   /// Patch only the `soloist` section of config.yml, preserving every other
@@ -1011,6 +1010,7 @@ impl UserConfig {
       enabled: Some(enabled),
       device_name: Some(device_name.to_string()),
       binary_path: Some(binary_path.to_string()),
+      keep_running: Some(self.soloist.keep_running),
     });
     fs::write(&paths.config_file_path, serde_yml::to_string(&doc)?)?;
     self.soloist.enabled = enabled;

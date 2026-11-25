@@ -92,7 +92,6 @@ impl VizMode {
     }
   }
 
-  #[cfg(test)]
   pub fn parse(s: &str) -> VizMode {
     match s.to_ascii_lowercase().as_str() {
       "peak" => VizMode::Peak,
@@ -860,6 +859,15 @@ mod tests {
     }
     let (_, held) = viz.led(0);
     assert!(held > 0.3, "led peak fell during hold: {held}");
+    // After the 0.45s hold window expires, the peak must fall back down.
+    for _ in 0..45 {
+      viz.advance(1.0 / 30.0);
+    }
+    let (_, fallen) = viz.led(0);
+    assert!(
+      fallen < held && fallen < 0.1,
+      "led peak never fell after hold: held={held}, fallen={fallen}"
+    );
   }
 
   #[test]

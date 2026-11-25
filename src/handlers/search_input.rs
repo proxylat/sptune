@@ -1,5 +1,3 @@
-extern crate unicode_width;
-
 use super::super::app::{ActiveBlock, App, RouteId};
 use crate::backend::IoEvent;
 use crate::event::Key;

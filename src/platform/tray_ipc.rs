@@ -158,25 +158,34 @@ mod imp {
         .volume_preview
         .or_else(|| ctx.device.volume_percent.map(|v| v as u8))
         .unwrap_or(50);
+      let mut seen_q = std::collections::HashSet::new();
       let queue: Vec<serde_json::Value> = guard
         .queue_items
         .iter()
-        .take(15)
         .filter_map(|item| match item {
           rspotify::model::PlayableItem::Track(t) => {
+            let uri = t.id.as_ref().map(|id| id.uri()).unwrap_or_default();
+            if uri.is_empty() || !seen_q.insert(uri.clone()) {
+              return None;
+            }
             let artists = t
               .artists
               .iter()
               .map(|a| a.name.as_str())
               .collect::<Vec<_>>()
               .join(", ");
-            Some(serde_json::json!({ "title": t.name, "artist": artists }))
+            Some(serde_json::json!({ "title": t.name, "artist": artists, "uri": uri }))
           }
           rspotify::model::PlayableItem::Episode(e) => {
-            Some(serde_json::json!({ "title": e.name, "artist": e.show.name }))
+            let uri = e.id.uri();
+            if !seen_q.insert(uri.clone()) {
+              return None;
+            }
+            Some(serde_json::json!({ "title": e.name, "artist": e.show.name, "uri": uri }))
           }
           _ => None,
         })
+        .take(15)
         .collect();
       serde_json::json!({
         "title": title,
@@ -193,6 +202,7 @@ mod imp {
         "device": ctx.device.name,
         "queue": queue,
         "theme": theme_json,
+        "window_xid": crate::platform::window::current_xid().unwrap_or(0),
       })
       .to_string()
     } else {
@@ -210,6 +220,7 @@ mod imp {
         "volume": 50,
         "device": "No device",
         "theme": theme_json,
+        "window_xid": crate::platform::window::current_xid().unwrap_or(0),
       })
       .to_string()
     }
@@ -225,7 +236,39 @@ mod imp {
       "repeat" => guard.repeat(),
       "queue" => guard.dispatch(IoEvent::GetQueue),
       "open" => {
+        crate::platform::window::restore_from_tray();
         guard.ui_dirty = true;
+      }
+      s if s.starts_with("play_uri:") => {
+        let uri = s["play_uri:".len()..].trim().to_string();
+        if !uri.is_empty() {
+          let ctx_uri = guard
+            .current_playback_context
+            .as_ref()
+            .and_then(|c| c.context.as_ref())
+            .map(|ctx| ctx.uri.clone());
+          if let Some(ctx_uri) = ctx_uri {
+            guard.dispatch(IoEvent::StartPlaybackAt(Some(ctx_uri), Some(uri)));
+          } else {
+            let mut uris = vec![uri.clone()];
+            let mut after = false;
+            for item in &guard.queue_items {
+              let item_uri = match item {
+                rspotify::model::PlayableItem::Track(t) => t.id.as_ref().map(|id| id.uri()),
+                rspotify::model::PlayableItem::Episode(e) => Some(e.id.uri()),
+                _ => None,
+              };
+              if let Some(u) = item_uri {
+                if u == uri {
+                  after = true;
+                } else if after && !uris.contains(&u) {
+                  uris.push(u);
+                }
+              }
+            }
+            guard.dispatch(IoEvent::StartPlayback(None, Some(uris), Some(0)));
+          }
+        }
       }
       s if s.starts_with("seek:") => {
         if let Ok(ms) = s["seek:".len()..].parse::<u32>() {

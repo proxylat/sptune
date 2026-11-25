@@ -184,6 +184,11 @@ pub async fn handle_matches<'a>(
           .await,
       )
     }
+    "backup" => {
+      let dir = std::path::PathBuf::from(matches.get_one::<String>("dir").unwrap());
+      let write_json = matches.get_flag("json");
+      cli.backup(dir, write_json).await
+    }
     // Clap enforces that one of the things above is specified
     _ => unreachable!(),
   };

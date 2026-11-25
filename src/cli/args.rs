@@ -425,3 +425,23 @@ specify it.",
         .multiple(false),
     )
 }
+
+pub fn backup_subcommand() -> Command {
+  Command::new("backup")
+    .about("Export all playlists and Liked Songs to CSV (and optionally JSON)")
+    .arg(
+      Arg::new("dir")
+        .short('d')
+        .long("dir")
+        .value_name("DIR")
+        .default_value("./sptune-backup")
+        .value_parser(clap::value_parser!(String))
+        .help("Output directory for exported playlists"),
+    )
+    .arg(
+      Arg::new("json")
+        .long("json")
+        .action(ArgAction::SetTrue)
+        .help("Also write a JSON file alongside each CSV"),
+    )
+}

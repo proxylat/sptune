@@ -14,6 +14,74 @@ use image::DynamicImage;
 /// Disk cache TTL: temporary 7-day cache for cover art (Spotify Terms §IV.3.b).
 pub const COVER_TTL_SECS: u64 = 7 * 86400;
 
+/// Terminal graphics capabilities detected without blocking stdin queries.
+#[derive(Debug, Clone, Copy)]
+pub struct CoverCaps {
+  pub kitty: bool,
+  pub font_size: (u16, u16),
+}
+
+impl CoverCaps {
+  pub const fn halfblocks() -> Self {
+    Self {
+      kitty: false,
+      font_size: (10, 20),
+    }
+  }
+
+  pub fn detect() -> Self {
+    let term_prog = std::env::var("TERM_PROGRAM")
+      .unwrap_or_default()
+      .to_ascii_lowercase();
+    let term = std::env::var("TERM")
+      .unwrap_or_default()
+      .to_ascii_lowercase();
+    let kitty = std::env::var_os("KITTY_WINDOW_ID").is_some()
+      || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some()
+      || matches!(term_prog.as_str(), "ghostty" | "kitty" | "wezterm")
+      || term.contains("kitty")
+      || term.contains("ghostty");
+    let font_size = crossterm::terminal::window_size()
+      .ok()
+      .and_then(|ws| {
+        if ws.columns > 0 && ws.rows > 0 && ws.width > 0 && ws.height > 0 {
+          Some(((ws.width / ws.columns).max(1), (ws.height / ws.rows).max(1)))
+        } else {
+          None
+        }
+      })
+      .unwrap_or((10, 20));
+    Self { kitty, font_size }
+  }
+}
+
+/// Render an image into `area` using Unicode half-block (`▀`) cells.
+pub fn draw_halfblock(f: &mut ratatui::Frame, area: ratatui::layout::Rect, img: &DynamicImage) {
+  let w = area.width as u32;
+  let h = (area.height as u32) * 2;
+  if w == 0 || h == 0 {
+    return;
+  }
+  let rgb = img
+    .resize_exact(w, h, image::imageops::FilterType::Triangle)
+    .to_rgb8();
+  let buf = f.buffer_mut();
+  for row in 0..area.height {
+    let py_top = (row as u32) * 2;
+    let py_bot = py_top + 1;
+    for col in 0..area.width {
+      if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
+        let top = rgb.get_pixel(col as u32, py_top).0;
+        let bot = rgb.get_pixel(col as u32, py_bot).0;
+        cell
+          .set_symbol("▀")
+          .set_fg(ratatui::style::Color::Rgb(top[0], top[1], top[2]))
+          .set_bg(ratatui::style::Color::Rgb(bot[0], bot[1], bot[2]));
+      }
+    }
+  }
+}
+
 /// Largest dimension fetched images are downscaled to before caching.
 /// 640px matches the biggest `album.images` entry and is plenty for a
 /// terminal box; keeps the disk cache small.

@@ -108,6 +108,13 @@ pub fn handle_app(key: Key, app: &mut App) {
     _ if key == app.user_config.keys.help => {
       app.set_current_route_state(Some(ActiveBlock::HelpMenu), None);
     }
+    Key::Char('_') if app.get_current_route().active_block != ActiveBlock::Input => {
+      if !crate::platform::window::minimize_to_tray() {
+        app.handle_error(anyhow::anyhow!(
+          "Run `sptune --window` so minimize-to-tray only hides sptune instead of your whole terminal"
+        ));
+      }
+    }
 
     _ if key == app.user_config.keys.shuffle => {
       app.shuffle();

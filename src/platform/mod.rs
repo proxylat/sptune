@@ -7,6 +7,7 @@ pub mod soloist;
 pub mod spotify;
 pub mod tray;
 pub mod tray_ipc;
+pub mod window;
 #[cfg(windows)]
 pub mod windows;
 

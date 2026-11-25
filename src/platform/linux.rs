@@ -142,44 +142,6 @@ pub fn kill_process(pid: u32) {
 }
 
 // Terminate every process whose cmdline mentions spotify: CONT (a stopped
-// process queues signals without handling them), TERM for a clean exit,
-// then KILL whatever survived the grace period.
-#[cfg(target_os = "linux")]
-pub fn kill_all() {
-  let targets: Vec<u32> = {
-    let mut v = Vec::new();
-    if let Ok(entries) = std::fs::read_dir("/proc") {
-      for entry in entries.flatten() {
-        if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
-          if cmdline_of(pid).to_lowercase().contains("spotify") {
-            v.push(pid);
-          }
-        }
-      }
-    }
-    v
-  };
-  if targets.is_empty() {
-    return;
-  }
-  for pid in &targets {
-    let _ = std::process::Command::new("kill")
-      .args(["-CONT", &pid.to_string()])
-      .output();
-  }
-  for pid in &targets {
-    let _ = std::process::Command::new("kill")
-      .args(["-TERM", &pid.to_string()])
-      .output();
-  }
-  std::thread::sleep(std::time::Duration::from_millis(300));
-  for pid in &targets {
-    if std::path::Path::new(format!("/proc/{pid}").as_str()).exists() {
-      kill_process(*pid);
-    }
-  }
-}
-
 // Topmost process whose cmdline mentions spotify (its parent's does not) —
 // the Chromium browser process sptune would have launched.
 #[cfg(target_os = "linux")]
@@ -203,6 +165,3 @@ pub fn find_root_pid() -> Option<u32> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn apply_memory_limits(_pids: &[(u32, String)]) {}
-
-#[cfg(not(target_os = "linux"))]
-pub fn suspend_and_trim(_pid: u32, _cmd: &str) {}

@@ -123,8 +123,8 @@ pub(super) fn draw_music_lyrics(f: &mut Frame, app: &App, lyrics_rect: Rect, viz
     .rposition(|(ms, _)| *ms <= progress_ms)
     .unwrap_or(0);
 
-  // Center a fixed-height window around the current line.
-  let window = 11usize;
+  // Fill as much of the Lyrics block vertically as fits.
+  let window = (lyrics_rect.height.saturating_sub(2) as usize).max(1);
   let (start, end) = if lyrics.is_empty() {
     (0, 0)
   } else {
@@ -206,9 +206,11 @@ pub(super) fn draw_music_lyrics(f: &mut Frame, app: &App, lyrics_rect: Rect, viz
 }
 
 fn viz_tier_style(row_frac: f32, app: &App) -> Style {
-  let color = if row_frac >= 0.80 {
+  let color = if row_frac >= 0.85 {
     ratatui::style::Color::Rgb(244, 63, 94)
-  } else if row_frac >= 0.50 {
+  } else if row_frac >= 0.68 {
+    ratatui::style::Color::Rgb(249, 115, 22)
+  } else if row_frac >= 0.48 {
     ratatui::style::Color::Rgb(250, 204, 21)
   } else {
     app.user_config.theme.playbar_progress
@@ -680,34 +682,15 @@ pub(super) fn draw_music_panel(f: &mut Frame, app: &App, rects: &MusicViewRects)
   )
   .map(|(id, _)| id);
 
-  let is_kitty = app
-    .cover_picker
-    .as_ref()
-    .is_some_and(|p| p.protocol_type() == ratatui_image::picker::ProtocolType::Kitty);
-  if !is_kitty {
+  if !app.cover_caps.kitty {
     if let (Some(want_id), Some((have_id, img))) = (current_id, &app.cover_art) {
       if &want_id == have_id && cover_inner.width > 0 && cover_inner.height > 0 {
-        if let Ok(mut guard) = app.cover_protocol.lock() {
-          let needs_init = guard.as_ref().is_none_or(|(id, _)| id != &want_id);
-          if needs_init {
-            let picker = app
-              .cover_picker
-              .clone()
-              .unwrap_or_else(ratatui_image::picker::Picker::halfblocks);
-            *guard = Some((want_id, picker.new_resize_protocol(img.clone())));
-          }
-          if let Some((_, proto)) = guard.as_mut() {
-            let font_px = app
-              .cover_picker
-              .as_ref()
-              .map_or((10, 20), |p| p.font_size());
-            let img_area = fit_cover_rect(cover_inner, (img.width(), img.height()), font_px);
-            let widget = ratatui_image::StatefulImage::default().resize(
-              ratatui_image::Resize::Fit(Some(image::imageops::FilterType::Lanczos3)),
-            );
-            f.render_stateful_widget(widget, img_area, proto);
-          }
-        }
+        let img_area = fit_cover_rect(
+          cover_inner,
+          (img.width(), img.height()),
+          app.cover_caps.font_size,
+        );
+        crate::cover_art::draw_halfblock(f, img_area, img);
       }
     }
   }

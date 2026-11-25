@@ -3,7 +3,7 @@ name = "sptune"
 description = "A terminal user interface for Spotify"
 keywords = ["spotify", "tui", "cli", "terminal"]
 categories = ["command-line-utilities"]
-version = "2.0.0"
+version = "2.1.0"
 authors = ["Proxy Works"]
 edition = "2021"
 license = "MIT"
@@ -11,32 +11,37 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [profile.release]
-lto = "fat"
-codegen-units = 1
+lto = "thin"
 strip = true
+
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+debug = 0
+strip = false
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-base64 = "0.23"
+base64 = "0.22"
 anyhow = "1.0.43"
 rspotify = { version = "0.16.1", default-features = false, features = ["client-reqwest", "reqwest-rustls-tls"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 serde_yml = "0.0.13"
 dirs = "7"
-clap = "4.6.5"
+clap = { version = "4.6.5", default-features = false, features = ["std", "help", "usage"] }
 unicode-width = "0.2.2"
-arboard = "3.6.1"
+arboard = { version = "3.6.1", default-features = false }
 crossterm = "0.29.0"
-tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "time", "net", "io-util", "fs"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
+tokio = { version = "1.53.1", features = ["rt", "sync", "time", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 chrono = "0.4"
 futures = "0.3"
-futures-util = "0.3.32"
 clap_complete = "4.6.5"
-tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-ratatui-image = { version = "10", default-features = false, features = ["crossterm"] }
 rustfft = "6.4.1"
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.27.0"
@@ -45,15 +50,15 @@ win-gsmtc = "0.1"
 [target.'cfg(target_os = "linux")'.dependencies]
 libpulse-binding = "2.30.1"
 libpulse-simple-binding = "2.29.0"
+tokio = { version = "1.53.1", features = ["io-util"] }
 # tokio-only: no async-io background threads; runs on our watcher runtime.
 zbus = { version = "6", default-features = false, features = ["tokio", "proxy", "service"] }
-
 
 [patch.crates-io]
 rspotify-model = { path = "vendor/rspotify-model" }
 
 [dev-dependencies]
-criterion = "0.8.2"
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 iai-callgrind = "0.16.1"
 
 [[bench]]
