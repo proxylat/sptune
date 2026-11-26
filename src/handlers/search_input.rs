@@ -145,8 +145,7 @@ fn attempt_process_uri(app: &mut App, input: &str, base: &str, sep: &str) -> boo
 
   let (playlist_id, matched) = spotify_resource_id(base, input, sep, "playlist");
   if matched {
-    // The opened playlist is added to "For you" once its name is known.
-    app.pending_for_you_add = Some(playlist_id.clone());
+    app.track_table.context = None;
     app.dispatch(IoEvent::GetPlaylistItems(playlist_id, 0));
     return true;
   }

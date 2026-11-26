@@ -899,9 +899,48 @@ pub fn draw_show_episodes(f: &mut Frame, app: &App, layout_chunk: Rect) {
 
 pub fn draw_made_for_you(f: &mut Frame, app: &App, layout_chunk: Rect) {
   let current_route = app.get_current_route();
+  let paste_h = if layout_chunk.height >= 6 { 3 } else { 0 };
+  let (paste_rect, list_rect) = (
+    Rect::new(layout_chunk.x, layout_chunk.y, layout_chunk.width, paste_h),
+    Rect::new(
+      layout_chunk.x,
+      layout_chunk.y + paste_h,
+      layout_chunk.width,
+      layout_chunk.height.saturating_sub(paste_h),
+    ),
+  );
+  if paste_h > 0 {
+    let paste_block = Block::default()
+      .borders(Borders::ALL)
+      .border_type(if app.user_config.terminal.unicode_borders {
+        BorderType::Rounded
+      } else {
+        BorderType::Plain
+      })
+      .title("Add playlist to For you (Ctrl+V or click to paste link)")
+      .border_style(Style::default().fg(app.user_config.theme.inactive));
+    let preview = app
+      .for_you_paste_input
+      .as_deref()
+      .filter(|s| !s.is_empty())
+      .unwrap_or("https://open.spotify.com/playlist/... or spotify:playlist:...");
+    let style = if app
+      .for_you_paste_input
+      .as_ref()
+      .is_some_and(|s| !s.is_empty())
+    {
+      Style::default().fg(app.user_config.theme.text)
+    } else {
+      Style::default().fg(app.user_config.theme.inactive)
+    };
+    f.render_widget(
+      Paragraph::new(Span::styled(preview, style)).block(paste_block),
+      paste_rect,
+    );
+  }
   // The List content area is width-2 (borders eat 2 cols); name + " ✕" must
   // fit, so the name field gets width-4.
-  let max_name = layout_chunk.width.saturating_sub(4) as usize;
+  let max_name = list_rect.width.saturating_sub(4) as usize;
   let names: Vec<String> = (0..app.made_for_you_len())
     .filter_map(|index| app.made_for_you_name(index))
     .map(|name| {
@@ -918,7 +957,7 @@ pub fn draw_made_for_you(f: &mut Frame, app: &App, layout_chunk: Rect) {
   draw_selectable_list(
     f,
     app,
-    layout_chunk,
+    list_rect,
     "For you",
     &names,
     highlight_state,

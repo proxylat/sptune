@@ -12,6 +12,7 @@ pub mod app;
 pub mod backend;
 pub mod client_creds;
 pub mod cover_art;
+pub mod log_file;
 pub mod metadata;
 pub mod mock;
 pub mod platform;

@@ -115,10 +115,12 @@ pub fn launch(cfg: &SoloistConfig, api_key: &str, data_dir: &Path) -> anyhow::Re
   std::thread::spawn(move || {
     if let Ok(status) = child.wait() {
       if status.code() == Some(10) {
-        eprintln!(
+        let msg = format!(
           "soloist exited ({}) — the build may have expired (90-day lifetime), download a newer one from {}",
           status, DOWNLOADS_URL
         );
+        crate::log_file::warn(&msg);
+        eprintln!("{msg}");
       }
     }
   });

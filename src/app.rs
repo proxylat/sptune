@@ -457,14 +457,11 @@ pub struct App {
   pub made_for_you_offset: u32,
   pub playlist_tracks: Option<Page<PlaylistItem>>,
   pub made_for_you_tracks: Option<Page<PlaylistItem>>,
-  // Playlists the user pasted into the search box, as (name, playlist id).
+  // Playlists the user pinned in "For you", as (name, playlist id).
   pub made_for_you_custom: Vec<(String, String)>,
   // The playlist opened via a link or search (name, id), so the song table
   // title can show its name even when no sidebar context is set.
   pub playlist_view: Option<(String, String)>,
-  // Set when a playlist URL is pasted into the search box; cleared once the
-  // opened playlist has been added to "For you".
-  pub pending_for_you_add: Option<String>,
   pub playlists: Option<Page<SimplifiedPlaylist>>,
   pub recently_played: SpotifyResultAndSelectedIndex<Option<CursorBasedPage<PlayHistory>>>,
   pub search_results: SearchResult,
@@ -572,6 +569,8 @@ pub struct App {
   pub music_left_pct: Option<u16>,
   pub music_lyrics_pct: Option<u16>,
   pub music_cover_height: Option<u16>,
+  pub music_copied_until: Option<std::time::Instant>,
+  pub for_you_paste_input: Option<String>,
   pub hidden_library_sections: Vec<String>,
   pub config_theme: Theme,
   pub theme_preset_index: Option<usize>,
@@ -650,7 +649,6 @@ impl Default for App {
       made_for_you_tracks: None,
       made_for_you_custom: vec![],
       playlist_view: None,
-      pending_for_you_add: None,
       playlists: None,
       search_results: SearchResult {
         hovered_block: SearchResultBlock::SongSearch,
@@ -736,6 +734,8 @@ impl Default for App {
       music_left_pct: None,
       music_lyrics_pct: None,
       music_cover_height: None,
+      music_copied_until: None,
+      for_you_paste_input: None,
       hovered_library_index: None,
       hovered_playlist_index: None,
       hovered_list_index: None,
@@ -1380,7 +1380,9 @@ impl App {
   pub fn handle_error(&mut self, e: anyhow::Error) {
     // Debug keeps the full anyhow chain (rspotify's parsed Spotify message);
     // Display would reduce a 403 to a bare status code.
-    self.push_api_error(format!("{e:?}"));
+    let msg = format!("{e:?}");
+    crate::log_file::error(&msg);
+    self.push_api_error(msg);
     // Don't pile Error routes: repeated startup failures would trap Esc
     // behind a stack of identical error screens.
     if self.get_current_route().id != RouteId::Error {
@@ -1640,18 +1642,17 @@ impl App {
       Some(CurrentPlaybackContext {
         item: Some(PlayableItem::Track(track)),
         ..
-      }) => Some(format!(
-        "https://open.spotify.com/track/{}",
-        track
-          .id
-          .as_ref()
-          .map(|id| id.to_string())
-          .unwrap_or_default()
-      )),
+      }) => track
+        .id
+        .as_ref()
+        .map(|id| format!("https://open.spotify.com/track/{}", id.id())),
       Some(CurrentPlaybackContext {
         item: Some(PlayableItem::Episode(episode)),
         ..
-      }) => Some(format!("https://open.spotify.com/episode/{}", episode.id)),
+      }) => Some(format!(
+        "https://open.spotify.com/episode/{}",
+        episode.id.id()
+      )),
       _ => None,
     };
     if let Some(url) = url {
@@ -1691,19 +1692,18 @@ impl App {
       Some(CurrentPlaybackContext {
         item: Some(PlayableItem::Track(track)),
         ..
-      }) => Some(format!(
-        "https://open.spotify.com/album/{}",
-        track
-          .album
-          .id
-          .as_ref()
-          .map(|id| id.to_string())
-          .unwrap_or_default()
-      )),
+      }) => track
+        .album
+        .id
+        .as_ref()
+        .map(|id| format!("https://open.spotify.com/album/{}", id.id())),
       Some(CurrentPlaybackContext {
         item: Some(PlayableItem::Episode(episode)),
         ..
-      }) => Some(format!("https://open.spotify.com/show/{}", episode.show.id)),
+      }) => Some(format!(
+        "https://open.spotify.com/show/{}",
+        episode.show.id.id()
+      )),
       _ => None,
     };
     if let Some(url) = url {
@@ -2284,14 +2284,97 @@ impl App {
   }
 
   /// Add the playlist the user pasted into the search box to "For you".
+  /// If an entry with `id` already exists (e.g. placeholder) and `name` is
+  /// non-empty, update its display name in place.
   pub fn add_pasted_playlist_to_for_you(&mut self, name: String, id: String) {
-    if !self
+    if let Some(entry) = self
+      .made_for_you_custom
+      .iter_mut()
+      .find(|(_, existing)| existing == &id)
+    {
+      if !name.is_empty() {
+        entry.0 = name;
+      }
+      return;
+    }
+    let display = if name.is_empty() { id.clone() } else { name };
+    self.made_for_you_custom.push((display, id));
+  }
+
+  /// Extract a Spotify playlist ID from a `https://open.spotify.com/playlist/<id>`
+  /// URL or `spotify:playlist:<id>` URI.
+  pub fn extract_playlist_id(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if let Some(rest) = s.strip_prefix("spotify:playlist:") {
+      let id = rest.split([':', '?', '#']).next()?.trim();
+      return (!id.is_empty()).then(|| id.to_string());
+    }
+    if let Some(pos) = s.find("open.spotify.com/playlist/") {
+      let after = &s[pos + "open.spotify.com/playlist/".len()..];
+      let id = after.split(['/', '?', '#']).next()?.trim();
+      return (!id.is_empty()).then(|| id.to_string());
+    }
+    None
+  }
+
+  /// Extract all unique Spotify playlist IDs from whitespace/comma/semicolon-separated text.
+  pub fn extract_playlist_ids(raw: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for token in raw.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';')) {
+      if let Some(id) = Self::extract_playlist_id(token) {
+        if !ids.contains(&id) {
+          ids.push(id);
+        }
+      }
+    }
+    ids
+  }
+
+  /// Parse one or more pasted playlist links/URIs and pin them into "For you".
+  /// A single link also opens immediately; multiple links stay in "For you" and
+  /// resolve each playlist's display name in the background.
+  pub fn paste_playlist_to_for_you(&mut self, raw: &str) -> bool {
+    let ids = Self::extract_playlist_ids(raw);
+    if ids.is_empty() {
+      return false;
+    }
+    for id in &ids {
+      self.add_pasted_playlist_to_for_you(String::new(), id.clone());
+    }
+    if let Some(pos) = self
       .made_for_you_custom
       .iter()
-      .any(|(_, existing)| existing == &id)
+      .position(|(_, existing)| existing == &ids[0])
     {
-      let display = if name.is_empty() { id.clone() } else { name };
-      self.made_for_you_custom.push((display, id));
+      self.made_for_you_index = pos;
+    }
+    if ids.len() == 1 {
+      self.track_table.context = Some(TrackTableContext::MadeForYou);
+      self.playlist_offset = 0;
+      self.made_for_you_offset = 0;
+      self.dispatch(IoEvent::GetMadeForYouPlaylistItems(ids[0].clone(), 0));
+    } else {
+      for id in ids {
+        self.dispatch(IoEvent::ResolveForYouPlaylistName(id));
+      }
+    }
+    true
+  }
+
+  /// Read the system clipboard and pin any Spotify playlist link into "For you".
+  pub fn paste_clipboard_to_for_you(&mut self) {
+    if self.clipboard.is_none() {
+      self.clipboard = Clipboard::new().ok();
+    }
+    let text = self
+      .clipboard
+      .as_mut()
+      .and_then(|cb| cb.get_text().ok())
+      .unwrap_or_default();
+    if !self.paste_playlist_to_for_you(&text) {
+      self.handle_error(anyhow!(
+        "Clipboard does not contain a Spotify playlist URL or URI (expected open.spotify.com/playlist/... or spotify:playlist:...)"
+      ));
     }
   }
 
@@ -3544,6 +3627,43 @@ mod tests {
     assert_eq!(app.made_for_you_len(), 2);
     assert_eq!(app.made_for_you_playlist_id(0), Some("mix1".to_string()));
     assert_eq!(app.made_for_you_name(0), Some("My Mix".to_string()));
+  }
+
+  #[test]
+  fn extract_playlist_id_and_paste_adds_to_for_you() {
+    assert_eq!(
+      App::extract_playlist_id(
+        "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc123"
+      ),
+      Some("37i9dQZF1DXcBWIGoYBM5M".to_string())
+    );
+    assert_eq!(
+      App::extract_playlist_id("spotify:playlist:1234567890"),
+      Some("1234567890".to_string())
+    );
+    assert_eq!(App::extract_playlist_id("not a playlist"), None);
+
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.io_tx = Some(tx);
+    assert!(app.paste_playlist_to_for_you("https://open.spotify.com/playlist/abc123?si=1"));
+    assert_eq!(
+      rx.try_iter().collect::<Vec<_>>(),
+      vec![IoEvent::GetMadeForYouPlaylistItems("abc123".into(), 0)]
+    );
+
+    // Multiple links (newline/space/comma-separated, with duplicates) pin all and resolve names.
+    assert!(app.paste_playlist_to_for_you(
+      "https://open.spotify.com/playlist/p1?si=1\nspotify:playlist:p2, https://open.spotify.com/playlist/p1"
+    ));
+    assert_eq!(app.made_for_you_len(), 3);
+    assert_eq!(
+      rx.try_iter().collect::<Vec<_>>(),
+      vec![
+        IoEvent::ResolveForYouPlaylistName("p1".into()),
+        IoEvent::ResolveForYouPlaylistName("p2".into()),
+      ]
+    );
   }
 
   #[test]

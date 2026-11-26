@@ -189,6 +189,7 @@ fn panic_hook(info: &PanicHookInfo<'_>) {
 
   eprintln!("thread '<unnamed>' panicked at '{}' ({})", msg, location);
   eprintln!("{:?}", Backtrace::capture());
+  sptune::log_file::error(&format!("panic at {location}: {msg}"));
   // Panic = sptune is going down: resume any suspended Spotify helpers and leave Spotify running.
   if let Some(root) = crate::platform::spotify::find_root_pid() {
     crate::platform::spotify::resume_processes(root);
@@ -564,6 +565,15 @@ of the app. Beware that this comes at a CPU cost!",
     }
     if let Some(uri) = saved.last_played_track.take() {
       app_guard.saved_last_track = Some(uri);
+    }
+    // Avoid flashing the default "For you" paste box before AutoRestore loads
+    // the saved playlist page.
+    if saved
+      .last_page
+      .as_deref()
+      .is_some_and(|p| p.starts_with("playlist:"))
+    {
+      app_guard.push_navigation_stack(RouteId::TrackTable, ActiveBlock::Empty);
     }
   }
   if is_mock {

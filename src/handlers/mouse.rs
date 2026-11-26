@@ -546,17 +546,32 @@ fn handle_left_click(x: u16, y: u16, app: &mut App) -> bool {
     // clicking the device they are already on.
     ActiveBlock::SelectDevice => return handle_device_list_click(x, y, app),
     ActiveBlock::MusicView => {
-      if let Some(PlayableItem::Track(track)) = app
-        .current_playback_context
-        .as_ref()
-        .map(|c| &c.item)
-        .unwrap_or(&None)
+      let rects = crate::tui::music_view::music_view_rects(
+        app,
+        Rect::new(0, 0, app.size.width, app.size.height),
+      );
+      if x >= rects.details.x
+        && x < rects.details.x + rects.details.width
+        && y >= rects.details.y
+        && y < rects.details.y + rects.details.height
       {
-        let panel = Layout::default()
-          .direction(Direction::Horizontal)
-          .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-          .split(Rect::new(0, 0, app.size.width, app.size.height))[1];
-        if x >= panel.x && x < panel.x + panel.width && y >= panel.y && y < panel.y + panel.height {
+        app.copy_song_url();
+        app.music_copied_until =
+          Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+        app.mark_dirty();
+        return false;
+      }
+      if x >= rects.cover.x
+        && x < rects.cover.x + rects.cover.width
+        && y >= rects.cover.y
+        && y < rects.cover.y + rects.cover.height
+      {
+        if let Some(PlayableItem::Track(track)) = app
+          .current_playback_context
+          .as_ref()
+          .map(|c| &c.item)
+          .unwrap_or(&None)
+        {
           if let Some(artist) = track.artists.first() {
             if let Some(id) = &artist.id {
               app.get_artist(id.id().to_string(), artist.name.clone());
@@ -1327,26 +1342,32 @@ fn handle_hover(x: u16, y: u16, app: &mut App) {
         ),
         _ => (0, 0),
       };
-      let list_rect = Rect {
-        x: right.x,
-        y: right.y + 1,
-        width: right.width,
-        height: right.height.saturating_sub(1),
-      };
+      let (_, _, list_rect) = layout::artist_layout(right, shown);
       if shown == ArtistBlock::TopTracks {
         table_row_index(y, list_rect, count, sel)
       } else {
         list_row_index(y, list_rect, count, sel)
       }
     }
+    RouteId::MadeForYou => {
+      let paste_h = if right.height >= 6 { 3 } else { 0 };
+      let list_rect = Rect::new(
+        right.x,
+        right.y + paste_h,
+        right.width,
+        right.height.saturating_sub(paste_h),
+      );
+      list_row_index(y, list_rect, app.made_for_you_len(), app.made_for_you_index)
+    }
     _ => {
-      if let Some(scroll) = layout::list_scroll(
+      if y < right.y + 2 || y >= right.y + right.height {
+        None
+      } else if let Some(scroll) = layout::list_scroll(
         app,
         content_block_at(app).unwrap_or(ActiveBlock::TrackTable),
         right,
       ) {
-        // generic fallback via list_scroll geometry
-        let y_rel = y.saturating_sub(right.y + 1) as usize;
+        let y_rel = (y - (right.y + 2)) as usize;
         let idx = scroll.offset + y_rel;
         if idx < scroll.count {
           Some(idx)
@@ -1825,6 +1846,7 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
           app.playlist_filter = Some(String::new());
           app.playlist_filter_idx = 0;
           app.playlist_filter_cursor_position = 0;
+          app.track_table.scroll_offset = 0;
           app.set_current_route_state(Some(ActiveBlock::TrackTable), None);
           return false;
         }
@@ -1832,36 +1854,38 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       }
       let has_more = app.track_table_has_more();
       let count = app.track_table.tracks.len() + usize::from(has_more);
-      // The view is wheel-scrolled by scroll_offset (selection stays put), so
-      // the clicked row must map through the RENDERED offset, not the
-      // selection-derived one.
       let viewport = chunk.height.saturating_sub(3) as usize;
+      let filtered: Option<Vec<usize>> = if app.playlist_search_active() {
+        Some(
+          app
+            .track_table
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| app.playlist_filter_matches(t))
+            .map(|(i, _)| i)
+            .collect(),
+        )
+      } else {
+        None
+      };
+      let display_count = filtered.as_ref().map_or(count, Vec::len);
+      // Clamp scroll_offset against `display_count` (not total `count`), so
+      // a 2nd search after scrolling deep into a playlist still maps row 0..
+      // to the visible filtered results.
       let offset = app
         .track_table
         .scroll_offset
-        .min(count.saturating_sub(viewport));
+        .min(display_count.saturating_sub(viewport));
       let raw_index = offset + (y - (chunk.y + 2)) as usize;
-
-      // When the in-playlist search filter is active, the rendered rows are a
-      // subset of app.track_table.tracks. Map the display index back to the
-      // original track index so the correct track plays / is removed.
-      let (display_count, index) = if app.playlist_search_active() {
-        let filtered: Vec<usize> = app
-          .track_table
-          .tracks
-          .iter()
-          .enumerate()
-          .filter(|(_, t)| app.playlist_filter_matches(t))
-          .map(|(i, _)| i)
-          .collect();
-        let display_count = filtered.len();
+      let index = if let Some(ref f) = filtered {
         if raw_index < display_count {
-          (display_count, filtered[raw_index])
+          f[raw_index]
         } else {
-          (display_count, raw_index)
+          raw_index
         }
       } else {
-        (count, raw_index)
+        raw_index
       };
 
       if raw_index < display_count {
@@ -2084,11 +2108,25 @@ fn handle_content_click(x: u16, y: u16, chunk: Rect, app: &mut App) -> bool {
       }
     }
     RouteId::MadeForYou => {
-      // List widget (items start at chunk.y+1); clicking the trailing ✕
-      // removes the playlist from For you.
-      if let Some(index) = list_row_index(y, chunk, app.made_for_you_len(), app.made_for_you_index)
-      {
-        if x >= chunk.x + chunk.width.saturating_sub(2) {
+      let paste_h = if chunk.height >= 6 { 3 } else { 0 };
+      if paste_h > 0 && y < chunk.y + paste_h {
+        app.set_current_route_state(Some(ActiveBlock::MadeForYou), None);
+        app.paste_clipboard_to_for_you();
+        return false;
+      }
+      let list_chunk = Rect::new(
+        chunk.x,
+        chunk.y + paste_h,
+        chunk.width,
+        chunk.height.saturating_sub(paste_h),
+      );
+      if let Some(index) = list_row_index(
+        y,
+        list_chunk,
+        app.made_for_you_len(),
+        app.made_for_you_index,
+      ) {
+        if x >= list_chunk.x + list_chunk.width.saturating_sub(2) {
           app.remove_pasted_playlist_from_for_you(index);
         } else {
           app.made_for_you_index = index;
@@ -3439,8 +3477,8 @@ mod tests {
 
   #[test]
   fn made_for_you_row_click_dispatches_expand() {
-    // MadeForYou renders as a List widget (items start at chunk.y+1); chunk.y=6
-    // here → the first playlist is y=7.
+    // MadeForYou renders a 3-row paste box at chunk.y..chunk.y+3, then the
+    // List widget (items start at chunk.y+4); chunk.y=6 → first playlist is y=10.
     SCROLLBAR_DRAG.with(|d| *d.borrow_mut() = None);
     PLAYBAR_DRAG.with(|d| *d.borrow_mut() = None);
     let mut app = App::default();
@@ -3452,7 +3490,7 @@ mod tests {
     let (tx, rx) = std::sync::mpsc::channel();
     app.io_tx = Some(tx);
 
-    handle_mouse(click_event(150, 7), &mut app);
+    handle_mouse(click_event(150, 10), &mut app);
     assert_eq!(app.made_for_you_index, 0);
     let dispatched: Vec<IoEvent> = rx.try_iter().collect();
     assert_eq!(
@@ -4021,6 +4059,37 @@ mod tests {
   }
 
   #[test]
+  fn second_playlist_search_after_scroll_clicks_filtered_track() {
+    // Regression: after 1st search scrolls deep into a large playlist, a 2nd
+    // search with few matches must clamp scroll_offset to display_count so row 0
+    // is still clickable.
+    let mut app = track_table_app(120);
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.track_table.tracks[110].name = "target-one".to_string();
+    app.track_table.tracks[5].name = "second-match".to_string();
+    app.track_table.scroll_offset = 100;
+    app.playlist_filter = Some("second-match".to_string());
+
+    handle_mouse(click_event(150, 8), &mut app);
+    assert_eq!(app.track_table.selected_index, 5);
+    assert!(app.playlist_filter.is_none());
+  }
+
+  #[test]
+  fn music_view_details_click_sets_copied_banner() {
+    let mut app = playback_app();
+    app.push_navigation_stack(RouteId::MusicView, ActiveBlock::MusicView);
+    let rects = crate::tui::music_view::music_view_rects(&app, Rect::new(0, 0, 200, 50));
+    handle_mouse(
+      click_event(rects.details.x + 2, rects.details.y + 2),
+      &mut app,
+    );
+    assert!(app
+      .music_copied_until
+      .is_some_and(|t| t > std::time::Instant::now()));
+  }
+
+  #[test]
   fn escape_from_music_view_restores_the_previous_route() {
     let mut app = track_table_app(5);
     let before = app.get_current_route().active_block;
@@ -4071,5 +4140,122 @@ mod tests {
         0
       )]
     );
+  }
+
+  fn moved_event(column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+      kind: MouseEventKind::Moved,
+      column,
+      row,
+      modifiers: KeyModifiers::NONE,
+    }
+  }
+
+  #[test]
+  fn made_for_you_hover_maps_below_paste_box() {
+    let mut app = playback_app();
+    app.user_config.behavior.enable_animations = true;
+    app.made_for_you_custom = vec![
+      ("Daily Mix 1".into(), "mix1".into()),
+      ("Daily Mix 2".into(), "mix2".into()),
+    ];
+    app.push_navigation_stack(RouteId::MadeForYou, ActiveBlock::MadeForYou);
+    let (routes, _, _) = main_layout(&app).unwrap();
+    let (_, right) = layout::sidebar_content_split(&app, routes);
+
+    // Hovering inside the top 3-row paste box must NOT highlight list rows.
+    handle_mouse(moved_event(right.x + 2, right.y + 1), &mut app);
+    assert_eq!(app.hovered_list_index, None);
+
+    // First item in the bottom list starts at right.y + paste_h(3) + border(1).
+    handle_mouse(moved_event(right.x + 2, right.y + 4), &mut app);
+    assert_eq!(app.hovered_list_index, Some(0));
+    handle_mouse(moved_event(right.x + 2, right.y + 5), &mut app);
+    assert_eq!(app.hovered_list_index, Some(1));
+  }
+
+  #[test]
+  fn artist_hover_maps_below_header_and_tabs() {
+    let mut app = playback_app();
+    app.user_config.behavior.enable_animations = true;
+    app.artist = Some(crate::app::Artist {
+      artist_id: "art1".into(),
+      artist_name: "Test Artist".into(),
+      albums: rspotify::model::Page {
+        href: String::new(),
+        items: vec![],
+        limit: 0,
+        next: None,
+        offset: 0,
+        previous: None,
+        total: 0,
+      },
+      singles: rspotify::model::Page {
+        href: String::new(),
+        items: vec![],
+        limit: 0,
+        next: None,
+        offset: 0,
+        previous: None,
+        total: 0,
+      },
+      eps: rspotify::model::Page {
+        href: String::new(),
+        items: vec![],
+        limit: 0,
+        next: None,
+        offset: 0,
+        previous: None,
+        total: 0,
+      },
+      appears_on: rspotify::model::Page {
+        href: String::new(),
+        items: vec![],
+        limit: 0,
+        next: None,
+        offset: 0,
+        previous: None,
+        total: 0,
+      },
+      related_artists: vec![],
+      top_tracks: vec![
+        serde_json::from_value(serde_json::json!({
+          "album": { "album_type": null, "artists": [], "available_markets": [], "external_urls": {}, "href": null, "id": null, "images": [], "name": "A", "release_date": null, "release_date_precision": null },
+          "artists": [], "available_markets": [], "disc_number": 1, "duration_ms": 1000,
+          "explicit": false, "external_ids": {}, "external_urls": {}, "href": null,
+          "id": "track1", "is_local": false, "is_playable": true, "name": "Song 1",
+          "popularity": 0, "preview_url": null, "track_number": 1, "type": "track",
+          "uri": "spotify:track:track1"
+        }))
+        .unwrap(),
+      ],
+      top_tracks_has_more: false,
+      top_tracks_total: 1,
+      selected_album_index: 0,
+      selected_singles_index: 0,
+      selected_eps_index: 0,
+      selected_appears_on_index: 0,
+      selected_related_artist_index: 0,
+      selected_top_track_index: 0,
+      artist_hovered_block: ArtistBlock::TopTracks,
+      artist_selected_block: ArtistBlock::TopTracks,
+      followers: None,
+      genres: vec![],
+      image_url: None,
+      is_following: None,
+      meta: None,
+    });
+    app.push_navigation_stack(RouteId::Artist, ActiveBlock::ArtistBlock);
+    let (routes, _, _) = main_layout(&app).unwrap();
+    let (_, right) = layout::sidebar_content_split(&app, routes);
+    let (_, _, list_rect) = layout::artist_layout(right, ArtistBlock::TopTracks);
+
+    // Hovering inside the top artist header must NOT highlight tracks.
+    handle_mouse(moved_event(right.x + 2, right.y + 2), &mut app);
+    assert_eq!(app.hovered_list_index, None);
+
+    // First track row in the bottom table is list_rect.y + 2 (border + header).
+    handle_mouse(moved_event(list_rect.x + 2, list_rect.y + 2), &mut app);
+    assert_eq!(app.hovered_list_index, Some(0));
   }
 }

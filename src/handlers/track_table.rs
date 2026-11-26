@@ -32,6 +32,7 @@ pub fn handler(key: Key, app: &mut App) {
           query.insert(byte_idx, c);
           app.playlist_filter_idx += 1;
           app.playlist_filter_cursor_position += cw(c);
+          app.track_table.scroll_offset = 0;
         }
       }
       Key::Backspace | Key::Ctrl('h') => {
@@ -45,6 +46,7 @@ pub fn handler(key: Key, app: &mut App) {
             app.playlist_filter_cursor_position = app
               .playlist_filter_cursor_position
               .saturating_sub(cw(removed));
+            app.track_table.scroll_offset = 0;
           }
         }
       }
@@ -88,6 +90,19 @@ pub fn handler(key: Key, app: &mut App) {
         }
       }
       Key::Esc => {
+        app.playlist_filter = None;
+        app.playlist_filter_idx = 0;
+        app.playlist_filter_cursor_position = 0;
+      }
+      Key::Enter => {
+        if let Some(first_idx) = app
+          .track_table
+          .tracks
+          .iter()
+          .position(|t| app.playlist_filter_matches(t))
+        {
+          app.track_table.selected_index = first_idx;
+        }
         app.playlist_filter = None;
         app.playlist_filter_idx = 0;
         app.playlist_filter_cursor_position = 0;

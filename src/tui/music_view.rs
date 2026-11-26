@@ -695,6 +695,14 @@ pub(super) fn draw_music_panel(f: &mut Frame, app: &App, rects: &MusicViewRects)
     }
   }
 
+  let details_title = if app
+    .music_copied_until
+    .is_some_and(|t| t > std::time::Instant::now())
+  {
+    "Track Details — Copied link!"
+  } else {
+    "Track Details (click to copy link)"
+  };
   let block = Block::default()
     .borders(Borders::ALL)
     .border_type(if app.user_config.terminal.unicode_borders {
@@ -702,7 +710,7 @@ pub(super) fn draw_music_panel(f: &mut Frame, app: &App, rects: &MusicViewRects)
     } else {
       BorderType::Plain
     })
-    .title("Track Details")
+    .title(details_title)
     .style(Style::default().fg(app.user_config.theme.inactive));
   f.render_widget(
     Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),

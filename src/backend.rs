@@ -116,6 +116,7 @@ pub enum IoEvent {
   GetMoreSearchResults(SearchResultBlock),
   SetTracksToTable(Vec<FullTrack>),
   GetMadeForYouPlaylistItems(String, u32),
+  ResolveForYouPlaylistName(String),
   GetPlaylistItems(String, u32),
   LoadAllPlaylistItems(String),
   ReconcilePlaylistTracks(String),
@@ -937,6 +938,12 @@ impl<'a> Network<'a> {
           .get_made_for_you_playlist_tracks(playlist_id, made_for_you_offset)
           .await;
       }
+      IoEvent::ResolveForYouPlaylistName(playlist_id) => {
+        let name = self.resolve_playlist_name(&playlist_id).await;
+        let mut app = self.app.lock().await;
+        app.add_pasted_playlist_to_for_you(name, playlist_id);
+        app.ui_dirty = true;
+      }
       IoEvent::GetPlaylistItems(playlist_id, playlist_offset) => {
         if is_mock {
           if let Some(tracks) = crate::mock::tracks_for_playlist(&playlist_id) {
@@ -1698,45 +1705,6 @@ impl<'a> Network<'a> {
     }
   }
 
-  // A playlist pasted into the search box is added to For you. Must run after
-  // the track table is populated: set_tracks_to_table clears playlist_view.
-  async fn consume_pending_for_you_add(&mut self, playlist_id: &str, name: Option<String>) {
-    if self.app.lock().await.pending_for_you_add.as_deref() != Some(playlist_id) {
-      return;
-    }
-    let name = match name {
-      Some(name) => name,
-      None => {
-        let public = self
-          .spotify
-          .playlist(
-            PlaylistId::from_id_or_uri(playlist_id).unwrap(),
-            None,
-            Some(Market::FromToken),
-          )
-          .await
-          .map(|playlist| playlist.name)
-          .unwrap_or_default();
-        if public.is_empty() {
-          // partner API removed — fallback to oEmbed (no auth) for name, else id
-          Self::oembed_playlist_name(playlist_id)
-            .await
-            .unwrap_or_default()
-        } else {
-          public
-        }
-      }
-    };
-    let mut app = self.app.lock().await;
-    app.pending_for_you_add = None;
-    // A pasted playlist is not a list view, so drop any stale context (a
-    // leftover MyPlaylists/SavedTracks/MadeForYou would turn on the "Date
-    // added" column).
-    app.track_table.context = None;
-    app.playlist_view = Some((name.clone(), playlist_id.to_string()));
-    app.add_pasted_playlist_to_for_you(name, playlist_id.to_string());
-  }
-
   async fn get_playlist_tracks(&mut self, playlist_id: String, playlist_offset: u32) {
     if playlist_offset == 0 {
       self.playlist_cache.ensure_playlist_loaded(&playlist_id);
@@ -1751,7 +1719,6 @@ impl<'a> Network<'a> {
           .lock()
           .await
           .dispatch(IoEvent::ReconcilePlaylistTracks(playlist_id.clone()));
-        self.consume_pending_for_you_add(&playlist_id, None).await;
         return;
       }
     }
@@ -1788,7 +1755,6 @@ impl<'a> Network<'a> {
           .apply_playlist_tracks(&playlist_id, playlist_tracks, playlist_offset)
           .await;
         if playlist_offset == 0 {
-          self.consume_pending_for_you_add(&playlist_id, None).await;
           // First fetch caches only page 1: without a background fill the
           // entry stays partial forever and every later open re-fires the
           // full LoadAll burst. Fill it now so the next open serves whole.
@@ -1843,7 +1809,7 @@ impl<'a> Network<'a> {
       let app = self.app.lock().await;
       match app.track_table_playlist_uri() {
         Some(viewed) => viewed == playlist_id,
-        None => app.pending_for_you_add.as_deref() == Some(playlist_id),
+        None => app.track_table.context.is_none(),
       }
     };
     let filling = {
@@ -1905,6 +1871,114 @@ impl<'a> Network<'a> {
       .as_str()
       .map(|s| s.to_string())
       .ok_or_else(|| anyhow!("no title in oembed"))
+  }
+
+  fn parse_embed_playlist_html(html: &str) -> anyhow::Result<(String, Page<PlaylistItem>)> {
+    let marker = "id=\"__NEXT_DATA__\"";
+    let start = html
+      .find(marker)
+      .ok_or_else(|| anyhow!("missing __NEXT_DATA__ in embed page"))?;
+    let after_tag = &html[start + marker.len()..];
+    let gt = after_tag
+      .find('>')
+      .ok_or_else(|| anyhow!("malformed __NEXT_DATA__ tag"))?;
+    let rest = &after_tag[gt + 1..];
+    let end = rest
+      .find("</script>")
+      .ok_or_else(|| anyhow!("unterminated __NEXT_DATA__ script"))?;
+    let root: serde_json::Value = serde_json::from_str(&rest[..end])?;
+    let entity = &root["props"]["pageProps"]["state"]["data"]["entity"];
+    let name = entity["name"].as_str().unwrap_or_default().to_string();
+    let list = entity["trackList"]
+      .as_array()
+      .ok_or_else(|| anyhow!("no trackList in embed payload"))?;
+
+    let mut items = Vec::with_capacity(list.len());
+    for (idx, entry) in list.iter().enumerate() {
+      let uri = match entry["uri"].as_str() {
+        Some(u) if u.starts_with("spotify:track:") => u,
+        _ => continue,
+      };
+      let track_id = &uri["spotify:track:".len()..];
+      if track_id.is_empty() {
+        continue;
+      }
+      let title = entry["title"].as_str().unwrap_or_default();
+      let subtitle = entry["subtitle"].as_str().unwrap_or_default();
+      let artists: Vec<serde_json::Value> = subtitle
+        .split(',')
+        .map(|a| a.trim_matches(|c: char| c.is_whitespace() || c == '\u{00a0}'))
+        .filter(|a| !a.is_empty())
+        .map(|a| {
+          serde_json::json!({
+            "external_urls": {},
+            "href": null,
+            "id": null,
+            "name": a
+          })
+        })
+        .collect();
+      let duration_ms = entry["duration"].as_i64().unwrap_or(0);
+      let explicit = entry["isExplicit"].as_bool().unwrap_or(false);
+      let is_playable = entry["isPlayable"].as_bool().unwrap_or(true);
+      let track_json = serde_json::json!({
+        "album": {
+          "album_type": null,
+          "artists": artists,
+          "available_markets": [],
+          "external_urls": {},
+          "href": null,
+          "id": null,
+          "images": [],
+          "name": "",
+          "release_date": null,
+          "release_date_precision": null
+        },
+        "artists": artists,
+        "available_markets": [],
+        "disc_number": 1,
+        "duration_ms": duration_ms,
+        "explicit": explicit,
+        "external_ids": {},
+        "external_urls": { "spotify": format!("https://open.spotify.com/track/{track_id}") },
+        "href": null,
+        "id": track_id,
+        "is_local": false,
+        "is_playable": is_playable,
+        "name": title,
+        "popularity": 0,
+        "preview_url": null,
+        "track_number": (idx + 1) as u32,
+        "type": "track",
+        "uri": uri
+      });
+      let item_json = serde_json::json!({
+        "added_at": null,
+        "added_by": null,
+        "is_local": false,
+        "item": track_json
+      });
+      if let Ok(item) = serde_json::from_value::<PlaylistItem>(item_json) {
+        items.push(item);
+      }
+    }
+    let total = items.len() as u32;
+    let page = Page {
+      href: String::new(),
+      items,
+      limit: total,
+      next: None,
+      offset: 0,
+      previous: None,
+      total,
+    };
+    Ok((name, page))
+  }
+
+  async fn fetch_embed_playlist(playlist_id: &str) -> anyhow::Result<(String, Page<PlaylistItem>)> {
+    let url = format!("https://open.spotify.com/embed/playlist/{playlist_id}");
+    let html = shared_http_client().get(&url).send().await?.text().await?;
+    Self::parse_embed_playlist_html(&html)
   }
 
   /// Complete the open playlist in the background (first-ever open only;
@@ -2295,6 +2369,25 @@ impl<'a> Network<'a> {
     app.selection_engaged = false;
   }
 
+  async fn resolve_playlist_name(&self, playlist_id: &str) -> String {
+    let public = self
+      .spotify
+      .playlist(
+        PlaylistId::from_id_or_uri(playlist_id).unwrap(),
+        None,
+        Some(Market::FromToken),
+      )
+      .await
+      .map(|playlist| playlist.name)
+      .unwrap_or_default();
+    if !public.is_empty() {
+      return public;
+    }
+    Self::oembed_playlist_name(playlist_id)
+      .await
+      .unwrap_or_default()
+  }
+
   async fn get_made_for_you_playlist_tracks(
     &mut self,
     playlist_id: String,
@@ -2308,25 +2401,30 @@ impl<'a> Network<'a> {
         // serve_playlist_cache fills app.playlist_tracks, but the For-you
         // table tracks its own accumulator; mirror it so Load-more math
         // (items.len() < total) keeps working.
-        let mut app = self.app.lock().await;
-        if let Some(page) = app.playlist_tracks.clone() {
-          app.made_for_you_tracks = Some(page);
+        let mut name = {
+          let mut app = self.app.lock().await;
+          if let Some(page) = app.playlist_tracks.clone() {
+            app.made_for_you_tracks = Some(page);
+          }
+          app
+            .made_for_you_custom
+            .iter()
+            .find(|(_, id)| *id == playlist_id)
+            .map(|(name, _)| name.clone())
+            .unwrap_or_default()
+        };
+        if name.is_empty() || name == playlist_id {
+          let resolved = self.resolve_playlist_name(&playlist_id).await;
+          if !resolved.is_empty() {
+            name = resolved;
+          }
         }
-        let name = app
-          .made_for_you_custom
-          .iter()
-          .find(|(_, id)| *id == playlist_id)
-          .map(|(name, _)| name.clone())
-          .unwrap_or_default();
+        let mut app = self.app.lock().await;
+        app.add_pasted_playlist_to_for_you(name.clone(), playlist_id.clone());
         app.playlist_view = Some((name, playlist_id.clone()));
-        drop(app);
         // Stale-guard: probe the live total in the background and refetch
         // when the entry changed.
-        self
-          .app
-          .lock()
-          .await
-          .dispatch(IoEvent::ReconcilePlaylistTracks(playlist_id));
+        app.dispatch(IoEvent::ReconcilePlaylistTracks(playlist_id));
         return;
       }
     }
@@ -2376,23 +2474,13 @@ impl<'a> Network<'a> {
         let cache_items = made_for_you_tracks.items.clone();
         let cache_total = made_for_you_tracks.total;
         let fetched_name = if made_for_you_offset == 0 {
-          Some(
-            self
-              .spotify
-              .playlist(
-                PlaylistId::from_id_or_uri(&playlist_id).unwrap(),
-                None,
-                Some(Market::FromToken),
-              )
-              .await
-              .map(|playlist| playlist.name)
-              .unwrap_or_default(),
-          )
+          Some(self.resolve_playlist_name(&playlist_id).await)
         } else {
           None
         };
         let mut app = self.app.lock().await;
         if let Some(name) = fetched_name {
+          app.add_pasted_playlist_to_for_you(name.clone(), playlist_id.clone());
           if paint {
             app.active_playlist_id = Some(playlist_id.clone());
             app.playlist_view = Some((name, playlist_id.clone()));
@@ -2425,6 +2513,68 @@ impl<'a> Network<'a> {
         self.sync_playlist_uris(&mut app);
       }
       Err(e) => {
+        // Spotify's public Web API returns 404 for algorithmic "Made For You"
+        // playlists (Daily Mixes, Discover Weekly, etc.). Fall back to Spotify's
+        // public embed page so the playlist opens with its real name and tracks.
+        if made_for_you_offset == 0 && e.to_string().contains("404") {
+          if let Ok((embed_name, embed_page)) = Self::fetch_embed_playlist(&playlist_id).await {
+            if !embed_page.items.is_empty() {
+              let name = if embed_name.is_empty() {
+                Self::oembed_playlist_name(&playlist_id)
+                  .await
+                  .unwrap_or_default()
+              } else {
+                embed_name
+              };
+              let paint = {
+                let app = self.app.lock().await;
+                app.track_table.context == Some(TrackTableContext::MadeForYou)
+                  && app
+                    .made_for_you_playlist_id(app.made_for_you_index)
+                    .as_deref()
+                    == Some(playlist_id.as_str())
+              };
+              if paint {
+                self.set_playlist_tracks_to_table(&embed_page, false).await;
+              }
+              let cache_items = embed_page.items.clone();
+              let cache_total = embed_page.total;
+              {
+                let mut app = self.app.lock().await;
+                app.add_pasted_playlist_to_for_you(name.clone(), playlist_id.clone());
+                if paint {
+                  app.active_playlist_id = Some(playlist_id.clone());
+                  app.playlist_view = Some((name, playlist_id.clone()));
+                  app.apply_saved_sort(&format!("playlist:{playlist_id}"), true);
+                  app.fill_target = None;
+                  app.made_for_you_tracks = Some(embed_page);
+                }
+              }
+              self
+                .playlist_cache
+                .update(&playlist_id, cache_items, cache_total, 0, false);
+              let mut app = self.app.lock().await;
+              app.is_fetching_next_page = false;
+              if app.get_current_route().id != RouteId::TrackTable {
+                app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
+              }
+              self.sync_playlist_uris(&mut app);
+              return;
+            }
+          }
+          let name = Self::oembed_playlist_name(&playlist_id)
+            .await
+            .unwrap_or_default();
+          let mut app = self.app.lock().await;
+          app.add_pasted_playlist_to_for_you(name, playlist_id.clone());
+          app.is_fetching_next_page = false;
+          app.dispatch(IoEvent::StartPlayback(
+            Some(format!("spotify:playlist:{playlist_id}")),
+            None,
+            None,
+          ));
+          return;
+        }
         self
           .handle_error(anyhow!(
             "failed to load tracks of playlist '{}': {}",
@@ -6087,5 +6237,24 @@ mod tests {
     }"#;
     let ctx: rspotify::model::CurrentPlaybackContext = serde_json::from_str(payload).unwrap();
     assert!(matches!(ctx.item, Some(PlayableItem::Track(t)) if t.name == "Track"));
+  }
+
+  #[test]
+  fn parse_embed_playlist_html_extracts_name_and_tracks() {
+    let html = r#"<html><head></head><body><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"state":{"data":{"entity":{"name":"Daily Mix 1","trackList":[{"uri":"spotify:track:2pHPoaYwt40AETye0C6D0p","title":"HUMAN TEKK","subtitle":"wharoxmane,\u00a0Artist Two","duration":110400,"isExplicit":true,"isPlayable":true}]}}}}}}</script></body></html>"#;
+    let (name, page) = Network::parse_embed_playlist_html(html).unwrap();
+    assert_eq!(name, "Daily Mix 1");
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items.len(), 1);
+    match page.items[0].item.as_ref().unwrap() {
+      PlayableItem::Track(t) => {
+        assert_eq!(t.name, "HUMAN TEKK");
+        assert_eq!(t.artists.len(), 2);
+        assert_eq!(t.artists[0].name, "wharoxmane");
+        assert_eq!(t.artists[1].name, "Artist Two");
+        assert!(t.explicit);
+      }
+      _ => panic!("expected track"),
+    }
   }
 }
