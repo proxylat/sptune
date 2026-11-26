@@ -1,0 +1,1055 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>sptune Documentation</title>
+<link rel="stylesheet" href="style.css?v=3" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400&display=swap" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400&display=swap" media="print" onload="this.media='all'" />
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400&display=swap" /></noscript>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="topbar">
+    <div class="brand-cluster">
+      <a class="brand-title" href="#page-overview" aria-label="sptune home">
+        <pre class="ascii-logo"> ___ _ __ | |_ _   _ _ __   ___
+/ __| '_ \| __| | | | '_ \ / _ \
+\__ \ |_) | |_| |_| | | | |  __/
+|___/ .__/ \__|\__,_|_| |_|\___|
+    |_|</pre>
+      </a>
+    </div>
+
+    <button type="button" class="search-btn" data-search-open aria-label="Search documentation">
+      <span>Search documentation...</span>
+      <kbd>Ctrl K</kbd>
+    </button>
+
+    <div class="header-controls">
+      <button type="button" id="theme-btn" class="util-btn" aria-label="Switch theme">Theme: Dark</button>
+    </div>
+  </div>
+</header>
+
+<div class="layout-grid">
+
+<aside class="sidebar" aria-label="Documentation navigation">
+  <ul class="nav-list">
+    <li><a class="nav-item" href="#page-overview">Overview</a></li>
+    <li><a class="nav-item" href="#page-requirements">Requirements &amp; constraints</a></li>
+    <li><a class="nav-item" href="#page-setup">Quickstart &amp; Auth</a></li>
+    <li><a class="nav-item" href="#page-tui">Terminal UI &amp; Features</a></li>
+    <li><a class="nav-item" href="#page-keyboard">Keyboard shortcuts</a></li>
+    <li><a class="nav-item" href="#page-cli">CLI Reference</a></li>
+    <li><a class="nav-item" href="#page-configuration">Configuration (YAML)</a></li>
+    <li><a class="nav-item" href="#page-soloist">Soloist (Headless Linux)</a></li>
+    <li><a class="nav-item" href="#page-desktop">Desktop Optimization</a></li>
+    <li><a class="nav-item" href="#page-diagnostics">Architecture &amp; Profiling</a></li>
+  </ul>
+</aside>
+
+<main class="article">
+
+  <!-- ==================== 1. OVERVIEW ==================== -->
+  <section class="doc-page" id="page-overview">
+    <header class="article-header">
+      <h1 id="overview">Overview</h1>
+      <p class="article-lede">A Spotify terminal UI and scriptable CLI for Linux and Windows. Built on the official Spotify Web API with PKCE, local disk caches, OS media watchers, Headless Soloist WebSockets, and desktop client tuning.</p>
+    </header>
+
+    <h2 id="surfaces">Four capabilities in one binary</h2>
+    <p><code>sptune</code> is a single Rust binary with an interactive terminal UI, a shell CLI, headless Linux Connect playback via Spotify Soloist, and process tuning for the official Spotify desktop client:</p>
+
+    <div class="entry-ledger">
+      <a class="entry-row" href="#page-tui">
+        <span class="entry-name">1. Terminal UI (<code>sptune</code>)</span>
+        <span class="entry-summary">Full mouse and vim-key navigation, draggable playbar scrubber, resizable/collapsible sidebar, time-synced lyrics, in-playlist instant filtering, and a customizable "For You" hub.</span>
+        <span class="entry-arrow">&rarr;</span>
+      </a>
+      <a class="entry-row" href="#page-cli">
+        <span class="entry-name">2. Scriptable CLI (<code>sptune pb|play|list|search</code>)</span>
+        <span class="entry-summary">Control transport, volume, shuffle/repeat, likes, device transfers, random playlist playback, and custom-formatted searches from window-manager keybinds or shell scripts.</span>
+        <span class="entry-arrow">&rarr;</span>
+      </a>
+      <a class="entry-row" href="#page-soloist">
+        <span class="entry-name">3. Headless Soloist (Linux)</span>
+        <span class="entry-summary">Spawns and pairs Spotify's official headless Linux Connect player (<code>soloist</code>) with real-time local WebSocket state push, replacing 5s Web API polls while active.</span>
+        <span class="entry-arrow">&rarr;</span>
+      </a>
+      <a class="entry-row" href="#page-desktop">
+        <span class="entry-name">4. Desktop Client Optimizer</span>
+        <span class="entry-summary">Applies lean Chromium flags, child-process suspension, working-set memory trimming, and Linux cgroup v2 memory caps to keep the official Spotify Electron app lightweight while gaming or working.</span>
+        <span class="entry-arrow">&rarr;</span>
+      </a>
+    </div>
+
+    <h2 id="design-goals">Design goals</h2>
+    <ul>
+      <li><strong>Official Spotify Web API only:</strong> Unlike clients that use unofficial protocols or bundle <code>librespot</code>, <code>sptune</code> uses only documented Spotify Web API endpoints with OAuth 2.0 PKCE (no client secret), avoiding account-ban risk.</li>
+      <li><strong>Zero-FPS idle and sub-millisecond rendering:</strong> When paused and idle, <code>sptune</code> stops redrawing completely. While playing, the playbar redraws once per second when the visible second changes. Viewport-only table building and direct <code>Frame::buffer_mut()</code> writes render a 2,000-track playlist in ~0.78 ms.</li>
+      <li><strong>Minimal API traffic:</strong> 7-day coalesced disk caches (<code>library_cache.json</code> and <code>playlist_cache_v2.json</code>) paint playlists and saved libraries immediately on open, then reconcile changes in the background with <code>snapshot_id</code> and tail probes.</li>
+      <li><strong>Zero-token state updates:</strong> Linux MPRIS (<code>zbus</code>), Windows GSMTC (<code>win-gsmtc</code>), and local Soloist WebSockets push track and state changes without spending Web API rate-limit tokens.</li>
+    </ul>
+
+    <h2 id="architecture">Architecture</h2>
+    <p>Runtime data flow across the UI thread, Network runtime, OS media watcher, and process sweeper:</p>
+
+    <div class="code-block">
+      <div class="code-bar">
+        <span class="code-title">sptune runtime pipeline specification</span>
+        <button type="button" class="copy-btn">Copy</button>
+      </div>
+      <div class="tab-pane active">
+        <pre>  MAIN THREAD: UI Event &amp; Render Loop (src/main.rs ──► src/tui/*)
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ 1. Input wait (unlocked): events.next() + try_next() batch drain        │
+  │    • Key dup filter + mouse drag/motion coalescer (src/event/events.rs) │
+  │ 2. State lock: app.lock().await ──► handlers::handle_app / handle_mouse │
+  │    • Idle throttle: redraw ONLY on input, ui_dirty, resize, or 1s flip  │
+  │ 3. Render pipeline (Cassowary-free integer splits + direct Buffer draw):│
+  │    draw_main_layout ──► LOGO_TEXT (LazyLock) + sidebar (thread_local!)  │
+  │    ──► draw_song_table (O(N) filter + viewport slice [offset..+viewport])│
+  │    ──► draw_table_window (direct Buffer::set_stringn) + draw_playbar    │
+  └───────────────────────────────────┬─────────────────────────────────────┘
+                                      │ mpsc::channel&lt;IoEvent&gt; + Arc&lt;Mutex&lt;App&gt;&gt;
+          ┌───────────────────────────┼───────────────────────────┐
+          ▼                           ▼                           ▼
+  NETWORK THREAD              OS MEDIA &amp; SOLOIST WS       PROCESS SWEEPER (4s)
+  (src/backend.rs)            (media_watch / soloist_ws)  (src/platform/*)
+  • rspotify PKCE client      • Linux zbus MPRIS          • Custom Chromium flags
+  • Owned token refresh       • Windows win-gsmtc         • Suspend idle children
+  • LibraryCache (7d JSON)    • Soloist local WebSocket   • Trim working set RAM
+  • PlaylistCache (20 LRU)      (replaces 5s API poll)    • Linux cgroup v2 cap</pre>
+      </div>
+    </div>
+
+    <h2 id="features">Feature matrix</h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Capability</th><th>Implementation</th></tr>
+        <tr><td>Authentication</td><td>OAuth 2.0 Authorization Code with PKCE via local callback server (<code>http://127.0.0.1:8888/callback</code>). Owned token refresh with <code>refresh_token</code> carry-over and poisoned-cache auto-recovery</td></tr>
+        <tr><td>Playlist playback accuracy</td><td>Context playback uses <code>Offset::Uri</code> (<code>IoEvent::StartPlaybackAt</code>) rather than numeric indices, guaranteeing the exact song plays regardless of client-side sorting or unavailable tracks</td></tr>
+        <tr><td>Caching &amp; reconciliation</td><td><code>LibraryCache</code> (playlists, liked songs, albums, shows) and <code>PlaylistCache</code> (20-playlist LRU with coalesced async writes, 7-day TTL) reconciled via <code>snapshot_id</code> tail probes; bypassable with <code>--no-cache</code></td></tr>
+        <tr><td>Mouse &amp; keyboard parity</td><td>Single-click rows, headers (sort by Title/Artist/Album/Date Added/Length), draggable playbar scrubber, draggable scrollbars, draggable sidebar/library dividers, plus full vim-style remappable keys</td></tr>
+        <tr><td>"For You" hub</td><td>Curated Made For You hub supporting user-added custom playlists via the Ctrl+V paste box</td></tr>
+        <tr><td>Synced lyrics &amp; Music View</td><td>Press <kbd>Tab</kbd> (or click the playbar track title) to open the full-screen time-synced lyrics and track details view</td></tr>
+      </table>
+    </div>
+
+    <footer class="article-footer">
+      <nav class="pager-grid" aria-label="Pagination">
+        <span></span>
+        <a class="pager-link next" href="#page-requirements">
+          <span class="pager-dir">Next &rarr;</span>
+          <span class="pager-title">Requirements &amp; constraints</span>
+        </a>
+      </nav>
+    </footer>
+  </section>
+
+  <!-- ==================== 2. REQUIREMENTS & CONSTRAINTS ==================== -->
+  <section class="doc-page" id="page-requirements">
+    <header class="article-header">
+      <h1>Requirements &amp; constraints</h1>
+      <p class="article-lede">Account requirements, supported platforms, active player options, and build dependencies.</p>
+    </header>
+
+    <h2 id="requirements">Core requirements</h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Component</th><th>Requirement</th></tr>
+        <tr><td><strong>Spotify account</strong></td><td><strong>Spotify Premium</strong> is required. The official Spotify Web API does not allow playback control (<code>play</code>, <code>pause</code>, <code>seek</code>, <code>transfer</code>) on free-tier accounts.</td></tr>
+        <tr><td><strong>Active playback device</strong></td><td>The Spotify Web API controls playback remotely and does not stream audio itself. You need one active Spotify Connect device: <strong>Soloist</strong> (headless Linux), the official <strong>Spotify desktop app</strong>, <a href="https://github.com/Spotifyd/spotifyd">spotifyd</a>, the web player, or Spotify on mobile.</td></tr>
+        <tr><td><strong>Operating system</strong></td><td><strong>Linux</strong> (full TUI, CLI, MPRIS watcher, Soloist headless child, cgroup v2 memory cap) and <strong>Windows 10/11</strong> (full TUI, CLI, GSMTC watcher, Win32 process suspend &amp; working-set trim). <strong>macOS is not officially supported (untested, no OS integrations).</strong></td></tr>
+        <tr><td><strong>Rust toolchain</strong></td><td>Stable Rust (edition 2021) via <a href="https://www.rust-lang.org/tools/install">rustup</a>, plus <code>pkg-config</code> and OpenSSL development headers (<code>libssl-dev</code>) on Linux when building from source.</td></tr>
+      </table>
+    </div>
+
+    <h2 id="os-deps">Feature-specific OS integrations</h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Feature</th><th>Platform</th><th>Underlying Mechanism</th></tr>
+        <tr><td><strong>OS Media Event Watcher</strong></td><td>Linux &amp; Windows</td><td>Linux: D-Bus <code>org.mpris.MediaPlayer2.spotify</code> via <code>zbus</code> (tokio runtime, zero background threads).<br />Windows: Global System Media Transport Controls via <code>win-gsmtc</code>. Wakes playbar on external track changes without spending API tokens.</td></tr>
+        <tr><td><strong>Headless Soloist Playback</strong></td><td>Linux (x86_64 / ARM64 / Raspberry Pi)</td><td>Spawns <code>soloist</code> with an isolated data directory (<code>~/.config/sptune/soloist</code>) and connects to its local WebSocket (<code>ws.port</code>) via <code>tokio-tungstenite</code> for real-time state push.</td></tr>
+        <tr><td><strong>Desktop Memory Limit</strong></td><td>Linux (cgroup v2)</td><td>Applies <code>memory.high</code> / <code>memory.max</code> limits (default <code>150 MB</code> when enabled) across Spotify's process tree via <code>/sys/fs/cgroup</code>.</td></tr>
+        <tr><td><strong>Child Process Suspend &amp; Trim</strong></td><td>Linux &amp; Windows</td><td>Sweeps Spotify helper processes every 4s to suspend non-essential renderers/utilities and trim working-set memory while preserving audio playback.</td></tr>
+      </table>
+    </div>
+
+    <div class="note-box">
+      <p><span class="note-label">No librespot</span><code>sptune</code> uses the official Spotify Web API only — no <code>librespot</code> or unofficial internal Spotify partner APIs.</p>
+    </div>
+
+    <h2 id="limitations">Limitations and constraints</h2>
+    <div class="details-list">
+      <details class="spec-item">
+        <summary>
+          <span>Spotify Premium account required</span>
+          <span class="spec-marker"></span>
+        </summary>
+        <div class="spec-body">
+          <code>sptune</code> requires a <strong>Spotify Premium</strong> account. Spotify's official Web API restricts playback control endpoints (<code>play</code>, <code>pause</code>, <code>seek</code>, <code>transfer</code>, queue) and Soloist access to Premium accounts only — free-tier accounts cannot control playback.
+        </div>
+      </details>
+
+      <details class="spec-item">
+        <summary>
+          <span>First-time Soloist pairing requires official desktop or mobile app</span>
+          <span class="spec-marker"></span>
+        </summary>
+        <div class="spec-body">
+          On the very first run of <code>soloist</code>, open the official Spotify <strong>desktop or mobile app</strong> on the same LAN, open the Devices menu, and select your Soloist device (default <code>sptune</code>) once. The Spotify web player cannot perform initial LAN discovery. After pairing once, <code>sptune</code> transfers playback to Soloist automatically on startup.
+        </div>
+      </details>
+    </div>
+
+    <footer class="article-footer">
+      <nav class="pager-grid" aria-label="Pagination">
+        <a class="pager-link" href="#page-overview">
+          <span class="pager-dir">&larr; Previous</span>
+          <span class="pager-title">Overview</span>
+        </a>
+        <a class="pager-link next" href="#page-setup">
+          <span class="pager-dir">Next &rarr;</span>
+          <span class="pager-title">Quickstart &amp; Auth</span>
+        </a>
+      </nav>
+    </footer>
+  </section>
+
+  <!-- ==================== 3. QUICKSTART & AUTH ==================== -->
+  <section class="doc-page" id="page-setup">
+    <header class="article-header">
+      <h1 id="setup">Quickstart &amp; Auth</h1>
+      <p class="article-lede">Build <code>sptune</code> from source and complete the one-time PKCE Spotify authorization.</p>
+    </header>
+
+    <h2 id="install">1. Build &amp; install from source</h2>
+    <p>Switch tabs below for Linux (Debian/Ubuntu, Arch, Fedora) or Windows build commands:</p>
+
+    <div class="code-block">
+      <div class="code-bar">
+        <div class="tab-list" role="tablist">
+          <button type="button" class="tab-btn active" role="tab">Debian / Ubuntu</button>
+          <button type="button" class="tab-btn" role="tab">Arch / Fedora</button>
+          <button type="button" class="tab-btn" role="tab">Windows 10/11</button>
+        </div>
+        <button type="button" class="copy-btn">Copy</button>
+      </div>
+
+      <div class="tab-pane active">
+        <pre><span class="comment"># 1. Install OpenSSL headers, pkg-config, and clipboard support</span>
+<span class="cmd">sudo apt update</span> &amp;&amp; <span class="cmd">sudo apt install</span> -y libssl-dev pkg-config
+
+<span class="comment"># 2. Install directly from GitHub (or clone and build with --path .)</span>
+<span class="cmd">cargo install</span> --git https://github.com/proxylat/sptune
+<span class="comment"># or: git clone https://github.com/proxylat/sptune.git &amp;&amp; cd sptune &amp;&amp; cargo install --path .</span>
+
+<span class="comment"># 3. Launch (first run walks through Soloist &amp; Spotify PKCE auth)</span>
+<span class="cmd">sptune</span></pre>
+      </div>
+
+      <div class="tab-pane">
+        <pre><span class="comment"># Arch Linux</span>
+<span class="cmd">sudo pacman -S</span> --needed base-devel openssl pkgconf
+
+<span class="comment"># Fedora</span>
+<span class="cmd">sudo dnf install</span> -y openssl-devel pkgconf-pkg-config
+
+<span class="comment"># Build &amp; install</span>
+<span class="cmd">cargo install</span> --git https://github.com/proxylat/sptune</pre>
+      </div>
+
+      <div class="tab-pane">
+        <pre><span class="comment">REM Build release binary with MSVC toolchain</span>
+<span class="cmd">cargo install</span> --git https://github.com/proxylat/sptune
+
+<span class="comment">REM Launch in Windows Terminal</span>
+<span class="cmd">sptune</span></pre>
+      </div>
+    </div>
+
+    <h2 id="connect-spotify">2. Connect Spotify (OAuth 2.0 PKCE)</h2>
+    <p><code>sptune</code> authenticates directly with the official <a href="https://developer.spotify.com/documentation/web-api">Spotify Web API</a> using OAuth 2.0 PKCE. No Client Secret is ever needed or stored.</p>
+
+    <div class="table-scroll">
+      <table>
+        <tr><th>Step</th><th>Action</th></tr>
+        <tr><td><strong>1. Create a Spotify App</strong></td><td>Open the <a href="https://developer.spotify.com/dashboard/applications">Spotify Developer Dashboard</a> and click <strong>Create app</strong>. Any app name and description work.</td></tr>
+        <tr><td><strong>2. Set Redirect URI</strong></td><td>In your app settings, add <code>http://127.0.0.1:8888/callback</code> under <strong>Redirect URIs</strong> and click Save.</td></tr>
+        <tr><td><strong>3. Copy Client ID</strong></td><td>Copy the <strong>Client ID</strong> from the dashboard (ignore Client Secret, PKCE does not use it).</td></tr>
+        <tr><td><strong>4. Authorize in browser</strong></td><td>Run <code>sptune</code>, paste your Client ID and port (default <code>8888</code>). Your browser opens automatically to grant permissions and redirects back to <code>127.0.0.1:8888/callback</code>.</td></tr>
+      </table>
+    </div>
+
+    <div class="code-block">
+      <div class="code-bar">
+        <span class="code-title">~/.config/sptune/client.yml (generated automatically)</span>
+        <button type="button" class="copy-btn">Copy</button>
+      </div>
+      <div class="tab-pane active">
+        <pre><span class="key">client_id:</span> <span class="str">"your_32_character_spotify_client_id"</span>
+<span class="key">port:</span> 8888
+<span class="comment"># Optional: Spotify Soloist headless API key (or set SOLOIST_API_KEY env var)</span>
+<span class="key">soloist_api_key:</span> <span class="str">""</span></pre>
+      </div>
+    </div>
+
+    <h2 id="first-run">3. First run &amp; device selection</h2>
+    <p>Once authenticated, <code>sptune</code> opens the main layout. Press <kbd>d</kbd> (or click the device name in the playbar) to pick an active Spotify Connect playback device, or press <kbd>?</kbd> (or click <code>⚙️</code> in the top-right header) to open the live Settings &amp; Shortcuts overlay.</p>
+
+    <h2 id="troubleshooting">Troubleshooting</h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Symptom</th><th>Resolution</th></tr>
+        <tr><td>Compile error mentioning <code>openssl</code></td><td>Install <code>libssl-dev</code> and <code>pkg-config</code> (Debian/Ubuntu) or <code>openssl-devel</code> (Fedora), then re-run <code>cargo install --path .</code></td></tr>
+        <tr><td>"INVALID_CLIENT: Invalid redirect URI"</td><td>Ensure <code>http://127.0.0.1:8888/callback</code> (exact port and <code>/callback</code> path, using <code>127.0.0.1</code> rather than <code>localhost</code>) is saved in your Spotify Developer Dashboard</td></tr>
+        <tr><td>Browser does not open on Windows</td><td>Copy the printed authorization URL and paste it directly into your browser's address bar (do not run it in <code>cmd.exe</code>, which splits on <code>&amp;</code>)</td></tr>
+        <tr><td>Stale or corrupted library/playlist cache</td><td>Run <code>sptune clean-cache</code> from the shell, press the Clear Cache row in the <code>⚙️</code> Settings menu, or launch with <code>sptune --no-cache</code></td></tr>
+      </table>
+    </div>
+
+    <footer class="article-footer">
+      <nav class="pager-grid" aria-label="Pagination">
+        <a class="pager-link" href="#page-requirements">
+          <span class="pager-dir">&larr; Previous</span>
+          <span class="pager-title">Requirements &amp; constraints</span>
+        </a>
+        <a class="pager-link next" href="#page-tui">
+          <span class="pager-dir">Next &rarr;</span>
+          <span class="pager-title">Terminal UI &amp; Features</span>
+        </a>
+      </nav>
+    </footer>
+  </section>
+
+  <!-- ==================== 4. TERMINAL UI & FEATURES ==================== -->
+  <section class="doc-page" id="page-tui">
+    <header class="article-header">
+      <h1 id="tui">Terminal UI &amp; Features</h1>
+      <p class="article-lede">Interactive views, mouse gestures, in-playlist search, synced lyrics, and the live gear settings menu.</p>
+    </header>
+
+    <h2 id="mouse-controls">Mouse interactions &amp; gestures</h2>
+    <p>Every panel in <code>sptune</code> is clickable and draggable with the mouse (and can be toggled off anytime in <code>⚙️</code> Settings or <code>config.yml</code>):</p>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Surface</th><th>Mouse Action</th></tr>
+        <tr><td><strong>Song / Album / Episode Tables</strong></td><td>Click any row to select and play immediately. Click column headers (<code>Title</code>, <code>Artist</code>, <code>Album</code>, <code>Date Added</code>, <code>Length</code>) to sort ascending/descending. Click <code>+</code> / <code>✓</code> to add to a playlist, or <code>✕</code> to remove from a playlist.</td></tr>
+        <tr><td><strong>In-Playlist Search Box</strong></td><td>Click the <code>│ Search playlist │</code> box embedded in the playlist border title (or press <kbd>Ctrl+f</kbd>) to filter tracks in real time; click <code>✕</code> inside the box to clear.</td></tr>
+        <tr><td><strong>Playbar &amp; Scrubber</strong></td><td>Click or drag anywhere along the progress bar to seek. Click transport buttons (<code>⏮</code>, <code>▶/⏸</code>, <code>⏭</code>, <code>🔀</code>, <code>🔁</code>, <code>♥</code>), drag the volume bar, click the track title to toggle Music View (synced lyrics), or click the <code>Processes</code> pill to suspend/resume Spotify helpers.</td></tr>
+        <tr><td><strong>Resizable &amp; Collapsible Sidebar</strong></td><td>Drag the vertical sidebar border to resize width, or drag the horizontal separator between <code>Library</code> and <code>Playlists</code> to adjust height. Click <code>≡</code> on the Library header (or press <kbd>\</kbd>) to collapse the sidebar into compact numbered mode. Click <code>♻</code> on Library or Playlists to force an API refresh.</td></tr>
+        <tr><td><strong>Scrollbars</strong></td><td>Website-style scrollbars appear automatically on overflow in tables, playlists, and the settings menu; click or drag the thumb to scroll.</td></tr>
+      </table>
+    </div>
+
+    <h2 id="for-you">"For You" hub</h2>
+    <ul>
+      <li><strong>Customizable "For You" surface (Ctrl+V paste box):</strong> Select <strong>For you</strong> in the Library sidebar to see the top paste box. Press <kbd>Ctrl+v</kbd> (or click the paste box) with a Spotify playlist URL (<code>https://open.spotify.com/playlist/...</code>) or URI (<code>spotify:playlist:...</code>) in your clipboard to immediately pin and open it in <strong>For you</strong>. Click <code>✕</code> on any pinned row to remove it.</li>
+    </ul>
+
+    <h2 id="lyrics-view">Music View (Synced Lyrics &amp; Track Credits)</h2>
+    <p>Press <kbd>Tab</kbd> (or click the <code>[ ]</code> toggle) to open the full-screen <strong>Music View</strong>:</p>
+    <ul>
+      <li><strong>Time-synced LRC lyrics:</strong> Auto-scrolls and highlights the active lyric line in sync with playback progress.</li>
+      <li><strong>Track Details panel (click to copy link):</strong> Album cover image on top (click the cover to jump to the Artist page; rendered with Kitty graphics or halfblock fallback), with track metadata, album release date, duration, and credits below. <strong>Click anywhere inside the Track Details box</strong> to copy the current track's Spotify link to your clipboard (the title flashes <code>Track Details — Copied link!</code>).</li>
+    </ul>
+
+    <h2 id="settings-menu">Live Gear Settings Menu (<kbd>?</kbd> / <code>⚙️</code>)</h2>
+    <p>Press <kbd>?</kbd> or click <code>⚙️</code> in the top-right header to open the Settings &amp; Shortcuts overlay. All toggles apply immediately and persist to <code>~/.config/sptune/state.json</code> on exit:</p>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Category</th><th>Live Toggles</th></tr>
+        <tr><td><strong>Library Sections (1–6)</strong></td><td>Show or hide individual Library entries: <code>For you</code>, <code>Recently Played</code>, <code>Liked Songs</code>, <code>Albums</code>, <code>Artists</code>, <code>Podcasts</code></td></tr>
+        <tr><td><strong>Panels &amp; Columns</strong></td><td>Toggle <code>Library</code> panel, <code>Playlists</code> panel, <code>Album</code> column, <code>Artist</code> column, <code>Length</code> column, <code>Date Added</code> column, <code>Add to playlist (+)</code> column, <code>Remove from playlist (✕)</code> column, and max column display length</td></tr>
+        <tr><td><strong>Appearance &amp; Input</strong></td><td>Cycle theme presets (<code>Green</code> / <code>Dracula</code> / <code>Default</code>), pure <code>Black background</code> override, <code>Mouse interactions</code>, <code>Hover animations</code>, and <code>Seek by typing</code></td></tr>
+        <tr><td><strong>API, Cache &amp; Desktop</strong></td><td>Cycle active playback poll interval (<code>1s</code> / <code>2s</code> / <code>5s</code> / <code>10s</code> / <code>15s</code> / <code>30s</code>), toggle <code>Developer Request Log</code> split view (live token-bucket telemetry), clear disk cache, and configure Spotify desktop auto-launch, Chromium flags, child suspension, working-set trim, and memory cap</td></tr>
+      </table>
+    </div>
+
+    <footer class="article-footer">
+      <nav class="pager-grid" aria-label="Pagination">
+        <a class="pager-link" href="#page-setup">
+          <span class="pager-dir">&larr; Previous</span>
+          <span class="pager-title">Quickstart &amp; Auth</span>
+        </a>
+        <a class="pager-link next" href="#page-keyboard">
+          <span class="pager-dir">Next &rarr;</span>
+          <span class="pager-title">Keyboard shortcuts</span>
+        </a>
+      </nav>
+    </footer>
+  </section>
+
+  <!-- ==================== 5. KEYBOARD SHORTCUTS ==================== -->
+  <section class="doc-page" id="page-keyboard">
+    <header class="article-header">
+      <h1 id="keyboard">Keyboard shortcuts</h1>
+      <p class="article-lede">Default vim-style keybindings. Every non-reserved shortcut can be remapped under <code>keybindings:</code> in <code>~/.config/sptune/config.yml</code>.</p>
+    </header>
+
+    <h2 id="kb-navigation">Navigation &amp; panels</h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Key</th><th>Config Key</th><th>Action</th></tr>
+        <tr><td><kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd> / Arrows</td><td><em>reserved</em></td><td>Move selection left / down / up / right</td></tr>
+        <tr><td><kbd>H</kbd> / <kbd>M</kbd> / <kbd>L</kbd></td><td><em>reserved</em></td><td>Jump to top / middle / bottom of current visible list</td></tr>
+        <tr><td><kbd>Enter</kbd></td><td><code>submit</code></td><td>Enter active block, open selected item, or start track playback</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td><em>reserved</em></td><td>Return from active block to hover mode / close modal dialog</td></tr>
+        <tr><td><kbd>q</kbd></td><td><code>back</code></td><td>Pop navigation stack (or quit <code>sptune</code> at the root screen)</td></tr>
+        <tr><td><kbd>Ctrl+d</kbd> / <kbd>Ctrl+u</kbd></td><td><code>next_page</code> / <code>previous_page</code></td><td>Scroll down / up by one page</td></tr>
+        <tr><td><kbd>Ctrl+a</kbd> / <kbd>Ctrl+e</kbd></td><td><code>jump_to_start</code> / <code>jump_to_end</code></td><td>Jump to first / last item in playlist or table</td></tr>
+        <tr><td><kbd>\</kbd></td><td><code>toggle_sidebar</code></td><td>Collapse or expand the left sidebar</td></tr>
+        <tr><td><kbd>Tab</kbd></td><td><code>music_view</code></td><td>Open full-screen Music View (synced lyrics &amp; track details)</td></tr>
+        <tr><td><kbd>?</kbd></td><td><code>help</code></td><td>Open Settings &amp; Keyboard Shortcuts menu</td></tr>
+      </table>
+    </div>
+
+    <h2 id="kb-playback">Playback &amp; transport</h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Key</th><th>Config Key</th><th>Action</th></tr>
+        <tr><td><kbd>Space</kbd></td><td><code>toggle_playback</code></td><td>Pause / resume current playback</td></tr>
+        <tr><td><kbd>n</kbd> / <kbd>p</kbd></td><td><code>next_track</code> / <code>previous_track</code></td><td>Skip to next / previous track</td></tr>
+        <tr><td><kbd>&lt;</kbd> / <kbd>&gt;</kbd></td><td><code>seek_backwards</code> / <code>seek_forwards</code></td><td>Seek backwards / forwards by <code>seek_milliseconds</code> (default 1000 ms)</td></tr>
+        <tr><td><kbd>-</kbd> / <kbd>+</kbd></td><td><code>decrease_volume</code> / <code>increase_volume</code></td><td>Decrease / increase volume by <code>volume_increment</code> (default 10%)</td></tr>
+        <tr><td><kbd>Ctrl+s</kbd></td><td><code>shuffle</code></td><td>Toggle shuffle mode</td></tr>
+        <tr><td><kbd>Ctrl+r</kbd></td><td><code>repeat</code></td><td>Cycle repeat mode (<code>Off</code> &rarr; <code>Context</code> &rarr; <code>Track</code>)</td></tr>
+        <tr><td><kbd>R</kbd></td><td><code>resume_last_track</code></td><td>Resume previous session's last played track when nothing is playing</td></tr>
+        <tr><td><kbd>d</kbd></td><td><code>manage_devices</code></td><td>Open Spotify Connect device selector</td></tr>
+      </table>
+    </div>
+
+    <h2 id="kb-search">Search &amp; in-playlist filtering</h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Key</th><th>Config Key</th><th>Action</th></tr>
+        <tr><td><kbd>/</kbd></td><td><code>search</code></td><td>Focus top Search input (supports queries, Spotify URLs, and <code>spotify:*</code> URIs)</td></tr>
+        <tr><td><kbd>Ctrl+f</kbd></td><td><code>search_in_playlist</code></td><td>Filter rows inside the currently opened playlist</td></tr>
+        <tr><td><kbd>Ctrl+l</kbd></td><td><em>search input</em></td><td>Clear entire search input</td></tr>
+        <tr><td><kbd>Ctrl+u</kbd> / <kbd>Ctrl+k</kbd></td><td><em>search input</em></td><td>Delete from cursor to start / end of input</td></tr>
+        <tr><td><kbd>Ctrl+w</kbd></td><td><em>search input</em></td><td>Delete previous word in search input</td></tr>
+      </table>
+    </div>
+
+    <h2 id="kb-context">Library, playlists &amp; clipboard</h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Key</th><th>Config Key</th><th>Action</th></tr>
+        <tr><td><kbd>s</kbd></td><td><em>contextual</em></td><td>Save (like) or unsave track in table, or follow/unfollow artist/playlist/show</td></tr>
+        <tr><td><kbd>D</kbd></td><td><em>contextual</em></td><td>Delete saved album or unfollow playlist/show</td></tr>
+        <tr><td><kbd>z</kbd></td><td><code>add_item_to_queue</code></td><td>Add selected track or episode to Spotify playback queue</td></tr>
+        <tr><td><kbd>a</kbd> / <kbd>A</kbd></td><td><code>jump_to_album</code> / <code>jump_to_artist_album</code></td><td>Jump to currently playing track's album or artist discography</td></tr>
+        <tr><td><kbd>o</kbd></td><td><code>jump_to_context</code></td><td>Jump to active play context</td></tr>
+        <tr><td><kbd>c</kbd> / <kbd>C</kbd></td><td><code>copy_song_url</code> / <code>copy_album_url</code></td><td>Copy current song/episode URL or album/show URL to system clipboard</td></tr>
+        <tr><td><kbd>y</kbd></td><td><code>copy_error</code></td><td>Copy last API error message to clipboard</td></tr>
+        <tr><td><kbd>S</kbd></td><td><em>Made For You</em></td><td>Save currently highlighted algorithmic playlist to your library</td></tr>
+      </table>
+    </div>
+
+    <footer class="article-footer">
+      <nav class="pager-grid" aria-label="Pagination">
+        <a class="pager-link" href="#page-tui">
+          <span class="pager-dir">&larr; Previous</span>
+          <span class="pager-title">Terminal UI &amp; Features</span>
+        </a>
+        <a class="pager-link next" href="#page-cli">
+          <span class="pager-dir">Next &rarr;</span>
+          <span class="pager-title">CLI Reference</span>
+        </a>
+      </nav>
+    </footer>
+  </section>
+
+  <!-- ==================== 6. CLI REFERENCE ==================== -->
+  <section class="doc-page" id="page-cli">
+    <header class="article-header">
+      <h1 id="cli">CLI Reference</h1>
+      <p class="article-lede">Drive playback, playlists, device transfers, and formatted searches from scripts or window-manager shortcuts without opening the TUI.</p>
+    </header>
+
+    <h2 id="cli-global">Top-level flags &amp; examples</h2>
+    <div class="code-block">
+      <div class="code-bar">
+        <div class="tab-list" role="tablist">
+          <button type="button" class="tab-btn active" role="tab">Common CLI workflows</button>
+          <button type="button" class="tab-btn" role="tab">Shell completions</button>
+        </div>
+        <button type="button" class="copy-btn">Copy</button>
+      </div>
+
+      <div class="tab-pane active">
+        <pre><span class="comment"># Play a random song from a playlist</span>
+<span class="cmd">sptune play</span> --name <span class="str">"Late Night Coding"</span> --playlist --random
+
+<span class="comment"># Toggle play/pause, like the current song, and print status</span>
+<span class="cmd">sptune playback</span> --toggle --like
+
+<span class="comment"># Jump 3 tracks forward or seek +15 seconds</span>
+<span class="cmd">sptune pb</span> -nnn
+<span class="cmd">sptune pb</span> --seek +15
+
+<span class="comment"># Search tracks with a custom output format</span>
+<span class="cmd">sptune search</span> <span class="str">"boards of canada"</span> --tracks <span class="flag">--format</span> <span class="str">"%t — %a [%b] (%u)"</span> --limit 20
+
+<span class="comment"># Wipe on-disk library and playlist caches</span>
+<span class="cmd">sptune clean-cache</span></pre>
+      </div>
+
+      <div class="tab-pane">
+        <pre><span class="comment"># Generate shell completions (bash, zsh, fish, power-shell, elvish)</span>
+<span class="cmd">sptune</span> --completions bash &gt; ~/.local/share/bash-completion/completions/sptune
+<span class="cmd">sptune</span> --completions zsh &gt; ~/.zfunc/_sptune
+<span class="cmd">sptune</span> --completions fish &gt; ~/.config/fish/completions/sptune.fish</pre>
+      </div>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <tr><th>Global Flag</th><th>Description</th></tr>
+        <tr><td><code>-t, --tick-rate &lt;MS&gt;</code></td><td>Set UI tick rate in milliseconds (must be <code>&lt; 1000</code>; default <code>250</code>)</td></tr>
+        <tr><td><code>-c, --config &lt;PATH&gt;</code></td><td>Use a custom configuration file path instead of <code>~/.config/sptune/config.yml</code></td></tr>
+        <tr><td><code>--setup-soloist</code></td><td>Run the interactive Soloist headless-playback setup wizard, then continue startup</td></tr>
+        <tr><td><code>--no-cache</code></td><td>Run the session without reading or writing on-disk library and playlist caches</td></tr>
+        <tr><td><code>--completions &lt;SHELL&gt;</code></td><td>Print shell completions for <code>bash</code>, <code>zsh</code>, <code>fish</code>, <code>power-shell</code>, or <code>elvish</code> and exit</td></tr>
+      </table>
+    </div>
+
+    <h2 id="cli-playback"><code>sptune playback</code> (alias: <code>pb</code>)</h2>
+    <p>Inspect or mutate active playback on the current device (or target a specific device with <code>-d, --device &lt;NAME&gt;</code>).</p>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Flag</th><th>Description</th></tr>
+        <tr><td><code>-s, --status</code></td><td>Print current playback status (default when no action flag is given)</td></tr>
+        <tr><td><code>-t, --toggle</code></td><td>Toggle play / pause</td></tr>
+        <tr><td><code>-n, --next</code></td><td>Skip forward (repeatable: <code>-nnn</code> skips 3 songs forward)</td></tr>
+        <tr><td><code>-p, --previous</code></td><td>Skip backward (<code>-p</code> restarts current track; <code>-pp</code> jumps to previous song)</td></tr>
+        <tr><td><code>--seek &lt;±SECONDS&gt;</code></td><td>Seek relative (<code>+10</code>, <code>-10</code>) or absolute (<code>10</code>) seconds in the current track</td></tr>
+        <tr><td><code>-v, --volume &lt;1..100&gt;</code></td><td>Set device volume percentage</td></tr>
+        <tr><td><code>--like</code> / <code>--dislike</code></td><td>Save or remove the currently playing song from Liked Songs</td></tr>
+        <tr><td><code>--shuffle</code> / <code>--repeat</code></td><td>Toggle shuffle mode or cycle repeat state</td></tr>
+        <tr><td><code>--transfer &lt;DEVICE&gt;</code></td><td>Transfer active playback to <code>DEVICE</code></td></tr>
+        <tr><td><code>--share-track</code> / <code>--share-album</code></td><td>Print the Spotify share URL for the current track or album</td></tr>
+      </table>
+    </div>
+
+    <h2 id="cli-play"><code>sptune play</code> (alias: <code>p</code>)</h2>
+    <p>Start playback by Spotify URI or by searching the first match in a category.</p>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Flag</th><th>Description</th></tr>
+        <tr><td><code>-u, --uri &lt;URI&gt;</code></td><td>Play a Spotify URI directly (type is inferred automatically)</td></tr>
+        <tr><td><code>-n, --name &lt;NAME&gt;</code></td><td>Play the first match for <code>NAME</code> (requires one of <code>--track</code>, <code>--album</code>, <code>--artist</code>, <code>--playlist</code>, <code>--show</code>)</td></tr>
+        <tr><td><code>-t, --track</code> / <code>-b, --album</code> / <code>-a, --artist</code> / <code>-p, --playlist</code> / <code>-w, --show</code></td><td>Category selector when playing by <code>--name</code></td></tr>
+        <tr><td><code>-q, --queue</code></td><td>Add matching track to the playback queue instead of starting immediately (tracks only)</td></tr>
+        <tr><td><code>-r, --random</code></td><td>Start playback at a random song inside the matched playlist (playlists only)</td></tr>
+      </table>
+    </div>
+
+    <h2 id="cli-list"><code>sptune list</code> (alias: <code>l</code>) &amp; <code>sptune search</code> (alias: <code>s</code>)</h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Command &amp; Flags</th><th>Description</th></tr>
+        <tr><td><code>sptune list --devices</code> (<code>-d</code>)</td><td>List available Spotify Connect devices (default format: <code>%v% %d</code>)</td></tr>
+        <tr><td><code>sptune list --playlists</code> (<code>-p</code>)</td><td>List your saved playlists (default format: <code>%p (%u)</code>)</td></tr>
+        <tr><td><code>sptune list --liked [--limit 1..50]</code></td><td>List your liked songs (default format: <code>%t - %a (%u)</code>)</td></tr>
+        <tr><td><code>sptune search &lt;QUERY&gt; --tracks|--albums|--artists|--playlists|--shows [--limit 1..50]</code></td><td>Search Spotify in the specified category and format each result with <code>-f, --format</code></td></tr>
+        <tr><td><code>sptune clean-cache</code></td><td>Delete <code>~/.config/sptune/library_cache.json</code> and <code>playlist_cache_v2.json</code></td></tr>
+      </table>
+    </div>
+
+    <h2 id="cli-format">Format string specifiers (<code>-f, --format</code>)</h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Token</th><th>Expands To</th><th>Token</th><th>Expands To</th></tr>
+        <tr><td><code>%t</code></td><td>Track title</td><td><code>%s</code></td><td>Playback status icon (playing / paused)</td></tr>
+        <tr><td><code>%a</code></td><td>Artist name(s)</td><td><code>%f</code></td><td>Active flags (shuffle, repeat, liked)</td></tr>
+        <tr><td><code>%b</code></td><td>Album title</td><td><code>%v</code></td><td>Device volume percentage</td></tr>
+        <tr><td><code>%p</code></td><td>Playlist name</td><td><code>%d</code></td><td>Current Spotify Connect device name</td></tr>
+        <tr><td><code>%h</code></td><td>Podcast show name</td><td><code>%r</code> / <code>%u</code></td><td>Progress timer (<code>%r</code>) / Spotify URI (<code>%u</code>)</td></tr>
+      </table>
+    </div>
+
+    <footer class="article-footer">
+      <nav class="pager-grid" aria-label="Pagination">
+        <a class="pager-link" href="#page-keyboard">
+          <span class="pager-dir">&larr; Previous</span>
+          <span class="pager-title">Keyboard shortcuts</span>
+        </a>
+        <a class="pager-link next" href="#page-configuration">
+          <span class="pager-dir">Next &rarr;</span>
+          <span class="pager-title">Configuration (YAML)</span>
+        </a>
+      </nav>
+    </footer>
+  </section>
+
+  <!-- ==================== 7. CONFIGURATION (YAML) ==================== -->
+  <section class="doc-page" id="page-configuration">
+    <header class="article-header">
+      <h1 id="configuration">Configuration (YAML)</h1>
+      <p class="article-lede">Complete schema for <code>~/.config/sptune/config.yml</code> and companion state files.</p>
+    </header>
+
+    <h2 id="cfg-files">Configuration &amp; cache directory layout</h2>
+    <p>All user configuration and cache files live under <code>~/.config/sptune/</code> (or the custom path passed to <code>sptune --config &lt;PATH&gt;</code>):</p>
+    <div class="table-scroll">
+      <table>
+        <tr><th>File</th><th>Purpose</th></tr>
+        <tr><td><code>config.yml</code></td><td>User-editable configuration: <code>behavior:</code>, <code>keybindings:</code>, <code>theme:</code>, <code>terminal:</code>, <code>platform:</code>, <code>spotify:</code>, and <code>soloist:</code></td></tr>
+        <tr><td><code>client.yml</code></td><td>Spotify PKCE <code>client_id</code>, callback <code>port</code> (default <code>8888</code>), and optional <code>soloist_api_key</code></td></tr>
+        <tr><td><code>.spotify_token_cache.json</code></td><td>Cached OAuth 2.0 PKCE access &amp; refresh token (auto-refreshed with <code>refresh_token</code> carry-over)</td></tr>
+        <tr><td><code>state.json</code></td><td>Single-save session snapshot written on clean exit (gear-menu toggles, sidebar dimensions, last page/sort/track, custom "For You" playlists)</td></tr>
+        <tr><td><code>library_cache.json</code> / <code>playlist_cache_v2.json</code></td><td>7-day metadata caches for library lists and up to 20 LRU playlists</td></tr>
+        <tr><td><code>chromium_flags.yml</code></td><td>Optional custom Chromium startup flags override for the official Spotify desktop app</td></tr>
+        <tr><td><code>sptune.log</code></td><td>Timestamped runtime error &amp; warning log (auto-rotated to <code>sptune.log.old</code> at 1 MiB)</td></tr>
+      </table>
+    </div>
+    <h2 id="cli-backup">Backup, Tray Popover &amp; Dedicated Window</h2>
+    <ul>
+      <li><strong>Backup CLI:</strong> Export all playlists and Liked Songs to CSV (and optionally JSON) with <code>sptune backup --dir ./sptune-backup --json</code>.</li>
+      <li><strong>Tray Popover &amp; Window Mode:</strong> Native Linux <code>StatusNotifierItem</code> tray icon with a pre-warmed GTK3 mini-player (<code>sptune --mini-popup</code>) and <code>sptune --window</code> to launch in a dedicated terminal window for independent minimize-to-tray (<kbd>_</kbd> or <code>[_]</code>).</li>
+    </ul>
+
+    <h2 id="cfg-behavior"><code>behavior:</code> <span class="cfg-badge">config.yml</span></h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Field</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>seek_milliseconds:</code></td><td><code>1000</code></td><td>Step size (ms) for <kbd>&lt;</kbd> and <kbd>&gt;</kbd> seek keys</td></tr>
+        <tr><td><code>volume_increment:</code></td><td><code>10</code></td><td>Volume percentage step (<code>1..100</code>) for <kbd>-</kbd> and <kbd>+</kbd></td></tr>
+        <tr><td><code>tick_rate_milliseconds:</code></td><td><code>250</code></td><td>Event loop tick interval in ms (must be <code>&lt; 1000</code>)</td></tr>
+        <tr><td><code>playback_poll_secs:</code></td><td><code>5</code></td><td>Web API playback poll interval in seconds while playing (clamped <code>1..30</code>; suspended when Soloist WebSocket is active)</td></tr>
+        <tr><td><code>enable_mouse:</code></td><td><code>true</code></td><td>Enable mouse clicks, wheel scrolling, hover highlights, and drag gestures</td></tr>
+        <tr><td><code>enable_animations:</code></td><td><code>true</code></td><td>Enable hover row highlights and interactive sidebar resize handles</td></tr>
+        <tr><td><code>enable_text_emphasis:</code></td><td><code>true</code></td><td>Apply bold emphasis styling to highlighted text</td></tr>
+        <tr><td><code>enforce_wide_search_bar:</code></td><td><code>false</code></td><td>Expand the top search bar width</td></tr>
+        <tr><td><code>set_window_title:</code></td><td><code>true</code></td><td>Set the terminal window title to <code>sptune</code></td></tr>
+        <tr><td><code>seek_by_typing:</code></td><td><code>false</code></td><td>Allow opening a timestamp dialog to seek directly by typing</td></tr>
+        <tr><td><code>show_album_column:</code> / <code>show_artist_column:</code> / <code>show_length_column:</code> / <code>show_date_added_column:</code></td><td><code>true</code> / <code>false</code> / <code>true</code> / <code>true</code></td><td>Default visibility for song table columns</td></tr>
+        <tr><td><code>enable_add_to_playlist:</code> / <code>enable_remove_from_playlist:</code></td><td><code>true</code> / <code>false</code></td><td>Show trailing <code>+</code>/<code>✓</code> or <code>✕</code> action column in track tables</td></tr>
+        <tr><td><code>max_display_length:</code></td><td><code>0</code> (unlimited)</td><td>Cap Title, Artist, and Album column display width (characters) before ellipsizing</td></tr>
+        <tr><td><code>liked_icon:</code> / <code>in_playlist_icon:</code> / <code>playing_icon:</code> / <code>paused_icon:</code></td><td><code>"♥"</code> / <code>"✓"</code> / <code>"▶"</code> / <code>"⏸"</code></td><td>Status glyphs rendered in tables and playbar</td></tr>
+        <tr><td><code>shuffle_icon:</code> / <code>repeat_track_icon:</code> / <code>repeat_context_icon:</code></td><td><code>"🔀"</code> / <code>"🔂"</code> / <code>"🔁"</code></td><td>Transport state glyphs rendered in the playbar</td></tr>
+      </table>
+    </div>
+
+    <h2 id="cfg-theme"><code>theme:</code> <span class="cfg-badge">config.yml</span></h2>
+    <p>Every slot accepts a named ANSI color (<code>Reset</code>, <code>Black</code>, <code>Red</code>, <code>Green</code>, <code>Yellow</code>, <code>Blue</code>, <code>Magenta</code>, <code>Cyan</code>, <code>Gray</code>, <code>DarkGray</code>, <code>LightRed</code>, <code>LightGreen</code>, <code>LightYellow</code>, <code>LightBlue</code>, <code>LightMagenta</code>, <code>LightCyan</code>, <code>White</code>) or a comma-separated RGB string (<code>"29, 185, 84"</code>):</p>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Field</th><th>Default</th><th>What It Styles</th></tr>
+        <tr><td><code>active:</code></td><td><code>Cyan</code></td><td>Focused panel titles/borders and the currently playing track row</td></tr>
+        <tr><td><code>banner:</code></td><td><code>LightCyan</code></td><td>Header banner base style</td></tr>
+        <tr><td><code>header:</code></td><td><code>Cyan</code></td><td>Column headers in track and library tables</td></tr>
+        <tr><td><code>selected:</code></td><td><code>LightCyan</code></td><td>Selected row highlight in lists and tables</td></tr>
+        <tr><td><code>hovered:</code></td><td><code>Magenta</code></td><td>Mouse-hovered row background and hovered panel borders</td></tr>
+        <tr><td><code>text:</code></td><td><code>Reset</code></td><td>Primary body text and track titles</td></tr>
+        <tr><td><code>inactive:</code></td><td><code>Gray</code></td><td>Secondary columns (artist, album, date, length) and inactive hints</td></tr>
+        <tr><td><code>hint:</code></td><td><code>Yellow</code></td><td>Keybinding and UI hints</td></tr>
+        <tr><td><code>load_more:</code></td><td><code>Yellow</code></td><td><code>Load more...</code> pagination rows</td></tr>
+        <tr><td><code>playbar_background:</code></td><td><code>Black</code></td><td>Playbar progress bar track background</td></tr>
+        <tr><td><code>playbar_progress:</code></td><td><code>LightCyan</code></td><td>Playbar progress bar fill and scrollbar thumb</td></tr>
+        <tr><td><code>playbar_progress_text:</code></td><td><code>LightCyan</code></td><td>Elapsed/total time label in the playbar</td></tr>
+        <tr><td><code>playbar_text:</code></td><td><code>Reset</code></td><td>Track title and artist text in the playbar</td></tr>
+        <tr><td><code>error_border:</code></td><td><code>Red</code></td><td>Border of the API error screen</td></tr>
+        <tr><td><code>error_text:</code></td><td><code>LightRed</code></td><td>Error message text on the API error screen</td></tr>
+        <tr><td><code>background:</code></td><td><code>"0, 0, 0"</code></td><td>Full-screen terminal background fill</td></tr>
+      </table>
+    </div>
+
+    <h2 id="cfg-terminal"><code>terminal:</code> &amp; <code>platform:</code> <span class="cfg-badge">config.yml</span></h2>
+    <p>Top-level <code>terminal:</code> settings apply globally; optional <code>platform.windows:</code> and <code>platform.linux:</code> blocks override any <code>terminal:</code> field per OS.</p>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Field</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>enable_mouse:</code></td><td><code>true</code></td><td>Enable terminal mouse capture</td></tr>
+        <tr><td><code>progress_seek:</code></td><td><code>true</code></td><td>Allow clicking and dragging the playbar scrubber to seek</td></tr>
+        <tr><td><code>unicode_borders:</code></td><td><code>true</code> (Linux) / <code>false</code> (Win)</td><td>Use rounded Unicode box borders instead of plain ASCII borders</td></tr>
+        <tr><td><code>truecolor:</code></td><td><code>true</code></td><td>Use 24-bit RGB colors (when <code>false</code>, RGB colors automatically downgrade to nearest 16-color ANSI)</td></tr>
+        <tr><td><code>alt_screen:</code></td><td><code>true</code></td><td>Enter alternate terminal screen buffer on startup</td></tr>
+        <tr><td><code>mouse_y_offset:</code></td><td><code>0</code></td><td>Vertical row offset calibration for mouse hit-testing</td></tr>
+      </table>
+    </div>
+
+    <h2 id="cfg-example">Example <code>config.yml</code> (Green aesthetic)</h2>
+    <div class="code-block">
+      <div class="code-bar">
+        <span class="code-title">~/.config/sptune/config.yml</span>
+        <button type="button" class="copy-btn">Copy</button>
+      </div>
+      <div class="tab-pane active">
+        <pre><span class="key">theme:</span>
+  <span class="key">active:</span> <span class="str">"29, 185, 84"</span>
+  <span class="key">banner:</span> <span class="str">"30, 215, 96"</span>
+  <span class="key">header:</span> <span class="str">"29, 185, 84"</span>
+  <span class="key">hovered:</span> <span class="str">"30, 215, 96"</span>
+  <span class="key">load_more:</span> <span class="str">"155, 240, 180"</span>
+  <span class="key">playbar_progress:</span> <span class="str">"29, 185, 84"</span>
+  <span class="key">playbar_progress_text:</span> <span class="str">"155, 240, 180"</span>
+  <span class="key">selected:</span> <span class="str">"White"</span>
+  <span class="key">background:</span> <span class="str">"0, 0, 0"</span>
+
+<span class="key">behavior:</span>
+  <span class="key">seek_milliseconds:</span> 5000
+  <span class="key">volume_increment:</span> 5
+  <span class="key">playback_poll_secs:</span> 5
+  <span class="key">enable_mouse:</span> true
+  <span class="key">enable_animations:</span> true
+  <span class="key">restore_settings:</span> true
+  <span class="key">show_artist_column:</span> true
+  <span class="key">show_album_column:</span> true
+  <span class="key">show_date_added_column:</span> true
+
+<span class="key">keybindings:</span>
+  <span class="key">back:</span> <span class="str">"q"</span>
+  <span class="key">toggle_playback:</span> <span class="str">"space"</span>
+  <span class="key">search:</span> <span class="str">"/"</span>
+  <span class="key">search_in_playlist:</span> <span class="str">"ctrl-f"</span>
+  <span class="key">toggle_sidebar:</span> <span class="str">"\\"</span>
+  <span class="key">music_view:</span> <span class="str">"tab"</span>
+
+<span class="key">soloist:</span>
+  <span class="key">enabled:</span> true
+  <span class="key">device_name:</span> <span class="str">"sptune"</span>
+
+<span class="key">spotify:</span>
+  <span class="key">auto_launch:</span> false
+  <span class="key">use_chromium_flags:</span> true
+  <span class="key">suspend_children:</span> true
+  <span class="key">trim_working_set:</span> true
+  <span class="key">memory_limit_mb:</span> 150</pre>
+      </div>
+    </div>
+
+    <footer class="article-footer">
+      <nav class="pager-grid" aria-label="Pagination">
+        <a class="pager-link" href="#page-cli">
+          <span class="pager-dir">&larr; Previous</span>
+          <span class="pager-title">CLI Reference</span>
+        </a>
+        <a class="pager-link next" href="#page-soloist">
+          <span class="pager-dir">Next &rarr;</span>
+          <span class="pager-title">Soloist (Headless Linux)</span>
+        </a>
+      </nav>
+    </footer>
+  </section>
+
+  <!-- ==================== 8. SOLOIST (HEADLESS LINUX) ==================== -->
+  <section class="doc-page" id="page-soloist">
+    <header class="article-header">
+      <h1>Soloist (Headless Linux)</h1>
+      <p class="article-lede">Official headless Spotify Connect audio playback on Linux with real-time local WebSocket state streaming.</p>
+    </header>
+
+    <h2 id="soloist-overview">How Soloist works with <code>sptune</code></h2>
+    <p><strong>Soloist</strong> is Spotify's official headless Connect client for Linux (<code>x86_64</code> and <code>aarch64</code> / Raspberry Pi). Unlike unofficial streaming daemons, Soloist is published by Spotify and pairs with a personal Developer API key:</p>
+    <ul>
+      <li><strong>Isolated child lifecycle:</strong> When <code>soloist.enabled: true</code>, <code>sptune</code> spawns <code>soloist --device-name &lt;name&gt; --api-key &lt;key&gt;</code> using an isolated data directory (<code>~/.config/sptune/soloist</code>) so it never conflicts with a standalone Soloist instance.</li>
+      <li><strong>Automatic playback transfer:</strong> After the first render and whenever Soloist logs in over its local WebSocket, <code>sptune</code> automatically dispatches <code>TransferPlaybackToDeviceName</code> and targets Soloist on playback.</li>
+      <li><strong>Optional keep-alive on exit:</strong> Toggle <em>Keep Soloist running on exit</em> in the <kbd>?</kbd> Settings menu (<code>soloist.keep_running</code>) so music can keep playing in the background after quitting <code>sptune</code> without spawning duplicate instances on restart.</li>
+      <li><strong>One-time Zeroconf pairing (Linux):</strong> On a fresh <code>~/.config/sptune/soloist</code> directory, ensure mDNS is running (<code>sudo systemctl enable --now avahi-daemon</code>), launch <code>sptune</code>, and select your Soloist device once in the official Spotify desktop or mobile Connect picker on the same LAN. After that one-time pairing, Soloist persists its session and logs in automatically on every future run. Diagnostics are written to <code>~/.config/sptune/soloist/soloist.log</code>.</li>
+    </ul>
+
+    <h2 id="soloist-setup">Interactive &amp; manual setup</h2>
+    <p>On a fresh Linux install, <code>sptune</code> automatically launches the interactive Soloist setup wizard. You can re-run it at any time with:</p>
+    <div class="code-block">
+      <div class="code-bar">
+        <span class="code-title">Run interactive Soloist wizard</span>
+        <button type="button" class="copy-btn">Copy</button>
+      </div>
+      <div class="tab-pane active">
+        <pre><span class="cmd">sptune</span> --setup-soloist</pre>
+      </div>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <tr><th>Step</th><th>Details</th></tr>
+        <tr><td><strong>1. Generate your API key</strong></td><td>Visit <a href="https://developer.spotify.com/dashboard/soloist">developer.spotify.com/dashboard/soloist</a> (requires Spotify Premium) to generate your personal Soloist API key. Set it via <code>SOLOIST_API_KEY</code> in your environment or <code>soloist_api_key:</code> in <code>~/.config/sptune/client.yml</code>.</td></tr>
+        <tr><td><strong>2. Install Soloist binary</strong></td><td>Let <code>sptune --setup-soloist</code> download the official archive for your CPU architecture, or download it from <a href="https://developer.spotify.com/documentation/soloist/reference/downloads-and-updates">Spotify Soloist Downloads</a> (do not redistribute) and place <code>soloist</code> on your <code>PATH</code>. <strong>Note: official Soloist builds expire after 90 days.</strong></td></tr>
+        <tr><td><strong>3. One-time LAN pairing</strong></td><td>On first launch, open the official Spotify <strong>desktop or mobile app</strong> on the same local network, open the <strong>Devices</strong> picker, and select <code>sptune</code> once — after that it stays paired and playback transfer works automatically. The web player cannot pair it because browsers cannot discover LAN devices.</td></tr>
+      </table>
+    </div>
+
+    <p>If Soloist is enabled without a key or binary, <code>sptune</code> prints a hint and continues normally.</p>
+
+    <h2 id="soloist-ws">Local WebSocket state &amp; control stream (<code>soloist_ws.rs</code>)</h2>
+    <p><code>sptune</code> connects to Soloist's local WebSocket server (discovered via <code>~/.config/sptune/soloist/ws.port</code>):</p>
+    <ul>
+      <li><strong>Zero-poll real-time updates &amp; local commands:</strong> Track metadata, playback position, play/pause state, volume, shuffle, and repeat are pushed over the local socket into <code>CurrentPlaybackContext</code>, and interactive playback commands are sent over the same low-latency connection.</li>
+      <li><strong>Automatic fallback:</strong> While Soloist is the active device, the 5-second Web API playback poll is suspended (<code>soloist_live = true</code>), saving API quota. If you transfer playback to another device or Soloist exits, <code>sptune</code> seamlessly resumes Web API polling.</li>
+    </ul>
+
+    <h2 id="soloist-config"><code>soloist:</code> <span class="cfg-badge">config.yml</span></h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Field</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>enabled:</code></td><td><code>false</code></td><td>Spawn and manage the headless <code>soloist</code> process on startup</td></tr>
+        <tr><td><code>device_name:</code></td><td><code>"sptune"</code></td><td>Spotify Connect device name advertised by Soloist and targeted for auto-transfer</td></tr>
+        <tr><td><code>binary_path:</code></td><td><code>""</code></td><td>Optional explicit path to the <code>soloist</code> executable (when empty, searched in <code>~/.config/sptune/soloist/</code> and <code>PATH</code>)</td></tr>
+        <tr><td><code>keep_running:</code></td><td><code>false</code></td><td>Keep the spawned <code>soloist</code> process running in the background after <code>sptune</code> exits</td></tr>
+      </table>
+    </div>
+
+    <footer class="article-footer">
+      <nav class="pager-grid" aria-label="Pagination">
+        <a class="pager-link" href="#page-configuration">
+          <span class="pager-dir">&larr; Previous</span>
+          <span class="pager-title">Configuration (YAML)</span>
+        </a>
+        <a class="pager-link next" href="#page-desktop">
+          <span class="pager-dir">Next &rarr;</span>
+          <span class="pager-title">Desktop Optimization</span>
+        </a>
+      </nav>
+    </footer>
+  </section>
+
+  <!-- ==================== 9. DESKTOP OPTIMIZATION ==================== -->
+  <section class="doc-page" id="page-desktop">
+    <header class="article-header">
+      <h1>Desktop Optimization</h1>
+      <p class="article-lede">Tame the official Spotify desktop Electron app with lean Chromium flags, child-process suspension, working-set memory trimming, and Linux cgroup v2 caps.</p>
+    </header>
+
+    <h2 id="desktop-overview">Why optimize the desktop client?</h2>
+    <p>If you use the official Spotify desktop client as your local audio output device while gaming or running heavy workloads, its stock Electron/Chromium process tree can consume hundreds of MB of RAM and background GPU/renderer CPU cycles, even when minimized. <code>sptune</code> includes built-in OS controls (<code>src/platform/</code>) to strip the desktop client down to a minimal audio engine.</p>
+
+    <div class="note-box">
+      <p><span class="note-label">Note</span>The best optimization is still using another active device like a phone or Soloist, which consumes much less than an Electron app running directly on the system you are using.</p>
+    </div>
+
+    <h2 id="desktop-settings">Live controls in <code>sptune</code> Settings</h2>
+    <p>You can toggle every desktop optimization live from the <code>⚙️</code> Settings menu (or <kbd>?</kbd>) without editing <code>config.yml</code>:</p>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Setting</th><th>What It Does</th></tr>
+        <tr><td><strong>Spotify auto-launch</strong></td><td>Starts the official Spotify desktop client automatically when <code>sptune</code> opens</td></tr>
+        <tr><td><strong>Use Chromium flags</strong></td><td>Launches Spotify with the lean flag preset (or your <code>~/.config/sptune/chromium_flags.yml</code> override)</td></tr>
+        <tr><td><strong>Suspend children</strong></td><td>Suspends idle Chromium renderer/helper processes on the 4-second sweeper while keeping audio playing</td></tr>
+        <tr><td><strong>Trim working set</strong></td><td>Periodically reclaims idle resident memory pages from Spotify's process tree</td></tr>
+        <tr><td><strong>Memory limit (MB)</strong></td><td>Sets the Linux cgroup v2 memory cap across Spotify PIDs (default <code>150 MB</code>; <code>0</code> disables)</td></tr>
+        <tr><td><strong>Playbar <code>Processes</code> pill</strong></td><td>Click the <code>Processes</code> indicator in the playbar to suspend or resume Spotify helper processes immediately</td></tr>
+      </table>
+    </div>
+
+    <h2 id="desktop-flags">Lean Chromium startup flags (<code>chromium_flags.rs</code>)</h2>
+    <p>When <code>spotify.auto_launch: true</code> and <code>spotify.use_chromium_flags: true</code> are enabled, <code>sptune</code> launches Spotify with a curated flag preset that disables background networking, GPU compositing overhead, disk caches, and telemetry. You can override the preset by creating <code>~/.config/sptune/chromium_flags.yml</code> (see <code>chromium_flags.yml.example</code> in the repo root):</p>
+    <div class="code-block">
+      <div class="code-bar">
+        <span class="code-title">~/.config/sptune/chromium_flags.yml (custom override example)</span>
+        <button type="button" class="copy-btn">Copy</button>
+      </div>
+      <div class="tab-pane active">
+        <pre><span class="key">flags:</span>
+  - <span class="str">"--disable-gpu"</span>
+  - <span class="str">"--disable-software-rasterizer"</span>
+  - <span class="str">"--disable-background-networking"</span>
+  - <span class="str">"--disk-cache-size=1"</span>
+  - <span class="str">"--media-cache-size=1"</span></pre>
+      </div>
+    </div>
+
+    <h2 id="desktop-sweeper">4-second process sweeper &amp; memory caps</h2>
+    <p>Because Spotify spawns helper processes several seconds after startup (and may have been launched outside <code>sptune</code>), a background sweeper thread runs every 4 seconds while the UI is active:</p>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Mechanism</th><th>Platform</th><th>Behavior</th></tr>
+        <tr><td><strong>Child Process Suspension (<code>suspend_children</code>)</strong></td><td>Linux &amp; Windows</td><td>Suspends non-audio Chromium child/renderer processes (<code>SIGSTOP</code> / <code>NtSuspendProcess</code>), tracking PIDs in an in-memory registry so each helper is suspended once and resumed cleanly when toggled. The playbar <code>Suspend/Resume Processes</code> pill is hidden by default; enable it from the <code>⚙️</code> Settings menu.</td></tr>
+        <tr><td><strong>Working-Set Trim (<code>trim_working_set</code>)</strong></td><td>Linux &amp; Windows</td><td>Reclaims idle resident memory pages from Spotify's process tree (<code>EmptyWorkingSet</code> on Windows, <code>process_madvise</code> / page reclaim on Linux).</td></tr>
+        <tr><td><strong>cgroup v2 Memory Limit (<code>memory_limit_mb</code>)</strong></td><td>Linux</td><td>Places all Spotify PIDs into a dedicated user cgroup with <code>memory_limit_mb</code> (default <code>150 MB</code>), preventing Electron cache growth.</td></tr>
+      </table>
+    </div>
+
+    <h2 id="desktop-config"><code>spotify:</code> <span class="cfg-badge">config.yml</span></h2>
+    <div class="table-scroll">
+      <table>
+        <tr><th>Field</th><th>Default</th><th>Description</th></tr>
+        <tr><td><code>auto_launch:</code></td><td><code>false</code></td><td>Automatically launch the Spotify desktop client when <code>sptune</code> starts</td></tr>
+        <tr><td><code>binary_path:</code></td><td><code>""</code> (auto-detect)</td><td>Optional explicit path to the Spotify desktop executable</td></tr>
+        <tr><td><code>use_chromium_flags:</code></td><td><code>false</code></td><td>Pass lean Chromium flags (or <code>~/.config/sptune/chromium_flags.yml</code>) when launching Spotify</td></tr>
+        <tr><td><code>suspend_children:</code></td><td><code>false</code></td><td>Automatically suspend non-essential Spotify child processes in the 4s sweeper</td></tr>
+        <tr><td><code>trim_working_set:</code></td><td><code>false</code></td><td>Periodically trim Spotify's resident working-set memory</td></tr>
+        <tr><td><code>memory_limit_mb:</code></td><td><code>150</code></td><td>Linux cgroup v2 memory cap in MiB (<code>0</code> disables the limit)</td></tr>
+      </table>
+    </div>
+
+    <footer class="article-footer">
+      <nav class="pager-grid" aria-label="Pagination">
+        <a class="pager-link" href="#page-soloist">
+          <span class="pager-dir">&larr; Previous</span>
+          <span class="pager-title">Soloist (Headless Linux)</span>
+        </a>
+        <a class="pager-link next" href="#page-diagnostics">
+          <span class="pager-dir">Next &rarr;</span>
+          <span class="pager-title">Architecture &amp; Profiling</span>
+        </a>
+      </nav>
+    </footer>
+  </section>
+
+  <!-- ==================== 10. ARCHITECTURE & PROFILING ==================== -->
+  <section class="doc-page" id="page-diagnostics">
+    <header class="article-header">
+      <h1>Architecture &amp; Profiling</h1>
+      <p class="article-lede">Core engineering invariants, click-to-play URI offset resolution, cache design, and the Criterion / Iai-Callgrind benchmark suite.</p>
+    </header>
+
+    <h2 id="arch-invariants">Event loop &amp; render pipeline invariants</h2>
+    <ul>
+      <li><strong>Unlocked input wait &amp; batching:</strong> <code>start_ui()</code> waits on <code>events.next()</code> <em>before</em> locking <code>Arc&lt;Mutex&lt;App&gt;&gt;</code> so the background <code>Network</code> thread is never starved, then drains all queued events via <code>events.try_next()</code> into a single batch before drawing one frame.</li>
+      <li><strong>Viewport-only table building (<code>tui/tables.rs</code>):</strong> <code>draw_song_table</code> filters tracks in a single O(N) pass with a pre-lowercased needle (<code>App::track_matches_needle</code>), calls <code>Utc::now()</code> once per frame, and builds <code>TableItem</code>s only for the visible window <code>[offset..offset + viewport]</code>.</li>
+      <li><strong>Cassowary-free direct buffer rendering (<code>tui/widgets.rs</code>):</strong> <code>draw_table_window</code> writes header and visible row cells directly into <code>Frame::buffer_mut()</code> at fixed column offsets, bypassing <code>ratatui::widgets::Table::render</code> and its <code>kasuari</code> constraint solver. Main layout, header, and sidebar splits use direct integer <code>Rect</code> arithmetic.</li>
+    </ul>
+
+    <h2 id="playback-offset">Click-to-Play URI offset invariant</h2>
+    <p>Clicking or pressing <kbd>Enter</kbd> on a song inside a playlist uses <strong><code>Offset::Uri</code></strong> via <code>IoEvent::StartPlaybackAt(context_uri, track_uri)</code> instead of a numeric index (<code>Offset::Position</code>):</p>
+    <div class="code-block">
+      <div class="code-bar">
+        <span class="code-title">Playlist click-to-play dispatch path</span>
+        <button type="button" class="copy-btn">Copy</button>
+      </div>
+      <div class="tab-pane active">
+        <pre>IoEvent::StartPlaybackAt(context_uri, track_uri)
+  ──► Network::start_playback_at()
+    ──► spotify.start_context_playback(cid, device, Some(Offset::Uri(track_uri)), None)</pre>
+      </div>
+    </div>
+    <p><strong>Why:</strong> Numeric positions computed from <code>track_table_raw_index</code> drifted from Spotify's internal index whenever the local disk cache held stale <code>is_playable: false</code> flags or when the user sorted a playlist client-side (e.g., by <code>Date Added</code> or <code>Title</code>). Resolving by track URI in <code>MyPlaylists</code>, <code>PlaylistSearch</code>, and <code>MadeForYou</code> guarantees the exact displayed track plays every time.</p>
+
+    <h2 id="caches">Coalesced caches &amp; Developer Request Log</h2>
+    <ul>
+      <li><strong>Zero-clone cache reads:</strong> <code>LibraryCache::get_typed</code> deserializes directly from borrowed <code>&amp;entry.items</code> (<code>Vec::&lt;T&gt;::deserialize(&amp;entry.items)</code>) without cloning the <code>serde_json::Value</code> tree.</li>
+      <li><strong>Coalesced async playlist writes:</strong> <code>PlaylistCache::update</code> caps cached playlists at 20 (evicting oldest <code>fetched_at</code> LRU) and coalesces disk writes onto a background thread so multi-page playlist loads never block the <code>Network</code> runtime.</li>
+      <li><strong>Developer Request Log:</strong> Enable <strong>Developer View</strong> in the <code>⚙️</code> Settings menu to open a live 25% right-hand split showing token-bucket rate-limit capacity, cooldowns, and timestamp-grouped Web API requests.</li>
+    </ul>
+
+    <h2 id="benches-profiling">Benchmarks, CI gates &amp; profiling</h2>
+    <p>Pull requests are gated in CI by deterministic <code>iai-callgrind</code> instruction counts (must not regress <code>Ir</code> &gt; 2%), strict <code>clippy</code> with <code>-D warnings</code>, and the unit test suite:</p>
+
+    <div class="code-block">
+      <div class="code-bar">
+        <div class="tab-list" role="tablist">
+          <button type="button" class="tab-btn active" role="tab">Verification &amp; CI gates</button>
+          <button type="button" class="tab-btn" role="tab">Benchmarks &amp; perf</button>
+        </div>
+        <button type="button" class="copy-btn">Copy</button>
+      </div>
+
+      <div class="tab-pane active">
+        <pre><span class="comment"># Formatting check (2-space rustfmt gate)</span>
+<span class="cmd">rustfmt</span> --check benches/*.rs src/lib.rs src/tui/*.rs
+
+<span class="comment"># Zero-warning Clippy across lib, bin, tests, and benches</span>
+<span class="cmd">cargo clippy</span> --all-targets -- -D warnings
+
+<span class="comment"># Full unit test suite (lib + bin tests)</span>
+<span class="cmd">RUSTFLAGS</span>=<span class="str">"-D warnings"</span> <span class="cmd">cargo test</span> --locked</pre>
+      </div>
+
+      <div class="tab-pane">
+        <pre><span class="comment"># Deterministic instruction-count benchmark suite (Iai-Callgrind)</span>
+<span class="cmd">cargo bench</span> --bench iai
+
+<span class="comment"># Wall-clock Criterion suites (render, cache, tick, config)</span>
+<span class="cmd">cargo bench</span> --bench render --bench cache --bench tick -- --quick
+
+<span class="comment"># Linux perf + speedscope profile harness</span>
+<span class="cmd">scripts/profile.sh</span> bench playlist_remove_item</pre>
+      </div>
+    </div>
+
+    <footer class="article-footer">
+      <nav class="pager-grid" aria-label="Pagination">
+        <a class="pager-link" href="#page-desktop">
+          <span class="pager-dir">&larr; Previous</span>
+          <span class="pager-title">Desktop Optimization</span>
+        </a>
+        <a class="pager-link next" href="#page-overview">
+          <span class="pager-dir">Next &rarr;</span>
+          <span class="pager-title">Overview</span>
+        </a>
+      </nav>
+    </footer>
+  </section>
+
+</main>
+
+<aside class="toc" aria-label="On this page" style="visibility:hidden">
+  <div class="toc-title">On this page</div>
+  <ul class="toc-list">
+    <li style="display:none"><a class="toc-link" data-page="overview" href="#surfaces">Four integrated capabilities</a></li>
+    <li style="display:none"><a class="toc-link" data-page="overview" href="#design-goals">Design goals</a></li>
+    <li style="display:none"><a class="toc-link" data-page="overview" href="#architecture">Architecture</a></li>
+    <li style="display:none"><a class="toc-link" data-page="overview" href="#features">Feature matrix</a></li>
+
+    <li style="display:none"><a class="toc-link" data-page="requirements" href="#requirements">Core requirements</a></li>
+    <li style="display:none"><a class="toc-link" data-page="requirements" href="#os-deps">Feature-specific OS integrations</a></li>
+    <li style="display:none"><a class="toc-link" data-page="requirements" href="#limitations">Limitations and constraints</a></li>
+
+    <li style="display:none"><a class="toc-link" data-page="setup" href="#install">1. Build &amp; install from source</a></li>
+    <li style="display:none"><a class="toc-link" data-page="setup" href="#connect-spotify">2. Connect Spotify (PKCE)</a></li>
+    <li style="display:none"><a class="toc-link" data-page="setup" href="#first-run">3. First run &amp; device selection</a></li>
+    <li style="display:none"><a class="toc-link" data-page="setup" href="#troubleshooting">Troubleshooting</a></li>
+
+    <li style="display:none"><a class="toc-link" data-page="tui" href="#mouse-controls">Mouse interactions &amp; gestures</a></li>
+    <li style="display:none"><a class="toc-link" data-page="tui" href="#for-you">"For You" hub</a></li>
+    <li style="display:none"><a class="toc-link" data-page="tui" href="#lyrics-view">Music View (Synced Lyrics)</a></li>
+    <li style="display:none"><a class="toc-link" data-page="tui" href="#settings-menu">Live Gear Settings Menu</a></li>
+
+    <li style="display:none"><a class="toc-link" data-page="keyboard" href="#kb-navigation">Navigation &amp; panels</a></li>
+    <li style="display:none"><a class="toc-link" data-page="keyboard" href="#kb-playback">Playback &amp; transport</a></li>
+    <li style="display:none"><a class="toc-link" data-page="keyboard" href="#kb-search">Search &amp; playlist filter</a></li>
+    <li style="display:none"><a class="toc-link" data-page="keyboard" href="#kb-context">Library, playlists &amp; clipboard</a></li>
+
+    <li style="display:none"><a class="toc-link" data-page="cli" href="#cli-global">Top-level flags &amp; examples</a></li>
+    <li style="display:none"><a class="toc-link" data-page="cli" href="#cli-playback">sptune playback (pb)</a></li>
+    <li style="display:none"><a class="toc-link" data-page="cli" href="#cli-play">sptune play (p)</a></li>
+    <li style="display:none"><a class="toc-link" data-page="cli" href="#cli-list">sptune list &amp; search</a></li>
+    <li style="display:none"><a class="toc-link" data-page="cli" href="#cli-format">Format string specifiers</a></li>
+
+    <li style="display:none"><a class="toc-link" data-page="configuration" href="#cfg-files">Config &amp; cache files</a></li>
+    <li style="display:none"><a class="toc-link" data-page="configuration" href="#cfg-behavior">behavior:</a></li>
+    <li style="display:none"><a class="toc-link" data-page="configuration" href="#cfg-theme">theme:</a></li>
+    <li style="display:none"><a class="toc-link" data-page="configuration" href="#cfg-terminal">terminal: &amp; platform:</a></li>
+    <li style="display:none"><a class="toc-link" data-page="configuration" href="#cfg-example">Example config.yml</a></li>
+
+    <li style="display:none"><a class="toc-link" data-page="soloist" href="#soloist-overview">How Soloist works</a></li>
+    <li style="display:none"><a class="toc-link" data-page="soloist" href="#soloist-setup">Interactive &amp; manual setup</a></li>
+    <li style="display:none"><a class="toc-link" data-page="soloist" href="#soloist-ws">Local WebSocket state stream</a></li>
+    <li style="display:none"><a class="toc-link" data-page="soloist" href="#soloist-config">soloist:</a></li>
+
+    <li style="display:none"><a class="toc-link" data-page="desktop" href="#desktop-overview">Why optimize the desktop client?</a></li>
+    <li style="display:none"><a class="toc-link" data-page="desktop" href="#desktop-settings">Live controls in Settings</a></li>
+    <li style="display:none"><a class="toc-link" data-page="desktop" href="#desktop-flags">Lean Chromium startup flags</a></li>
+    <li style="display:none"><a class="toc-link" data-page="desktop" href="#desktop-sweeper">4-second sweeper &amp; memory caps</a></li>
+    <li style="display:none"><a class="toc-link" data-page="desktop" href="#desktop-config">spotify:</a></li>
+
+    <li style="display:none"><a class="toc-link" data-page="diagnostics" href="#arch-invariants">Event loop &amp; render invariants</a></li>
+    <li style="display:none"><a class="toc-link" data-page="diagnostics" href="#playback-offset">Click-to-Play URI offset</a></li>
+    <li style="display:none"><a class="toc-link" data-page="diagnostics" href="#caches">Coalesced caches &amp; Request Log</a></li>
+    <li style="display:none"><a class="toc-link" data-page="diagnostics" href="#benches-profiling">Benchmarks, CI gates &amp; perf</a></li>
+  </ul>
+</aside>
+
+</div>
+
+<div id="search-overlay" class="search-overlay" role="dialog" aria-modal="true" aria-label="Search documentation">
+  <div class="search-dialog">
+    <div class="search-bar">
+      <input type="text" id="search-input" placeholder="Search documentation, shortcuts, CLI flags, YAML keys, or Soloist..." autocomplete="off" />
+      <button type="button" id="search-esc" class="search-esc" aria-label="Close search">Esc</button>
+    </div>
+    <div id="search-list" class="search-list"></div>
+  </div>
+</div>
+
+<script src="app.js?v=2"></script>
+</body>
+</html>
