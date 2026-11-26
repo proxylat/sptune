@@ -83,8 +83,9 @@ bench)
   #   scripts/profile.sh bench "playlist_remove_item/585"
   need perf; need cargo
   filter=${2:?usage: profile.sh bench <criterion-filter>}
-  cargo bench --no-run --locked --bench cache || exit 1
-  bin=$(ls -t target/release/deps/cache-* | grep -v '\.' | head -1)
+  bin=$(cargo bench --no-run --locked --bench cache --message-format=json \
+    | python3 -c 'import sys,json; [print(m["executable"]) for line in sys.stdin if (m:=json.loads(line)).get("executable") and m.get("target",{}).get("name")=="cache"]' \
+    | tail -1)
   [ -x "$bin" ] || { echo "no cache bench binary" >&2; exit 1; }
   safe=$(echo "$filter" | tr -c 'a-zA-Z0-9' '_')
   sample "$OUT/$safe.perf.data" "$OUT/$safe.perf.txt" \

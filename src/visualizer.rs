@@ -467,20 +467,21 @@ impl VizWorker {
   fn spawn_windows() -> Option<Self> {
     use wasapi::*;
 
-    initialize_mta().ok()?;
+    initialize_mta().ok().ok()?;
     let enumerator = DeviceEnumerator::new().ok()?;
-    let device = enumerator.get_default_device(&Direction::Render).ok()?;
+    let device = enumerator.get_default_device(Direction::Render).ok()?;
     let mut audio_client = device.get_iaudioclient().ok()?;
-    let format = WaveFormat::new(32, 32, &SampleType::Float, VIZ_RATE as usize, 2, None);
+    let format = WaveFormat::new(32, 32, SampleType::Float, VIZ_RATE as usize, 2, None);
     let (_, min_period) = audio_client.get_device_period().ok()?;
     audio_client
       .initialize_client(
         &format,
-        &Direction::Capture,
-        &StreamMode::PollingShared {
+        Direction::Capture,
+        StreamMode::PollingShared {
           autoconvert: true,
           buffer_duration_hns: min_period,
         },
+        None,
       )
       .ok()?;
     let capture = audio_client.get_audiocaptureclient().ok()?;
