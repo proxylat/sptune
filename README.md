@@ -21,14 +21,17 @@ Powered by Spotify (music data from the Spotify Web API; Spotify is a trademark 
 <p align="center">
   <img src="docs/1.png" alt="Home View">
 </p>
+<p align="center">Home View</p>
 
 <p align="center">
   <img src="docs/2.png" alt="Music View">
 </p>
+<p align="center">Music View</p>
 
 <p align="center">
   <img src="docs/3.png" alt="Tray Popup">
 </p>
+<p align="center">Tray Popup</p>
 
 ## Why sptune
 

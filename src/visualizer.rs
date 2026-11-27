@@ -463,41 +463,58 @@ impl VizWorker {
   /// WASAPI loopback on the default render endpoint (system audio).
   /// Render endpoint + Capture direction + Shared = LOOPBACK flag inside
   /// `initialize_client`; autoconvert yields f32 stereo at 44.1kHz.
+  /// COM/WASAPI handles are `!Send`, so initialization runs on the capture thread.
   #[cfg(target_os = "windows")]
   fn spawn_windows() -> Option<Self> {
     use wasapi::*;
 
-    initialize_mta().ok().ok()?;
-    let enumerator = DeviceEnumerator::new().ok()?;
-    let device = enumerator.get_default_device(Direction::Render).ok()?;
-    let mut audio_client = device.get_iaudioclient().ok()?;
-    let format = WaveFormat::new(32, 32, SampleType::Float, VIZ_RATE as usize, 2, None);
-    let (_, min_period) = audio_client.get_device_period().ok()?;
-    audio_client
-      .initialize_client(
-        &format,
-        Direction::Capture,
-        StreamMode::PollingShared {
-          autoconvert: true,
-          buffer_duration_hns: min_period,
-        },
-        None,
-      )
-      .ok()?;
-    let capture = audio_client.get_audiocaptureclient().ok()?;
-    audio_client.start_stream().ok()?;
     let stop = Arc::new(AtomicBool::new(false));
     let levels = Arc::new(Mutex::new([0.0; VIZ_BINS]));
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<bool>(1);
     let thread = std::thread::Builder::new()
       .name("sptune-viz".into())
       .spawn({
         let stop = Arc::clone(&stop);
         let levels = Arc::clone(&levels);
         move || {
-          capture_loop_windows(audio_client, capture, stop, levels);
+          let init = || -> Option<(AudioClient, AudioCaptureClient)> {
+            initialize_mta().ok().ok()?;
+            let enumerator = DeviceEnumerator::new().ok()?;
+            let device = enumerator.get_default_device(Direction::Render).ok()?;
+            let mut audio_client = device.get_iaudioclient().ok()?;
+            let format = WaveFormat::new(32, 32, SampleType::Float, VIZ_RATE as usize, 2, None);
+            let (_, min_period) = audio_client.get_device_period().ok()?;
+            audio_client
+              .initialize_client(
+                &format,
+                Direction::Capture,
+                StreamMode::PollingShared {
+                  autoconvert: true,
+                  buffer_duration_hns: min_period,
+                },
+                None,
+              )
+              .ok()?;
+            let capture = audio_client.get_audiocaptureclient().ok()?;
+            audio_client.start_stream().ok()?;
+            Some((audio_client, capture))
+          };
+          match init() {
+            Some((audio_client, capture)) => {
+              let _ = ready_tx.send(true);
+              capture_loop_windows(audio_client, capture, stop, levels);
+            }
+            None => {
+              let _ = ready_tx.send(false);
+            }
+          }
         }
       })
       .ok()?;
+    if ready_rx.recv().ok() != Some(true) {
+      let _ = thread.join();
+      return None;
+    }
     Some(Self {
       stop,
       levels,
